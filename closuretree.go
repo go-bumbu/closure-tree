@@ -7,33 +7,35 @@ import (
 	"reflect"
 )
 
-const leaveName = "closure_tree_leave"
-const closureName = "closure_tree_closure"
+const branchTblName = "closure_tree_branch"
+const closureTblName = "closure_tree_closure"
+
+var ItemIsNotBranchErr = errors.New("the item does not embed Branch")
 
 func New(db *gorm.DB, Item any, name string) (*Tree, error) {
 
-	ln := leaveName
-	cn := closureName
+	ln := branchTblName
+	cn := closureTblName
 	if name != "" {
-		ln = fmt.Sprintf("%s_%s", leaveName, name)
-		cn = fmt.Sprintf("%s_%s", closureName, name)
+		ln = fmt.Sprintf("%s_%s", branchTblName, name)
+		cn = fmt.Sprintf("%s_%s", closureTblName, name)
 	}
 
 	ct := Tree{
-		db:          db,
-		leaveName:   ln,
-		closureName: cn,
+		db:             db,
+		branchTblName:  ln,
+		closureTblName: cn,
 	}
 
-	if !hasId(Item) {
-		return nil, errors.New("item does not contain Field ID")
+	if !hasBranch(Item) {
+		return nil, ItemIsNotBranchErr
 	}
 
-	err := db.Table(ct.leaveName).AutoMigrate(Item)
+	err := db.Table(ct.branchTblName).AutoMigrate(Item)
 	if err != nil {
 		return nil, fmt.Errorf("unable to migreate leave: %v", err)
 	}
-	err = db.Table(ct.closureName).AutoMigrate(closureTree{})
+	err = db.Table(ct.closureTblName).AutoMigrate(closureTree{})
 	if err != nil {
 		return nil, fmt.Errorf("unable to migrate closure: %v", err)
 	}
@@ -44,8 +46,8 @@ type Tree struct {
 	db *gorm.DB
 
 	// table names, allows multiple trees
-	leaveName   string
-	closureName string
+	branchTblName  string
+	closureTblName string
 }
 
 // represents the table that store the relationships
@@ -55,37 +57,43 @@ type closureTree struct {
 	Depth        int
 }
 
-func (ct *Tree) Add(leaveItem any, parentID uint) error {
-	if !hasId(leaveItem) {
-		return errors.New("item does not contain Field ID")
+func (ct *Tree) Add(item any, parentID uint) error {
+	if !hasBranch(item) {
+		return ItemIsNotBranchErr
 	}
 
-	// use reflection go get a concrete type that gorm can handle
-	t := reflect.TypeOf(leaveItem)
+	t := reflect.TypeOf(item)
+	itemIsPointer := false
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
+		itemIsPointer = true
 	}
-	item := reflect.New(t).Interface()
-	reflect.ValueOf(item).Elem().Set(reflect.ValueOf(leaveItem))
+	reflectItem := reflect.New(t).Interface()
+	if itemIsPointer {
+		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item).Elem())
+	} else {
+		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item))
 
-	return ct.db.Transaction(func(tx *gorm.DB) error {
+	}
+
+	err := ct.db.Transaction(func(tx *gorm.DB) error {
 		// todo verify that the parent exists if not 0 before conitnuing
 
-		// create the single item
-		err := tx.Table(ct.leaveName).Create(item).Error
+		// create the single reflectItem
+		err := tx.Table(ct.branchTblName).Create(reflectItem).Error
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("unable to add leave: %v", err)
 		}
 
-		id, err := getID(item)
+		id, err := getID(reflectItem)
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("unable to get Item ID: %v", err)
 		}
 
 		// Add reflexive relationship
-		err = tx.Table(ct.closureName).Create(&closureTree{AncestorID: id, DescendantID: id, Depth: 0}).Error
+		err = tx.Table(ct.closureTblName).Create(&closureTree{AncestorID: id, DescendantID: id, Depth: 0}).Error
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -97,7 +105,7 @@ func (ct *Tree) Add(leaveItem any, parentID uint) error {
 				SELECT ancestor_id, ?, depth + 1
 				FROM %s
 				WHERE descendant_id = ?;`
-			sqlstr := fmt.Sprintf(sql, ct.closureName, ct.closureName)
+			sqlstr := fmt.Sprintf(sql, ct.closureTblName, ct.closureTblName)
 
 			exec := tx.Exec(sqlstr, id, parentID)
 			if exec.Error != nil {
@@ -107,6 +115,25 @@ func (ct *Tree) Add(leaveItem any, parentID uint) error {
 		}
 		return nil
 	})
+
+	if err != nil {
+		return err
+	}
+
+	// if topItem is a pointer copy the ID back into it
+	if itemIsPointer {
+		itemValue := reflect.ValueOf(item).Elem()
+		reflectItemValue := reflect.ValueOf(reflectItem).Elem()
+
+		idField := reflectItemValue.FieldByName(branchIdField)
+		if idField.IsValid() && idField.CanSet() {
+			itemValue.FieldByName(branchIdField).Set(idField)
+		} else {
+			return fmt.Errorf("field: %s is not accessible or settable", branchIdField)
+		}
+	}
+
+	return nil
 }
 
 // todo find max depth
@@ -127,7 +154,7 @@ func (ct *Tree) Descendants(parent uint, items interface{}) error {
 		return errors.New("items must be a pointer to a slice")
 	}
 
-	sqlstr := fmt.Sprintf(descendantsQuery, ct.leaveName, ct.closureName)
+	sqlstr := fmt.Sprintf(descendantsQuery, ct.branchTblName, ct.closureTblName)
 	err := ct.db.Raw(sqlstr, parent).Scan(slice.Addr().Interface()).Error
 	if err != nil {
 		return fmt.Errorf("failed to fetch descendants: %w", err)
@@ -137,13 +164,13 @@ func (ct *Tree) Descendants(parent uint, items interface{}) error {
 
 const descendantsQuery = `SELECT le.*
 FROM %s AS le
-JOIN %s AS ct ON ct.descendant_id = le.id
+JOIN %s AS ct ON ct.descendant_id = le.branch_id
 WHERE ct.ancestor_id = ?
 ORDER BY ct.depth;`
 
 func (ct *Tree) DescendantIds(parent uint) ([]uint, error) {
 	ids := []uint{}
-	sqlstr := fmt.Sprintf(descendantsIDQuery, ct.leaveName, ct.closureName)
+	sqlstr := fmt.Sprintf(descendantsIDQuery, ct.branchTblName, ct.closureTblName)
 	err := ct.db.Raw(sqlstr, parent).Scan(&ids).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch descendants: %w", err)
@@ -151,9 +178,9 @@ func (ct *Tree) DescendantIds(parent uint) ([]uint, error) {
 	return ids, nil
 }
 
-const descendantsIDQuery = `SELECT le.id
+const descendantsIDQuery = `SELECT le.branch_id
 FROM %s AS le
-JOIN %s AS ct ON ct.descendant_id = le.id
+JOIN %s AS ct ON ct.descendant_id = le.branch_id
 WHERE ct.ancestor_id = ?
 ORDER BY ct.depth;`
 
@@ -165,7 +192,7 @@ func (ct *Tree) Move(LeaveId, newParentID uint) error {
 
 	return ct.db.Transaction(func(tx *gorm.DB) error {
 		var err error
-		insertSql := fmt.Sprintf(moveQueryInsetNew, ct.closureName, ct.closureName, ct.closureName)
+		insertSql := fmt.Sprintf(moveQueryInsetNew, ct.closureTblName, ct.closureTblName, ct.closureTblName)
 		exec1 := tx.Exec(insertSql, LeaveId, newParentID)
 		err = exec1.Error
 		if err != nil {
@@ -174,7 +201,7 @@ func (ct *Tree) Move(LeaveId, newParentID uint) error {
 		}
 
 		// Delete old closure relationships
-		delSql := fmt.Sprintf(moveQueryDeleteOld, ct.closureName, ct.closureName, ct.closureName)
+		delSql := fmt.Sprintf(moveQueryDeleteOld, ct.closureTblName, ct.closureTblName, ct.closureTblName)
 		exec2 := tx.Exec(delSql, LeaveId, newParentID)
 		err = exec2.Error
 		if err != nil {
