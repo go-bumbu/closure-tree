@@ -15,7 +15,7 @@ type otherTag struct {
 
 type tag struct {
 	Name string
-	Leave
+	Branch
 }
 
 type nonEmbeddingStruct struct {
@@ -33,13 +33,13 @@ func TestHasFieldId(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "Struct is Leave",
-			input:    Leave{},
+			name:     "Struct is Branch",
+			input:    Branch{},
 			expected: true,
 		},
 		{
-			name:     "Struct is Leave pointer",
-			input:    &Leave{},
+			name:     "Struct is Branch pointer",
+			input:    &Branch{},
 			expected: true,
 		},
 		{
@@ -53,18 +53,18 @@ func TestHasFieldId(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "Struct that embeds Leave",
+			name:     "Struct that embeds Branch",
 			input:    tag{},
 			expected: true,
 		},
 		{
-			name:     "Pointer to struct that embeds Leave",
+			name:     "Pointer to struct that embeds Branch",
 			input:    &tag{},
 			expected: true,
 		},
 		{
 			name:     "Struct that embeds an Id",
-			input:    otherTag{},
+			input:    otherTag{name: "test"},
 			expected: true,
 		},
 		{
@@ -73,12 +73,12 @@ func TestHasFieldId(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "Struct that does not embed Leave",
+			name:     "Struct that does not embed Branch",
 			input:    nonEmbeddingStruct{Name: "test"},
 			expected: false,
 		},
 		{
-			name:     "Pointer to struct that does not embed Leave",
+			name:     "Pointer to struct that does not embed Branch",
 			input:    &nonEmbeddingStruct{Name: "test"},
 			expected: false,
 		},
@@ -122,14 +122,14 @@ func TestHasID(t *testing.T) {
 		hasError bool
 	}{
 		{
-			name:     "Struct is Leave",
-			input:    Leave{ID: 1},
+			name:     "Struct is Branch",
+			input:    Branch{ID: 1},
 			expected: 1,
 			hasError: false,
 		},
 		{
-			name:     "Struct is Leave pointer",
-			input:    &Leave{ID: 2},
+			name:     "Struct is Branch pointer",
+			input:    &Branch{ID: 2},
 			expected: 2,
 			hasError: false,
 		},
@@ -146,14 +146,14 @@ func TestHasID(t *testing.T) {
 			hasError: false,
 		},
 		{
-			name:     "Struct that embeds Leave",
-			input:    tag{Leave: Leave{ID: 5}},
+			name:     "Struct that embeds Branch",
+			input:    tag{Branch: Branch{ID: 5}},
 			expected: 5,
 			hasError: false,
 		},
 		{
-			name:     "Pointer to struct that embeds Leave",
-			input:    &tag{Leave: Leave{ID: 6}},
+			name:     "Pointer to struct that embeds Branch",
+			input:    &tag{Branch: Branch{ID: 6}},
 			expected: 6,
 			hasError: false,
 		},
@@ -170,13 +170,13 @@ func TestHasID(t *testing.T) {
 			hasError: false,
 		},
 		{
-			name:     "Struct that does not embed Leave",
+			name:     "Struct that does not embed Branch",
 			input:    nonEmbeddingStruct{Name: "test"},
 			expected: 0,
 			hasError: true,
 		},
 		{
-			name:     "Pointer to struct that does not embed Leave",
+			name:     "Pointer to struct that does not embed Branch",
 			input:    &nonEmbeddingStruct{Name: "test"},
 			expected: 0,
 			hasError: true,

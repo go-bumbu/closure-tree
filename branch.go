@@ -5,8 +5,8 @@ import (
 	"reflect"
 )
 
-// Leave is an embeddable ID to be used in closure tree, this is not mandatory.
-type Leave struct {
+// Branch is an embeddable ID to be used in closure tree, this is not mandatory.
+type Branch struct {
 	ID uint `gorm:"primaryKey,uniqueIndex,autoIncrement"`
 }
 
@@ -30,8 +30,8 @@ func hasId(item interface{}) bool {
 
 		// Check for anonymous fields (composition)
 		if field.Anonymous {
-			// Check if the embedded type matches Leave
-			if field.Type == reflect.TypeOf(Leave{}) {
+			// Check if the embedded type matches Branch
+			if field.Type == reflect.TypeOf(Branch{}) {
 				return true
 			}
 
@@ -74,8 +74,8 @@ func getID(item interface{}) (uint, error) {
 		return 0, errors.New("item is not a struct")
 	}
 
-	// Check for direct match with Leave type
-	if itemType == reflect.TypeOf(Leave{}) {
+	// Check for direct match with Branch type
+	if itemType == reflect.TypeOf(Branch{}) {
 		idField := itemValue.FieldByName("ID")
 		if idField.IsValid() && idField.CanUint() {
 			return uint(idField.Uint()), nil
@@ -89,8 +89,8 @@ func getID(item interface{}) (uint, error) {
 
 		// Check for anonymous fields (composition)
 		if field.Anonymous {
-			// Check if the embedded type matches Leave
-			if field.Type == reflect.TypeOf(Leave{}) {
+			// Check if the embedded type matches Branch
+			if field.Type == reflect.TypeOf(Branch{}) {
 				embeddedID := fieldValue.FieldByName("ID")
 				if embeddedID.IsValid() && embeddedID.CanUint() {
 					return uint(embeddedID.Uint()), nil

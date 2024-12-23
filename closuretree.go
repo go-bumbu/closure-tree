@@ -157,52 +157,54 @@ JOIN %s AS ct ON ct.descendant_id = le.id
 WHERE ct.ancestor_id = ?
 ORDER BY ct.depth;`
 
-//// TODO delete all
-//// todo find orpahn items
-//func (ct *Tree) Move(LeaveId, newParentID uint) error {
-//
-//	return ct.db.Transaction(func(tx *gorm.DB) error {
-//		var err error
-//
-//		insetSql := `INSERT INTO %s (ancestor_id, descendant_id, depth)
-//			SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1
-//			FROM %s p
-//			JOIN %s c ON c.ancestor_id = ?
-//			WHERE p.descendant_id = ?;`
-//
-//		insetSql = fmt.Sprintf(insetSql, ct.closureName, ct.closureName, ct.closureName)
-//		ex := tx.Exec(insetSql, LeaveId, newParentID)
-//
-//		//spew.Dump(ex.RowsAffected)
-//		err = ex.Error
-//		if err != nil {
-//			tx.Rollback()
-//			return err
-//		}
-//
-//		// Delete old closure relationships
-//		delSql := `DELETE FROM %s
-//			WHERE descendant_id IN (
-//				SELECT descendant_id
-//				FROM %s
-//				WHERE ancestor_id = ?
-//			)
-//			AND ancestor_id NOT IN (
-//				SELECT ancestor_id
-//				FROM %s
-//				WHERE descendant_id = ?
-//			)
-//			And depth != 0`
-//		delSql = fmt.Sprintf(delSql, ct.closureName, ct.closureName, ct.closureName)
-//		ex2 := tx.Exec(delSql, LeaveId, newParentID)
-//
-//		//spew.Dump(ex2.RowsAffected)
-//		err = ex2.Error
-//		if err != nil {
-//			tx.Rollback()
-//			return err
-//		}
-//
-//		return nil
-//	})
-//}
+// // TODO add delete recursive
+
+// // todo find orphan items
+
+func (ct *Tree) Move(LeaveId, newParentID uint) error {
+
+	return ct.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		insertSql := fmt.Sprintf(moveQueryInsetNew, ct.closureName, ct.closureName, ct.closureName)
+		exec1 := tx.Exec(insertSql, LeaveId, newParentID)
+		err = exec1.Error
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+
+		// Delete old closure relationships
+		delSql := fmt.Sprintf(moveQueryDeleteOld, ct.closureName, ct.closureName, ct.closureName)
+		exec2 := tx.Exec(delSql, LeaveId, newParentID)
+		err = exec2.Error
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+
+		return nil
+	})
+}
+
+const moveQueryInsetNew = `INSERT INTO %s (ancestor_id, descendant_id, depth)
+			SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1
+			FROM %s p
+			JOIN %s c ON c.ancestor_id = ?
+			WHERE p.descendant_id = ?;`
+
+const moveQueryDeleteOld = `
+			WITH descendants AS (
+				SELECT descendant_id
+				FROM %s
+				WHERE ancestor_id = ?
+			),
+			excluded_ancestors AS (
+				SELECT ancestor_id
+				FROM %s
+				WHERE descendant_id = ?
+			)
+			DELETE FROM %s
+			WHERE descendant_id IN (SELECT descendant_id FROM descendants)
+			  AND ancestor_id NOT IN (SELECT ancestor_id FROM excluded_ancestors)
+			  AND depth != 0;
+			`

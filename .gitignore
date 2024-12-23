@@ -12,3 +12,4 @@
 # IDE shenanigans
 *.iml
 .idea/
+*.sqlite

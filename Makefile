@@ -19,8 +19,16 @@ lint: ## run go linter
 	# depends on https://github.com/golangci/golangci-lint
 	@golangci-lint run
 
+license-check: ## check for invalid licenses
+	# depends on : https://github.com/elastic/go-licence-detector
+	@go list -m -mod=readonly  -json all  | go-licence-detector -includeIndirect -validate -rules allowedLicenses.json
+
 benchmark: ## run go benchmarks
 	@go test -run=^$$ -bench=. ./...
+
+.PHONY: verify
+verify: license-check lint test-full benchmark ## run all tests
+
 
 cover-report: ## generate a coverage report
 	go test -covermode=count -coverpkg=./... -coverprofile cover.out  ./...
