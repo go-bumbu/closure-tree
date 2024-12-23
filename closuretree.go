@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"gorm.io/gorm"
 	"reflect"
+	"strings"
 )
 
 const branchTblName = "closure_tree_branch"
@@ -17,8 +18,8 @@ func New(db *gorm.DB, Item any, name string) (*Tree, error) {
 	ln := branchTblName
 	cn := closureTblName
 	if name != "" {
-		ln = fmt.Sprintf("%s_%s", branchTblName, name)
-		cn = fmt.Sprintf("%s_%s", closureTblName, name)
+		ln = strings.ToLower(fmt.Sprintf("%s_%s", branchTblName, name))
+		cn = strings.ToLower(fmt.Sprintf("%s_%s", closureTblName, name))
 	}
 
 	ct := Tree{

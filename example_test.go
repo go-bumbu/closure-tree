@@ -15,7 +15,7 @@ type Tag struct {
 	Name      string
 }
 
-func ExampleTreeDescendants() {
+func ExampleTree_Descendants() {
 
 	db := getGormDb()
 	// A table suffix should be added, this allows to use multiple trees
