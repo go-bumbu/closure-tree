@@ -137,8 +137,7 @@ func (ct *Tree) Add(item any, parentID uint) error {
 	return nil
 }
 
-// todo find max depth
-func (ct *Tree) Descendants(parent uint, items interface{}) error {
+func (ct *Tree) Descendants(parent uint, maxDepth int, items interface{}) error {
 	if items == nil {
 		return errors.New("items cannot be nil")
 	}
@@ -155,34 +154,67 @@ func (ct *Tree) Descendants(parent uint, items interface{}) error {
 		return errors.New("items must be a pointer to a slice")
 	}
 
-	sqlstr := fmt.Sprintf(descendantsQuery, ct.branchTblName, ct.closureTblName)
-	err := ct.db.Raw(sqlstr, parent).Scan(slice.Addr().Interface()).Error
-	if err != nil {
-		return fmt.Errorf("failed to fetch descendants: %w", err)
+	if maxDepth > 0 {
+		// return aup to max depth
+		sqlstr := fmt.Sprintf(descendantsQuery, ct.branchTblName, ct.closureTblName)
+		err := ct.db.Raw(sqlstr, parent, maxDepth).Scan(slice.Addr().Interface()).Error
+		if err != nil {
+			return fmt.Errorf("failed to fetch descendants: %w", err)
+		}
+	} else {
+		// return all children
+		sqlstr := fmt.Sprintf(descendantsQueryAll, ct.branchTblName, ct.closureTblName)
+		err := ct.db.Raw(sqlstr, parent).Scan(slice.Addr().Interface()).Error
+		if err != nil {
+			return fmt.Errorf("failed to fetch descendants: %w", err)
+		}
 	}
+
 	return nil
 }
 
 const descendantsQuery = `SELECT le.*
 FROM %s AS le
 JOIN %s AS ct ON ct.descendant_id = le.branch_id
-WHERE ct.ancestor_id = ?
+WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ?
 ORDER BY ct.depth;`
 
-func (ct *Tree) DescendantIds(parent uint) ([]uint, error) {
+const descendantsQueryAll = `SELECT le.*
+FROM %s AS le
+JOIN %s AS ct ON ct.descendant_id = le.branch_id
+WHERE ct.ancestor_id = ? AND ct.depth > 0
+ORDER BY ct.depth;`
+
+func (ct *Tree) DescendantIds(parent uint, maxDepth int) ([]uint, error) {
 	ids := []uint{}
-	sqlstr := fmt.Sprintf(descendantsIDQuery, ct.branchTblName, ct.closureTblName)
-	err := ct.db.Raw(sqlstr, parent).Scan(&ids).Error
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch descendants: %w", err)
+	if maxDepth > 0 {
+		sqlstr := fmt.Sprintf(descendantsIDQuery, ct.branchTblName, ct.closureTblName)
+		err := ct.db.Raw(sqlstr, parent, maxDepth).Scan(&ids).Error
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch descendants: %w", err)
+		}
+		return ids, nil
+	} else {
+		sqlstr := fmt.Sprintf(descendantsIDQueryAll, ct.branchTblName, ct.closureTblName)
+		err := ct.db.Raw(sqlstr, parent).Scan(&ids).Error
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch descendants: %w", err)
+		}
+		return ids, nil
 	}
-	return ids, nil
+
 }
 
 const descendantsIDQuery = `SELECT le.branch_id
 FROM %s AS le
 JOIN %s AS ct ON ct.descendant_id = le.branch_id
-WHERE ct.ancestor_id = ?
+WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ?
+ORDER BY ct.depth;`
+
+const descendantsIDQueryAll = `SELECT le.branch_id
+FROM %s AS le
+JOIN %s AS ct ON ct.descendant_id = le.branch_id
+WHERE ct.ancestor_id = ? AND ct.depth > 0
 ORDER BY ct.depth;`
 
 // // TODO add delete recursive

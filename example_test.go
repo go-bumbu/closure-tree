@@ -24,28 +24,30 @@ func ExampleTree_Descendants() {
 
 	// add nodes with a tree structure
 
+	// This represents a tree like:
+	// 0 - root
+	// 1 -  | - colors
+	// 2 -  |     | -  warm
+	// 6 -  |     |      |  - orange
+	// 5 -  |     | -  cold
+
 	colorTag := Tag{Name: "colors"}
 	_ = tree.Add(&colorTag, 0)
-
 	warmColor := Tag{Name: "warm", Branch: ct.Branch{}}
 	_ = tree.Add(&warmColor, colorTag.BranchId)
-
 	orangeTag := Tag{Name: "orange", Branch: ct.Branch{}}
 	_ = tree.Add(&orangeTag, colorTag.BranchId)
-
-	// specify an ID for the branch
-	coldColor := Tag{Name: "cold", Branch: ct.Branch{BranchId: 5}}
+	coldColor := Tag{Name: "cold", Branch: ct.Branch{BranchId: 5}} // you can specify an unique ID for the branch
 	_ = tree.Add(&coldColor, colorTag.BranchId)
 
 	descendants := []Tag{}
-	_ = tree.Descendants(colorTag.BranchId, &descendants)
+	_ = tree.Descendants(colorTag.BranchId, 0, &descendants)
 
 	for _, item := range descendants {
 		fmt.Printf("id: %d, name: %s\n", item.BranchId, item.Name)
 	}
 
 	// Output:
-	// id: 1, name: colors
 	// id: 2, name: warm
 	// id: 3, name: orange
 	// id: 5, name: cold

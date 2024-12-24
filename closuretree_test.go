@@ -6,6 +6,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"gorm.io/gorm"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -39,12 +40,14 @@ type TagComposition struct {
 	Name string
 }
 
-func TestTreeIntegration(t *testing.T) {
+// TestTree tests all the actions on all the permutations of databases
+// note: the reason all of the tests hang on this one is to only start docker images once, instead of once per test
+func TestTree(t *testing.T) {
 	dbs := getTargetDBs(t)
 	for dbName, db := range dbs {
 		t.Run(dbName, func(t *testing.T) {
 			t.Run("addNodesNoErr", func(t *testing.T) {
-				testAddNodesNoErrs(db, t)
+				testAddNodes(db, t)
 			})
 			t.Run("get descendants", func(t *testing.T) {
 				testGetDescendants(t, db)
@@ -56,86 +59,23 @@ func TestTreeIntegration(t *testing.T) {
 	}
 }
 
-func testAddNodesNoErrs(db *gorm.DB, t *testing.T) {
-	var ct *closuretree.Tree
-	var err error
+func testAddNodes(db *gorm.DB, t *testing.T) {
 
-	ct, err = closuretree.New(db, TagComposition{}, "IT_add1")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, item := range testTree {
-		tagItem := TagComposition{
-			Name: item.name,
-			Branch: closuretree.Branch{
-				BranchId: item.id,
-			},
-		}
-
-		err = ct.Add(tagItem, item.parent)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-
-}
-
-func testGetDescendants(t *testing.T, db *gorm.DB) {
-
-	var ct *closuretree.Tree
-	var err error
-
-	ct, err = closuretree.New(db, TagComposition{}, "IT_descendant1")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, item := range testTree {
-		tagItem := TagComposition{
-			Name: item.name,
-			Branch: closuretree.Branch{
-				BranchId: item.id,
-			},
-		}
-
-		err = ct.Add(tagItem, item.parent)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	gotTags := []TagComposition{}
-
-	err = ct.Descendants(1, &gotTags)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []TagComposition{
-		{Name: "Electronics", Branch: closuretree.Branch{BranchId: 1}},
-		{Name: "Mobile Phones", Branch: closuretree.Branch{BranchId: 2}},
-		{Name: "Laptops", Branch: closuretree.Branch{BranchId: 4}},
-		{Name: "Touch Screen", Branch: closuretree.Branch{BranchId: 6}},
-	}
-
-	if diff := cmp.Diff(gotTags, want); diff != "" {
-		t.Errorf("unexpected result (-want +got):\n%s", diff)
-	}
-
-	t.Run("descendantIds", func(t *testing.T) {
+	t.Run("add tag example", func(t *testing.T) {
 		var ct *closuretree.Tree
 		var err error
 
-		ct, err = closuretree.New(db, TagComposition{}, "IT_descendant3")
+		ct, err = closuretree.New(db, TagComposition{}, "IT_add_tags")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		for _, item := range testTree {
 			tagItem := TagComposition{
+				Name: item.name,
 				Branch: closuretree.Branch{
 					BranchId: item.id,
 				},
-				Name: item.name,
 			}
 
 			err = ct.Add(tagItem, item.parent)
@@ -143,12 +83,172 @@ func testGetDescendants(t *testing.T, db *gorm.DB) {
 				t.Fatal(err)
 			}
 		}
+	})
 
-		got, err := ct.DescendantIds(1)
+	type SampleStruct struct {
+		closuretree.Branch
+		Name string
+	}
+
+	tcs := []struct {
+		name           string
+		topItem        any
+		childItem      any
+		expectErr      string
+		expectParentId uint64
+		expectChildId  uint64
+	}{
+		{
+			name:           "Pointer to struct with ID field",
+			topItem:        &SampleStruct{Name: "Sample"},
+			childItem:      &SampleStruct{Name: "Sample2"},
+			expectParentId: 1,
+			expectChildId:  2,
+		},
+		{
+			name:           "struct with ID field",
+			topItem:        SampleStruct{Name: "Sample"},
+			childItem:      SampleStruct{Name: "Sample2"},
+			expectParentId: 0, // ids are not populated because it's not a pointer
+			expectChildId:  0,
+		},
+		{
+			name:      "Struct without ID field",
+			topItem:   &struct{ Name string }{Name: "NoID"},
+			expectErr: closuretree.ItemIsNotBranchErr.Error(),
+		},
+	}
+
+	for i, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			var ct *closuretree.Tree
+			var err error
+
+			ct, _ = closuretree.New(db, tc.topItem, fmt.Sprintf("IT_add_%d", i))
+
+			// add topItem as parent
+			err = ct.Add(tc.topItem, 0)
+			if tc.expectErr != "" {
+				if err == nil {
+					t.Error("expecting an error but got none")
+				}
+				if diff := cmp.Diff(err.Error(), tc.expectErr); diff != "" {
+					t.Errorf("unexpected error (-want +got):\n%s", diff)
+				}
+			} else {
+				hasId, idValue := getId(tc.topItem)
+				if !hasId || idValue != tc.expectParentId {
+					t.Errorf("ID was not set correctly, got %v", idValue)
+				}
+			}
+
+			// add childItem to parent
+			err = ct.Add(tc.childItem, 1)
+			if tc.expectErr != "" {
+				if err == nil {
+					t.Error("expecting an error but got none")
+				}
+				if diff := cmp.Diff(err.Error(), tc.expectErr); diff != "" {
+					t.Errorf("unexpected error (-want +got):\n%s", diff)
+				}
+			} else {
+				hasId, idValue := getId(tc.childItem)
+				if !hasId || idValue != tc.expectChildId {
+					t.Errorf("ID was not set correctly, got %v", idValue)
+				}
+			}
+		})
+	}
+
+}
+
+func testGetDescendants(t *testing.T, db *gorm.DB) {
+	var setupOnce sync.Once
+	var ct *closuretree.Tree
+	setup := func(t *testing.T, db *gorm.DB) {
+		var err error
+		setupOnce.Do(func() {
+			ct, err = closuretree.New(db, TagComposition{}, "IT_descendant")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, item := range testTree {
+				tagItem := TagComposition{
+					Name: item.name,
+					Branch: closuretree.Branch{
+						BranchId: item.id,
+					},
+				}
+
+				err = ct.Add(tagItem, item.parent)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+
+	t.Run("get all descendants", func(t *testing.T) {
+		setup(t, db)
+
+		gotTags := []TagComposition{}
+
+		err := ct.Descendants(1, 0, &gotTags)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []uint{1, 2, 4, 6}
+		want := []TagComposition{
+			{Name: "Mobile Phones", Branch: closuretree.Branch{BranchId: 2}},
+			{Name: "Laptops", Branch: closuretree.Branch{BranchId: 4}},
+			{Name: "Touch Screen", Branch: closuretree.Branch{BranchId: 6}},
+		}
+
+		if diff := cmp.Diff(gotTags, want); diff != "" {
+			t.Errorf("unexpected result (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("get only direct children", func(t *testing.T) {
+		setup(t, db)
+
+		gotTags := []TagComposition{}
+
+		err := ct.Descendants(1, 1, &gotTags)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []TagComposition{
+			{Name: "Mobile Phones", Branch: closuretree.Branch{BranchId: 2}},
+			{Name: "Laptops", Branch: closuretree.Branch{BranchId: 4}},
+		}
+
+		if diff := cmp.Diff(gotTags, want); diff != "" {
+			t.Errorf("unexpected result (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("get all descendant Ids", func(t *testing.T) {
+		setup(t, db)
+
+		got, err := ct.DescendantIds(1, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []uint{2, 4, 6}
+
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("unexpected result (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("get only direct children Ids", func(t *testing.T) {
+		setup(t, db)
+
+		got, err := ct.DescendantIds(1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []uint{2, 4}
 
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Errorf("unexpected result (-want +got):\n%s", diff)
@@ -187,11 +287,11 @@ func testMove(t *testing.T, db *gorm.DB) {
 			t.Fatal(err)
 		}
 
-		got, err := ct.DescendantIds(4)
+		got, err := ct.DescendantIds(4, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []uint{4, 3, 5}
+		want := []uint{3, 5}
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Errorf("unexpected result (-want +got):\n%s", diff)
 		}
@@ -236,109 +336,26 @@ func testMove(t *testing.T, db *gorm.DB) {
 		}
 
 		// tree where it was moved to
-		got, err := ct.DescendantIds(3)
+		got, err := ct.DescendantIds(3, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []uint{3, 5, 2, 6}
+		want := []uint{5, 2, 6}
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Errorf("unexpected result (-want +got):\n%s", diff)
 		}
 
 		// tree it was moved from
-		got, err = ct.DescendantIds(1)
+		got, err = ct.DescendantIds(1, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want = []uint{1, 4}
+		want = []uint{4}
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Errorf("unexpected result (-want +got):\n%s", diff)
 		}
 
 	})
-}
-
-func TestAdd(t *testing.T) {
-
-	type SampleStruct struct {
-		closuretree.Branch
-		Name string
-	}
-
-	tcs := []struct {
-		name           string
-		topItem        any
-		childItem      any
-		expectErr      string
-		expectParentId uint64
-		expectChildId  uint64
-	}{
-		{
-			name:           "Pointer to struct with ID field",
-			topItem:        &SampleStruct{Name: "Simple"},
-			childItem:      &SampleStruct{Name: "Simple2"},
-			expectParentId: 1,
-			expectChildId:  2,
-		},
-		{
-			name:           "struct with ID field",
-			topItem:        SampleStruct{Name: "Simple"},
-			childItem:      SampleStruct{Name: "Simple2"},
-			expectParentId: 0, // ids are not populated because it's not a pointer
-			expectChildId:  0,
-		},
-		{
-			name:      "Struct without ID field",
-			topItem:   &struct{ Name string }{Name: "NoID"},
-			expectErr: closuretree.ItemIsNotBranchErr.Error(),
-		},
-	}
-
-	dbs := getTargetDBs(t)
-	for dbName, db := range dbs {
-		t.Run(dbName, func(t *testing.T) {
-			for i, tc := range tcs {
-				t.Run(tc.name, func(t *testing.T) {
-					var ct *closuretree.Tree
-					var err error
-
-					ct, _ = closuretree.New(db, tc.topItem, fmt.Sprintf("UT_add_%d", i))
-
-					// add topItem as parent
-					err = ct.Add(tc.topItem, 0)
-					if tc.expectErr != "" {
-						if err == nil {
-							t.Error("expecting an error but got none")
-						}
-						if diff := cmp.Diff(err.Error(), tc.expectErr); diff != "" {
-							t.Errorf("unexpected error (-want +got):\n%s", diff)
-						}
-					} else {
-						hasId, idValue := getId(tc.topItem)
-						if !hasId || idValue != tc.expectParentId {
-							t.Errorf("ID was not set correctly, got %v", idValue)
-						}
-					}
-
-					// add childItem to parent
-					err = ct.Add(tc.childItem, 1)
-					if tc.expectErr != "" {
-						if err == nil {
-							t.Error("expecting an error but got none")
-						}
-						if diff := cmp.Diff(err.Error(), tc.expectErr); diff != "" {
-							t.Errorf("unexpected error (-want +got):\n%s", diff)
-						}
-					} else {
-						hasId, idValue := getId(tc.childItem)
-						if !hasId || idValue != tc.expectChildId {
-							t.Errorf("ID was not set correctly, got %v", idValue)
-						}
-					}
-				})
-			}
-		})
-	}
 }
 
 func getId(item any) (bool, uint64) {
