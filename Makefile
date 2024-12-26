@@ -16,11 +16,11 @@ test-race: ## run go full tests with race test (uses test containers)
 	@go test ./... -race -count 2
 
 lint: ## run go linter
-	# depends on https://github.com/golangci/golangci-lint
+	@# depends on https://github.com/golangci/golangci-lint
 	@golangci-lint run
 
 license-check: ## check for invalid licenses
-	# depends on : https://github.com/elastic/go-licence-detector
+	@# depends on : https://github.com/elastic/go-licence-detector
 	@go list -m -mod=readonly  -json all  | go-licence-detector -includeIndirect -validate -rules allowedLicenses.json
 
 benchmark: ## run go benchmarks

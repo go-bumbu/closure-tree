@@ -5,15 +5,16 @@ import (
 	"reflect"
 )
 
-// Branch is an embeddable ID to be used in closure tree, this is not mandatory.
-type Branch struct {
-	BranchId uint `gorm:"AUTO_INCREMENT;PRIMARY_KEY;not null"`
+// Node is an embeddable ID to be used in closure tree, this is not mandatory.
+type Node struct {
+	NodeId uint   `gorm:"AUTO_INCREMENT;PRIMARY_KEY;not null"`
+	Tenant string `gorm:"index"`
 }
 
-const branchIdField = "BranchId"
+const branchIdField = "NodeId"
 
-// hasBranch uses reflection to verify if the passed struct has the embedded branch struct
-func hasBranch(item any) bool {
+// hasNode uses reflection to verify if the passed struct has the embedded branch struct
+func hasNode(item any) bool {
 	if item == nil {
 		return false
 	}
@@ -30,7 +31,7 @@ func hasBranch(item any) bool {
 	for i := 0; i < itemType.NumField(); i++ {
 		field := itemType.Field(i)
 		if field.Anonymous {
-			if field.Type == reflect.TypeOf(Branch{}) {
+			if field.Type == reflect.TypeOf(Node{}) {
 				return true
 			}
 		}
@@ -59,8 +60,8 @@ func getID(item interface{}) (uint, error) {
 		return 0, errors.New("topItem is not a struct")
 	}
 
-	// Check if the struct is the Branch struct itself
-	if itemType == reflect.TypeOf(Branch{}) {
+	// Check if the struct is the Node struct itself
+	if itemType == reflect.TypeOf(Node{}) {
 		idField := itemValue.FieldByName(branchIdField)
 		if idField.IsValid() && idField.CanUint() {
 
@@ -73,7 +74,7 @@ func getID(item interface{}) (uint, error) {
 		fieldValue := itemValue.Field(i)
 
 		if field.Anonymous {
-			if field.Type == reflect.TypeOf(Branch{}) {
+			if field.Type == reflect.TypeOf(Node{}) {
 				embeddedID := fieldValue.FieldByName(branchIdField)
 				if embeddedID.IsValid() && embeddedID.CanUint() {
 					return uint(embeddedID.Uint()), nil
@@ -82,5 +83,5 @@ func getID(item interface{}) (uint, error) {
 		}
 	}
 
-	return 0, errors.New("struct Branch not found")
+	return 0, errors.New("struct Node not found")
 }

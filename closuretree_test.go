@@ -6,6 +6,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"gorm.io/gorm"
 	"reflect"
+	"sort"
 	"sync"
 	"testing"
 )
@@ -36,7 +37,7 @@ var testTree = []treeData{
 }
 
 type TagComposition struct {
-	closuretree.Branch
+	closuretree.Node
 	Name string
 }
 
@@ -52,8 +53,15 @@ func TestTree(t *testing.T) {
 			t.Run("get descendants", func(t *testing.T) {
 				testGetDescendants(t, db)
 			})
+			t.Run("get root nodes", func(t *testing.T) {
+				testGetRoot(t, db)
+			})
 			t.Run("move", func(t *testing.T) {
 				testMove(t, db)
+			})
+
+			t.Run("delete", func(t *testing.T) {
+				testDelete(t, db)
 			})
 		})
 	}
@@ -73,8 +81,8 @@ func testAddNodes(db *gorm.DB, t *testing.T) {
 		for _, item := range testTree {
 			tagItem := TagComposition{
 				Name: item.name,
-				Branch: closuretree.Branch{
-					BranchId: item.id,
+				Node: closuretree.Node{
+					NodeId: item.id,
 				},
 			}
 
@@ -86,7 +94,7 @@ func testAddNodes(db *gorm.DB, t *testing.T) {
 	})
 
 	type SampleStruct struct {
-		closuretree.Branch
+		closuretree.Node
 		Name string
 	}
 
@@ -176,8 +184,8 @@ func testGetDescendants(t *testing.T, db *gorm.DB) {
 			for _, item := range testTree {
 				tagItem := TagComposition{
 					Name: item.name,
-					Branch: closuretree.Branch{
-						BranchId: item.id,
+					Node: closuretree.Node{
+						NodeId: item.id,
 					},
 				}
 
@@ -199,9 +207,9 @@ func testGetDescendants(t *testing.T, db *gorm.DB) {
 			t.Fatal(err)
 		}
 		want := []TagComposition{
-			{Name: "Mobile Phones", Branch: closuretree.Branch{BranchId: 2}},
-			{Name: "Laptops", Branch: closuretree.Branch{BranchId: 4}},
-			{Name: "Touch Screen", Branch: closuretree.Branch{BranchId: 6}},
+			{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2}},
+			{Name: "Laptops", Node: closuretree.Node{NodeId: 4}},
+			{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6}},
 		}
 
 		if diff := cmp.Diff(gotTags, want); diff != "" {
@@ -219,8 +227,8 @@ func testGetDescendants(t *testing.T, db *gorm.DB) {
 			t.Fatal(err)
 		}
 		want := []TagComposition{
-			{Name: "Mobile Phones", Branch: closuretree.Branch{BranchId: 2}},
-			{Name: "Laptops", Branch: closuretree.Branch{BranchId: 4}},
+			{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2}},
+			{Name: "Laptops", Node: closuretree.Node{NodeId: 4}},
 		}
 
 		if diff := cmp.Diff(gotTags, want); diff != "" {
@@ -254,6 +262,69 @@ func testGetDescendants(t *testing.T, db *gorm.DB) {
 			t.Errorf("unexpected result (-want +got):\n%s", diff)
 		}
 	})
+}
+
+func testGetRoot(t *testing.T, db *gorm.DB) {
+	var setupOnce sync.Once
+	var ct *closuretree.Tree
+	setup := func(t *testing.T, db *gorm.DB) {
+		var err error
+		setupOnce.Do(func() {
+			ct, err = closuretree.New(db, TagComposition{}, "IT_roots")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, item := range testTree {
+				tagItem := TagComposition{
+					Name: item.name,
+					Node: closuretree.Node{
+						NodeId: item.id,
+					},
+				}
+
+				err = ct.Add(tagItem, item.parent)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+
+	t.Run("get all roots", func(t *testing.T) {
+		setup(t, db)
+
+		gotTags := []TagComposition{}
+
+		err := ct.Roots(&gotTags)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []TagComposition{
+			{Name: "Electronics", Node: closuretree.Node{NodeId: 1}},
+			{Name: "Clothing", Node: closuretree.Node{NodeId: 3}},
+		}
+
+		if diff := cmp.Diff(gotTags, want); diff != "" {
+			t.Errorf("unexpected result (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("get all root ids", func(t *testing.T) {
+		setup(t, db)
+
+		got, err := ct.RootIds()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// some databases return results non sorted
+		sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+
+		want := []uint{1, 3}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("unexpected result (-want +got):\n%s", diff)
+		}
+	})
 
 }
 
@@ -271,8 +342,8 @@ func testMove(t *testing.T, db *gorm.DB) {
 		for _, item := range testTree {
 			tagItem := TagComposition{
 				Name: item.name,
-				Branch: closuretree.Branch{
-					BranchId: item.id,
+				Node: closuretree.Node{
+					NodeId: item.id,
 				},
 			}
 
@@ -311,7 +382,7 @@ func testMove(t *testing.T, db *gorm.DB) {
 		var ct *closuretree.Tree
 		var err error
 
-		ct, err = closuretree.New(db, TagComposition{}, "move2")
+		ct, err = closuretree.New(db, TagComposition{}, "IT_move2")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -319,8 +390,109 @@ func testMove(t *testing.T, db *gorm.DB) {
 		for _, item := range testTree {
 			tagItem := TagComposition{
 				Name: item.name,
-				Branch: closuretree.Branch{
-					BranchId: item.id,
+				Node: closuretree.Node{
+					NodeId: item.id,
+				},
+			}
+
+			err = ct.Add(tagItem, item.parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		err = ct.Move(2, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// tree where it was moved to
+		got, err := ct.DescendantIds(3, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []uint{5, 2, 6}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("unexpected result (-want +got):\n%s", diff)
+		}
+
+		// tree it was moved from
+		got, err = ct.DescendantIds(1, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = []uint{4}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("unexpected result (-want +got):\n%s", diff)
+		}
+
+	})
+}
+
+func testDelete(t *testing.T, db *gorm.DB) {
+
+	t.Run("parent Note", func(t *testing.T) {
+		var ct *closuretree.Tree
+		var err error
+
+		ct, err = closuretree.New(db, TagComposition{}, "IT_delete1")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, item := range testTree {
+			tagItem := TagComposition{
+				Name: item.name,
+				Node: closuretree.Node{
+					NodeId: item.id,
+				},
+			}
+
+			err = ct.Add(tagItem, item.parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		err = ct.DeleteRecurse(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := ct.RootIds()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []uint{3}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("unexpected result (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("child node", func(t *testing.T) {
+
+		// expect a tree like this:
+		// 0 - root
+		// 1 -  | - Electronics
+		// 4 -  |     | -  Laptops
+		// 3 -  | - Clothing
+		// 5 -  |     | -  T-Shirt
+		// 2 -  |     |      | -  Mobile Phones
+		// 6 -  |     |      |      |  - Touch Screen
+
+		var ct *closuretree.Tree
+		var err error
+
+		ct, err = closuretree.New(db, TagComposition{}, "IT_delete2")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, item := range testTree {
+			tagItem := TagComposition{
+				Name: item.name,
+				Node: closuretree.Node{
+					NodeId: item.id,
 				},
 			}
 
@@ -368,13 +540,13 @@ func getId(item any) (bool, uint64) {
 		return false, 0
 	}
 
-	idField := itemValue.FieldByName("BranchId")
+	idField := itemValue.FieldByName("NodeId")
 	if !idField.IsValid() {
 		// Look for the "ID" field in embedded structs
 		for i := 0; i < itemValue.NumField(); i++ {
 			field := itemValue.Field(i)
 			if field.Kind() == reflect.Struct {
-				idField = field.FieldByName("BranchId")
+				idField = field.FieldByName("NodeId")
 				if idField.IsValid() {
 					break
 				}

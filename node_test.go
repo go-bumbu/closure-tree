@@ -6,7 +6,7 @@ import (
 
 type tag struct {
 	Name string
-	Branch
+	Node
 }
 
 type nonEmbeddingStruct struct {
@@ -20,32 +20,32 @@ func TestHasBranch(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "Struct is Branch",
-			input:    Branch{},
+			name:     "Struct is Node",
+			input:    Node{},
 			expected: true,
 		},
 		{
-			name:     "Struct is Branch pointer",
-			input:    &Branch{},
+			name:     "Struct is Node pointer",
+			input:    &Node{},
 			expected: true,
 		},
 		{
-			name:     "Struct that embeds Branch",
+			name:     "Struct that embeds Node",
 			input:    tag{},
 			expected: true,
 		},
 		{
-			name:     "Pointer to struct that embeds Branch",
+			name:     "Pointer to struct that embeds Node",
 			input:    &tag{},
 			expected: true,
 		},
 		{
-			name:     "Struct that does not embed Branch",
+			name:     "Struct that does not embed Node",
 			input:    nonEmbeddingStruct{Name: "test"},
 			expected: false,
 		},
 		{
-			name:     "Pointer to struct that does not embed Branch",
+			name:     "Pointer to struct that does not embed Node",
 			input:    &nonEmbeddingStruct{Name: "test"},
 			expected: false,
 		},
@@ -68,7 +68,7 @@ func TestHasBranch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := hasBranch(tt.input)
+			result := hasNode(tt.input)
 			if result != tt.expected {
 				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, result, tt.expected)
 			}
@@ -84,38 +84,38 @@ func TestGetId(t *testing.T) {
 		hasError bool
 	}{
 		{
-			name:     "Struct is Branch",
-			input:    Branch{BranchId: 1},
+			name:     "Struct is Node",
+			input:    Node{NodeId: 1},
 			expected: 1,
 			hasError: false,
 		},
 		{
-			name:     "Struct is Branch pointer",
-			input:    &Branch{BranchId: 2},
+			name:     "Struct is Node pointer",
+			input:    &Node{NodeId: 2},
 			expected: 2,
 			hasError: false,
 		},
 		{
-			name:     "Struct that embeds Branch",
-			input:    tag{Branch: Branch{BranchId: 5}},
+			name:     "Struct that embeds Node",
+			input:    tag{Node: Node{NodeId: 5}},
 			expected: 5,
 			hasError: false,
 		},
 		{
-			name:     "Pointer to struct that embeds Branch",
-			input:    &tag{Branch: Branch{BranchId: 6}},
+			name:     "Pointer to struct that embeds Node",
+			input:    &tag{Node: Node{NodeId: 6}},
 			expected: 6,
 			hasError: false,
 		},
 
 		{
-			name:     "Struct that does not embed Branch",
+			name:     "Struct that does not embed Node",
 			input:    nonEmbeddingStruct{Name: "test"},
 			expected: 0,
 			hasError: true,
 		},
 		{
-			name:     "Pointer to struct that does not embed Branch",
+			name:     "Pointer to struct that does not embed Node",
 			input:    &nonEmbeddingStruct{Name: "test"},
 			expected: 0,
 			hasError: true,

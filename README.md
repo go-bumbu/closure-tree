@@ -14,11 +14,14 @@ It is currently tested wiht:
  
 
 ## TODO
-* add example_test.go
-* add max depth to get descendants, e.g. only immediate children
-* Add delete node function
-* Add get descendants for N amount of nodes
+* improve example_test.go
 * example of getting items between 2 trees, e.g. tag or tag b AND stars >= 5
+* add walker function to recurse the tree
+* solve: how to have one tree per user/ org wihtout initializing the closure tree on every request
+  * mayne: limit access by user
+  * alternative: make the table name selection and initialization separated
+  * add another column to the closure table with user
+* add sort column and functions to change the sort order
 
 ## Development
 
