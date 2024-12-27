@@ -40,8 +40,4 @@ now the sqlite files will be placed in ./ and can be inspected
 * improve example_test.go
 * example of getting items between 2 trees, e.g. tag or tag b AND stars >= 5
 * add walker function to recurse the tree
-* solve: how to have one tree per user/ org wihtout initializing the closure tree on every request
-  * maybe: limit access by user
-  * alternative: make the table name selection and initialization separated
-  * add another column to the closure table with user
 * add sort column and functions to change the sort order

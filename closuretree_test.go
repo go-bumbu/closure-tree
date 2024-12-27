@@ -66,7 +66,6 @@ type NodeDetails struct {
 
 const tenant1 = "t1"
 const tenant2 = "t2"
-const emptyTenant = "empty"
 
 func TestAddNodes(t *testing.T) {
 	for _, db := range targetDBs {
@@ -294,6 +293,28 @@ func TestGetDescendants(t *testing.T) {
 					tenant:  tenant2,
 				},
 				{
+					name:   "get root items for tenant 1",
+					parent: 0,
+					depth:  1,
+					wantPayload: []TestPayload{
+						{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
+						{Name: "Clothing", Node: closuretree.Node{NodeId: 3, Tenant: tenant1}},
+					},
+					wantIds: []uint{1, 3},
+					tenant:  tenant1,
+				},
+				{
+					name:   "get root items for tenant 2",
+					parent: 0,
+					depth:  1,
+					wantPayload: []TestPayload{
+						{Name: "Colors", Node: closuretree.Node{NodeId: 7, Tenant: tenant2}},
+						{Name: "Sizes", Node: closuretree.Node{NodeId: 9, Tenant: tenant2}},
+					},
+					wantIds: []uint{7, 9},
+					tenant:  tenant2,
+				},
+				{
 					name:        "empty result on wrong Tenant",
 					parent:      7,
 					depth:       0,
@@ -324,112 +345,6 @@ func TestGetDescendants(t *testing.T) {
 					}
 				})
 			}
-		})
-	}
-}
-func TestGetRoot(t *testing.T) {
-	for _, db := range targetDBs {
-		t.Run(db.name, func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.conn, TestPayload{}, "IT_roots")
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
-			}
-
-			t.Run("get all roots", func(t *testing.T) {
-				t.Run("Tenant 1", func(t *testing.T) {
-					setup(t)
-
-					gotTags := []TestPayload{}
-					err := ct.Roots(&gotTags, tenant1)
-					if err != nil {
-						t.Fatal(err)
-					}
-					want := []TestPayload{
-						{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
-						{Name: "Clothing", Node: closuretree.Node{NodeId: 3, Tenant: tenant1}},
-					}
-
-					if diff := cmp.Diff(gotTags, want); diff != "" {
-						t.Errorf("unexpected result (-want +got):\n%s", diff)
-					}
-				})
-				t.Run("Tenant 2", func(t *testing.T) {
-					setup(t)
-
-					gotTags := []TestPayload{}
-					err := ct.Roots(&gotTags, tenant2)
-					if err != nil {
-						t.Fatal(err)
-					}
-					want := []TestPayload{
-						{Name: "Colors", Node: closuretree.Node{NodeId: 7, Tenant: tenant2}},
-						{Name: "Sizes", Node: closuretree.Node{NodeId: 9, Tenant: tenant2}},
-					}
-
-					if diff := cmp.Diff(gotTags, want); diff != "" {
-						t.Errorf("unexpected result (-want +got):\n%s", diff)
-					}
-				})
-
-			})
-
-			t.Run("get root ids", func(t *testing.T) {
-				t.Run("Tenant 1", func(t *testing.T) {
-					setup(t)
-
-					got, err := ct.RootIds(tenant1)
-					if err != nil {
-						t.Fatal(err)
-					}
-					// some databases return results non sorted
-					sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
-
-					want := []uint{1, 3}
-					if diff := cmp.Diff(got, want); diff != "" {
-						t.Errorf("unexpected result (-want +got):\n%s", diff)
-					}
-				})
-				t.Run("Tenant 2", func(t *testing.T) {
-					setup(t)
-
-					got, err := ct.RootIds(tenant2)
-					if err != nil {
-						t.Fatal(err)
-					}
-					// some databases return results non sorted
-					sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
-
-					want := []uint{7, 9}
-					if diff := cmp.Diff(got, want); diff != "" {
-						t.Errorf("unexpected result (-want +got):\n%s", diff)
-					}
-				})
-			})
-
-			t.Run("empty result on no Tenant", func(t *testing.T) {
-				setup(t)
-
-				got, err := ct.RootIds(emptyTenant)
-				if err != nil {
-					t.Fatal(err)
-				}
-				// some databases return results non sorted
-				sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
-
-				want := []uint{}
-				if diff := cmp.Diff(got, want); diff != "" {
-					t.Errorf("unexpected result (-want +got):\n%s", diff)
-				}
-
-			})
 		})
 	}
 }
@@ -533,19 +448,18 @@ func TestDelete(t *testing.T) {
 			}
 
 			tcs := []struct {
-				name      string
-				nodeId    uint
-				tenant    string
-				wantIds   []idCheck         // for every key in the map check the resulting slice
-				wantRoots map[string][]uint // if set check the roots
+				name    string
+				nodeId  uint
+				tenant  string
+				wantIds []idCheck // for every key in the map check the resulting slice
 			}{
 				{
 					name:   "delete a parent node on Tenant 1",
 					nodeId: 3,
 					tenant: tenant1,
-					wantRoots: map[string][]uint{
-						tenant1: {1},
-						tenant2: {7, 9},
+					wantIds: []idCheck{
+						{parent: 1, tenant: tenant1, want: []uint{2, 4, 6}},
+						{parent: 0, tenant: tenant1, want: []uint{1, 2, 4, 6}},
 					},
 				},
 				{
@@ -553,11 +467,9 @@ func TestDelete(t *testing.T) {
 					nodeId: 2,
 					tenant: tenant1,
 					wantIds: []idCheck{
+						{parent: 0, tenant: tenant1, want: []uint{1, 3, 4, 5}},
 						{parent: 1, tenant: tenant1, want: []uint{4}},
-					},
-					wantRoots: map[string][]uint{
-						tenant1: {1, 3},
-						tenant2: {7, 9},
+						{parent: 0, tenant: tenant2, want: []uint{7, 8, 9, 10, 11, 12, 13, 14}},
 					},
 				},
 				{
@@ -566,10 +478,6 @@ func TestDelete(t *testing.T) {
 					tenant: tenant2,
 					wantIds: []idCheck{
 						{parent: 1, tenant: tenant1, want: []uint{2, 4, 6}},
-					},
-					wantRoots: map[string][]uint{
-						tenant1: {1, 3},
-						tenant2: {7, 9},
 					},
 				},
 			}
@@ -587,53 +495,15 @@ func TestDelete(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
+						// some databases return items of the same level in a different order,
+						// to make the test predictable we simply sort the result
+						sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
 						if diff := cmp.Diff(got, checkId.want); diff != "" {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
-
-					for tenant, wantIds := range tc.wantRoots {
-						if len(wantIds) > 0 {
-							got, err := ct.RootIds(tenant)
-							if err != nil {
-								t.Fatal(err)
-							}
-							if diff := cmp.Diff(got, wantIds); diff != "" {
-								t.Errorf("unexpected result (-want +got):\n%s", diff)
-							}
-						}
-					}
-
 				})
 			}
-
-			//
-			//t.Run("child node", func(t *testing.T) {
-			//
-			//	var ct *closuretree.Tree
-			//	var err error
-			//
-			//	ct, err = closuretree.New(db.conn, TestPayload{}, "IT_delete2")
-			//	if err != nil {
-			//		t.Fatal(err)
-			//	}
-			//	populateTree(t, ct)
-			//
-			//	err = ct.DeleteRecurse(2, "")
-			//	if err != nil {
-			//		t.Fatal(err)
-			//	}
-			//
-			//	got, err := ct.DescendantIds(1, 0, "")
-			//	if err != nil {
-			//		t.Fatal(err)
-			//	}
-			//	want := []uint{4}
-			//	if diff := cmp.Diff(got, want); diff != "" {
-			//		t.Errorf("unexpected result (-want +got):\n%s", diff)
-			//	}
-			//
-			//})
 		})
 	}
 }

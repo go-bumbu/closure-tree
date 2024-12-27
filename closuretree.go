@@ -43,30 +43,6 @@ func New(db *gorm.DB, item any, name string) (*Tree, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to migrate closure: %v", err)
 	}
-
-	//About: this piece of code will add a root node with ID 1 this way we dont need a specific fucntion to get
-	// the root nodes,
-	//
-	//t := reflect.TypeOf(item)
-	//itemIsPointer := false
-	//if t.Kind() == reflect.Ptr {
-	//	t = t.Elem()
-	//	itemIsPointer = true
-	//}
-	//reflectItem := reflect.New(t).Interface()
-	//if itemIsPointer {
-	//	reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item).Elem())
-	//} else {
-	//	reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item))
-	//}
-	//
-	//spew.Dump(reflectItem)
-	//
-	//err = ct.Add(reflectItem, 0)
-	//if err != nil {
-	//	return nil, fmt.Errorf("unable to add root node with ID 1: %v", err)
-	//}
-
 	return &ct, nil
 }
 
@@ -156,24 +132,32 @@ func (ct *Tree) Add(item any, parentID uint, tenant string) error {
 			return fmt.Errorf("unable to add node: %v", err)
 		}
 
-		id, tenant, err := getNodeData(reflectItem)
+		id, gotTennant, err := getNodeData(reflectItem)
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("unable to get Item ID: %v", err)
 		}
 
 		// Add reflexive relationship
-		err = tx.Table(ct.relationsTbl).Create(&closureTree{AncestorID: id, DescendantID: id, Tenant: tenant, Depth: 0}).Error
+		err = tx.Table(ct.relationsTbl).Create(&closureTree{AncestorID: id, DescendantID: id, Tenant: gotTennant, Depth: 0}).Error
 		if err != nil {
 			tx.Rollback()
 			return err
 		}
 
-		if parentID != 0 {
+		if parentID == 0 {
+			// Create a root note relationship
+			sqlstr := fmt.Sprintf(addRootRelQuery, ct.relationsTbl)
+			ex := tx.Exec(sqlstr, id, gotTennant)
+			if ex.Error != nil {
+				tx.Rollback()
+				return err
+			}
+		} else {
 			// Copy all ancestors of the parent to include the new tag
-			sqlstr := fmt.Sprintf(addQuery, ct.relationsTbl, ct.relationsTbl)
-			exec := tx.Exec(sqlstr, id, tenant, parentID)
-			if exec.Error != nil {
+			sqlstr := fmt.Sprintf(addRelsQuery, ct.relationsTbl, ct.relationsTbl)
+			ex := tx.Exec(sqlstr, id, gotTennant, parentID)
+			if ex.Error != nil {
 				tx.Rollback()
 				return err
 			}
@@ -207,11 +191,17 @@ func (ct *Tree) Add(item any, parentID uint, tenant string) error {
 	return nil
 }
 
-const addQuery = `INSERT INTO %s (ancestor_id, descendant_id, Tenant, depth)
+const addRelsQuery = `INSERT INTO %s (ancestor_id, descendant_id, Tenant, depth)
 				SELECT ancestor_id, ?, ?, depth + 1
 				FROM %s
 				WHERE descendant_id = ?;`
 
+const addRootRelQuery = `INSERT INTO %s (ancestor_id, descendant_id, Tenant, depth)	VALUES (0, ?,?,1);`
+
+// Descendants allows to load a part of the tree into a slice of node pointers
+// parent determines the root node id of to load.
+// maxDepth determines the depth of the relationship o load: 0 means all children, 1 only direct children and so on.
+// tenant determines the tenant to be used
 func (ct *Tree) Descendants(parent uint, maxDepth int, tenant string, items interface{}) error {
 	if items == nil {
 		return errors.New("items cannot be nil")
@@ -260,6 +250,7 @@ JOIN %s AS ct ON ct.descendant_id = nodes.node_id
 WHERE ct.ancestor_id = ? AND ct.depth > 0 AND nodes.Tenant = ?
 ORDER BY ct.depth;`
 
+// DescendantIds behaves the same as Descendants but only returns the node IDs for the search query.
 func (ct *Tree) DescendantIds(parent uint, maxDepth int, tenant string) ([]uint, error) {
 	tenant = defaultTenant(tenant)
 	ids := []uint{}
@@ -291,56 +282,6 @@ FROM %s AS nodes
 JOIN %s AS ct ON ct.descendant_id = nodes.node_id
 WHERE ct.ancestor_id = ? AND ct.depth > 0 AND nodes.Tenant = ?
 ORDER BY ct.depth;`
-
-func (ct *Tree) Roots(items interface{}, tenant string) error {
-	if items == nil {
-		return errors.New("items cannot be nil")
-	}
-	tenant = defaultTenant(tenant)
-
-	// Check if items is a pointer to a slice using reflection
-	itemsValue := reflect.ValueOf(items)
-	if itemsValue.Kind() != reflect.Ptr {
-		return errors.New("items must be a pointer to a slice")
-	}
-
-	// Get the underlying slice
-	slice := itemsValue.Elem()
-	if slice.Kind() != reflect.Slice {
-		return errors.New("items must be a pointer to a slice")
-	}
-
-	sqlstr := fmt.Sprintf(rootsQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl)
-	err := ct.db.Raw(sqlstr, tenant).Scan(slice.Addr().Interface()).Error
-	if err != nil {
-		return fmt.Errorf("failed to fetch descendants: %w", err)
-	}
-
-	return nil
-}
-
-const rootsQuery = `SELECT DISTINCT nodes.*
-FROM %s as nodes
-JOIN %s AS ct1 ON nodes.node_id = ct1.ancestor_id
-LEFT JOIN %s AS ct2 ON ct1.ancestor_id = ct2.descendant_id AND ct2.depth = 1
-WHERE ct2.descendant_id IS NULL AND nodes.Tenant = ?;`
-
-func (ct *Tree) RootIds(tenant string) ([]uint, error) {
-	tenant = defaultTenant(tenant)
-	ids := []uint{}
-	sqlstr := fmt.Sprintf(rootIdsQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl)
-	err := ct.db.Raw(sqlstr, tenant).Scan(&ids).Error
-	if err != nil {
-		return ids, fmt.Errorf("failed to fetch descendants: %w", err)
-	}
-	return ids, nil
-}
-
-const rootIdsQuery = `SELECT DISTINCT nodes.node_id
-FROM %s as nodes
-JOIN %s AS ct1 ON nodes.node_id = ct1.ancestor_id
-LEFT JOIN %s AS ct2 ON ct1.ancestor_id = ct2.descendant_id AND ct2.depth = 1
-WHERE ct2.descendant_id IS NULL AND nodes.Tenant = ?;`
 
 func (ct *Tree) Move(nodeId, newParentID uint, tenant string) error {
 	tenant = defaultTenant(tenant)
@@ -397,11 +338,6 @@ WHERE descendant_id IN (SELECT descendant_id FROM descendants)
 `
 
 func (ct *Tree) DeleteRecurse(nodeId uint, tenant string) error {
-	// leaving in for now in case i enforce one single root node with ID 1
-	//if nodeId == 1 {
-	//	return fmt.Errorf("the root node cannot be deleted")
-	//}
-
 	return ct.db.Transaction(func(tx *gorm.DB) error {
 
 		// delete the nodes
