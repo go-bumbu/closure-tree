@@ -11,7 +11,12 @@ type Node struct {
 	Tenant string `gorm:"index"`
 }
 
-const branchIdField = "NodeId"
+func (n *Node) Id() uint {
+	return n.NodeId
+}
+
+const nodeIDField = "NodeId"
+const tenantIdField = "Tenant"
 
 // hasNode uses reflection to verify if the passed struct has the embedded branch struct
 func hasNode(item any) bool {
@@ -36,7 +41,7 @@ func hasNode(item any) bool {
 			}
 		}
 
-		if field.Name == branchIdField && field.Type == reflect.TypeOf(uint(0)) {
+		if field.Name == nodeIDField && field.Type == reflect.TypeOf(uint(0)) {
 			return true
 		}
 	}
@@ -44,9 +49,9 @@ func hasNode(item any) bool {
 	return false
 }
 
-func getID(item interface{}) (uint, error) {
+func getNodeData(item interface{}) (uint, string, error) {
 	if item == nil {
-		return 0, errors.New("topItem is nil")
+		return 0, "", errors.New("getTenant: item cannot be nil")
 	}
 
 	itemType := reflect.TypeOf(item)
@@ -57,31 +62,40 @@ func getID(item interface{}) (uint, error) {
 	}
 
 	if itemType.Kind() != reflect.Struct {
-		return 0, errors.New("topItem is not a struct")
+		return 0, "", errors.New("getTenant: item is not a struct")
 	}
-
+	tenant := ""
+	id := uint(0)
 	// Check if the struct is the Node struct itself
 	if itemType == reflect.TypeOf(Node{}) {
-		idField := itemValue.FieldByName(branchIdField)
-		if idField.IsValid() && idField.CanUint() {
-
-			return uint(idField.Uint()), nil
+		tenantField := itemValue.FieldByName(tenantIdField)
+		if tenantField.IsValid() {
+			tenant = tenantField.String()
 		}
+		idField := itemValue.FieldByName(nodeIDField)
+		if idField.IsValid() && idField.CanUint() {
+			id = uint(idField.Uint())
+		}
+		return id, tenant, nil
 	}
 
 	for i := 0; i < itemType.NumField(); i++ {
 		field := itemType.Field(i)
 		fieldValue := itemValue.Field(i)
-
 		if field.Anonymous {
 			if field.Type == reflect.TypeOf(Node{}) {
-				embeddedID := fieldValue.FieldByName(branchIdField)
-				if embeddedID.IsValid() && embeddedID.CanUint() {
-					return uint(embeddedID.Uint()), nil
+				embeddedTenant := fieldValue.FieldByName(tenantIdField)
+				if embeddedTenant.IsValid() {
+					tenant = embeddedTenant.String()
 				}
+				embeddedId := fieldValue.FieldByName(nodeIDField)
+				if embeddedId.IsValid() && embeddedId.CanUint() {
+					id = uint(embeddedId.Uint())
+				}
+				return id, tenant, nil
 			}
 		}
 	}
 
-	return 0, errors.New("struct Node not found")
+	return 0, "", errors.New("struct Node not found")
 }

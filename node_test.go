@@ -76,79 +76,78 @@ func TestHasBranch(t *testing.T) {
 	}
 }
 
-func TestGetId(t *testing.T) {
+func TestGetNodeData(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    interface{}
-		expected uint
+		expected string
+		expectId uint
 		hasError bool
 	}{
 		{
 			name:     "Struct is Node",
-			input:    Node{NodeId: 1},
-			expected: 1,
-			hasError: false,
+			input:    Node{NodeId: 1, Tenant: "t1"},
+			expectId: 1,
+			expected: "t1",
 		},
 		{
 			name:     "Struct is Node pointer",
-			input:    &Node{NodeId: 2},
-			expected: 2,
-			hasError: false,
+			input:    &Node{NodeId: 2, Tenant: "t2"},
+			expectId: 2,
+			expected: "t2",
 		},
 		{
 			name:     "Struct that embeds Node",
-			input:    tag{Node: Node{NodeId: 5}},
-			expected: 5,
-			hasError: false,
+			input:    tag{Node: Node{NodeId: 5, Tenant: "t3"}},
+			expectId: 5,
+			expected: "t3",
 		},
 		{
 			name:     "Pointer to struct that embeds Node",
-			input:    &tag{Node: Node{NodeId: 6}},
-			expected: 6,
-			hasError: false,
+			input:    &tag{Node: Node{NodeId: 6, Tenant: "t4"}},
+			expectId: 6,
+			expected: "t4",
 		},
 
 		{
 			name:     "Struct that does not embed Node",
 			input:    nonEmbeddingStruct{Name: "test"},
-			expected: 0,
 			hasError: true,
 		},
 		{
 			name:     "Pointer to struct that does not embed Node",
 			input:    &nonEmbeddingStruct{Name: "test"},
-			expected: 0,
 			hasError: true,
 		},
 
 		{
 			name:     "Non-struct input (string)",
 			input:    "not a struct",
-			expected: 0,
 			hasError: true,
 		},
 		{
 			name:     "Non-struct input (integer)",
 			input:    123,
-			expected: 0,
 			hasError: true,
 		},
 		{
 			name:     "Nil input",
 			input:    nil,
-			expected: 0,
 			hasError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := getID(tt.input)
+			id, tenant, err := getNodeData(tt.input)
 			if (err != nil) != tt.hasError {
 				t.Errorf("HasLeave(%v) unexpected error state: %v", tt.input, err)
 			}
-			if result != tt.expected {
-				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, result, tt.expected)
+			if tenant != tt.expected {
+				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, tenant, tt.expected)
+			}
+			if id != tt.expectId {
+				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, tenant, tt.expected)
 			}
 		})
 	}

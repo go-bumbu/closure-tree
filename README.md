@@ -33,6 +33,7 @@ then run the tests
 ```
 go test --short -v 
 ```
+now the sqlite files will be placed in ./ and can be inspected
 
 
 ## TODO
