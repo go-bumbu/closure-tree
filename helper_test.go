@@ -29,15 +29,14 @@ type targetDB struct {
 var targetDBs = []targetDB{}
 
 func TestMain(m *testing.M) {
-
 	tmpDir, cleanTmpdir := mkTmpDir()
-
 	initDbs(tmpDir)
+
+	// main block that runs tests
 	code := m.Run()
 
 	closeDbs()
 	cleanTmpdir()
-	//shutdown()
 	os.Exit(code)
 }
 

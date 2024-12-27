@@ -19,7 +19,7 @@ type Tag struct {
 func ExampleTree_Descendants() {
 
 	db := getGormDb()
-	// A table suffix should be added, this allows to use multiple trees
+	// A table suffix should be added, this allows to use multiple trees on the same database
 	// two tables will be created: one for tags and one to keep the closure tree structure
 	tree, _ := ct.New(db, Tag{}, "tags")
 
@@ -33,53 +33,47 @@ func ExampleTree_Descendants() {
 	// 6 -  sizes
 	// 7 -   | - small
 	// 8 -   | - medium
+	tenant := "sampleTenant"
 
 	colorTag := Tag{Name: "colors"}
 	// since we pass colorTag as pointer, the NodeId is going to be updated
-	_ = tree.Add(&colorTag, 0)
+	_ = tree.Add(&colorTag, 0, tenant)
 
-	_ = tree.Add(Tag{Name: "warm", Node: ct.Node{}}, colorTag.NodeId)
-	_ = tree.Add(Tag{Name: "orange", Node: ct.Node{}}, colorTag.NodeId)
+	_ = tree.Add(Tag{Name: "warm", Node: ct.Node{}}, colorTag.Id(), tenant)
+	_ = tree.Add(Tag{Name: "orange", Node: ct.Node{}}, colorTag.Id(), tenant)
 	// you can specify an unique ID for the branch
-	_ = tree.Add(Tag{Name: "cold", Node: ct.Node{NodeId: 5}}, colorTag.NodeId)
+	_ = tree.Add(Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
 
 	sizes := Tag{Name: "sizes"}
-	_ = tree.Add(&sizes, 0)
-	_ = tree.Add(Tag{Name: "small"}, sizes.NodeId)
-	_ = tree.Add(Tag{Name: "medium"}, sizes.NodeId)
+	_ = tree.Add(&sizes, 0, tenant)
+	_ = tree.Add(Tag{Name: "small"}, sizes.NodeId, tenant)
+	_ = tree.Add(Tag{Name: "medium"}, sizes.NodeId, tenant)
 
 	// Get the descendants of color
 	descendants := []Tag{}
-	_ = tree.Descendants(colorTag.NodeId, 0, &descendants)
+	_ = tree.Descendants(colorTag.NodeId, 0, tenant, &descendants)
 	for _, item := range descendants {
 		fmt.Printf("%d=> %s\n", item.NodeId, item.Name)
 	}
 
 	// Get only th descendants NodeIds
-	descendantsIds, _ := tree.DescendantIds(colorTag.NodeId, 0)
+	descendantsIds, _ := tree.DescendantIds(colorTag.NodeId, 0, tenant)
 	descendantsIdsStr := []string{}
 	for _, item := range descendantsIds {
 		descendantsIdsStr = append(descendantsIdsStr, fmt.Sprintf("%d", item))
 	}
 	fmt.Printf("ids: %s\n", strings.Join(descendantsIdsStr, ","))
 
-	//err := tree.Roots(colorTag.NodeId, &descendants)
-	//if err != nil {
-	//	panic(err)
-	//}
-
 	// Output:
 	// 2=> warm
 	// 3=> orange
-	// 5=> cold
-	// ids: 2,3,5
+	// 4=> cold
+	// ids: 2,3,4
 }
 
 func ExampleTree_Roots() {
 
 	db := getGormDb()
-	// A table suffix should be added, this allows to use multiple trees
-	// two tables will be created: one for tags and one to keep the closure tree structure
 	tree, _ := ct.New(db, Tag{}, "tags")
 
 	// add nodes with a tree structure
@@ -96,29 +90,32 @@ func ExampleTree_Roots() {
 
 	colorTag := Tag{Name: "colors"}
 	// since we pass colorTag as pointer, the NodeId is going to be updated
-	_ = tree.Add(&colorTag, 0)
+	_ = tree.Add(&colorTag, 0, "")
 
-	_ = tree.Add(Tag{Name: "warm", Node: ct.Node{}}, colorTag.NodeId)
-	_ = tree.Add(Tag{Name: "orange", Node: ct.Node{}}, colorTag.NodeId)
+	_ = tree.Add(Tag{Name: "warm", Node: ct.Node{}}, colorTag.NodeId, "")
+	_ = tree.Add(Tag{Name: "orange", Node: ct.Node{}}, colorTag.NodeId, "")
 	// you can specify an unique ID for the branch
-	_ = tree.Add(Tag{Name: "cold", Node: ct.Node{NodeId: 5}}, colorTag.NodeId)
+	_ = tree.Add(Tag{Name: "cold", Node: ct.Node{}}, colorTag.NodeId, "")
 
 	sizes := Tag{Name: "sizes"}
-	_ = tree.Add(&sizes, 0)
-	_ = tree.Add(Tag{Name: "small"}, sizes.NodeId)
-	_ = tree.Add(Tag{Name: "medium"}, sizes.NodeId)
+	_ = tree.Add(&sizes, 0, "")
+	_ = tree.Add(Tag{Name: "small"}, sizes.NodeId, "")
+	_ = tree.Add(Tag{Name: "medium"}, sizes.NodeId, "")
 
-	_ = tree.Add(Tag{Name: "shapes"}, 0)
+	_ = tree.Add(Tag{Name: "shapes"}, 0, "")
 
 	// Get the roots of color
 	roots := []Tag{}
-	_ = tree.Roots(&roots)
+	err := tree.Roots(&roots, "")
+	if err != nil {
+		panic(err)
+	}
 	for _, item := range roots {
 		fmt.Printf("%d=> %s\n", item.NodeId, item.Name)
 	}
 
 	// Get only the roots NodeIds
-	rootIds, _ := tree.RootIds()
+	rootIds, _ := tree.RootIds("")
 	descendantsIdsStr := []string{}
 	for _, item := range rootIds {
 		descendantsIdsStr = append(descendantsIdsStr, fmt.Sprintf("%d", item))
@@ -127,9 +124,9 @@ func ExampleTree_Roots() {
 
 	// Output:
 	// 1=> colors
-	// 6=> sizes
-	// 9=> shapes
-	// ids: 1,6,9
+	// 5=> sizes
+	// 8=> shapes
+	// ids: 1,5,8
 }
 
 // initialize your Gorm DB
