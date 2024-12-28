@@ -67,6 +67,40 @@ type NodeDetails struct {
 const tenant1 = "t1"
 const tenant2 = "t2"
 
+func getNodeDetails(item any) (bool, int, string) {
+
+	itemValue := reflect.ValueOf(item)
+	if itemValue.Kind() == reflect.Ptr {
+		itemValue = itemValue.Elem()
+	}
+	if itemValue.Kind() != reflect.Struct {
+		return false, 0, ""
+	}
+
+	idField := itemValue.FieldByName("NodeId")
+	var tenantField reflect.Value
+
+	if !idField.IsValid() {
+		// Look for the "NodeId" field in embedded structs
+		for i := 0; i < itemValue.NumField(); i++ {
+			field := itemValue.Field(i)
+			if field.Kind() == reflect.Struct {
+				idField = field.FieldByName("NodeId")
+				tenantField = field.FieldByName("Tenant")
+				if idField.IsValid() {
+					break
+				}
+			}
+		}
+	} else {
+		tenantField = itemValue.FieldByName("Tenant")
+	}
+
+	if idField.IsValid() && idField.Kind() == reflect.Uint && tenantField.IsValid() && tenantField.Kind() == reflect.String {
+		return true, int(idField.Uint()), tenantField.String()
+	}
+	return false, 0, ""
+}
 func TestAddNodes(t *testing.T) {
 	for _, db := range targetDBs {
 		t.Run(db.name, func(t *testing.T) {
@@ -197,6 +231,7 @@ func TestAddNodes(t *testing.T) {
 		})
 	}
 }
+
 func populateTree(t *testing.T, ct *closuretree.Tree) {
 	for _, item := range testTree1 {
 		tagItem := TestPayload{
@@ -239,6 +274,96 @@ func TestPopulateTree(t *testing.T) {
 				t.Fatal(err)
 			}
 			populateTree(t, ct)
+		})
+	}
+}
+func TestTreeGetNode(t *testing.T) {
+	for _, db := range targetDBs {
+		t.Run(db.name, func(t *testing.T) {
+
+			var setupOnce sync.Once
+			var ct *closuretree.Tree
+			setup := func(t *testing.T) {
+				var err error
+				setupOnce.Do(func() {
+					ct, err = closuretree.New(db.conn, TestPayload{}, "IT_getnode")
+					if err != nil {
+						t.Fatal(err)
+					}
+					populateTree(t, ct)
+				})
+			}
+			tcs := []struct {
+				name        string
+				nodeID      uint
+				in          any
+				wantPayload TestPayload
+				tenant      string
+				wantErr     string
+			}{
+				{
+					name:        "get root node for tenant 1",
+					nodeID:      1,
+					in:          &TestPayload{},
+					wantPayload: TestPayload{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
+					tenant:      tenant1,
+				},
+				{
+					name:        "get node on Tenant 2",
+					nodeID:      7,
+					in:          &TestPayload{},
+					wantPayload: TestPayload{Name: "Colors", Node: closuretree.Node{NodeId: 7, Tenant: tenant2}},
+					tenant:      tenant2,
+				},
+				{
+					name:        "expect err because of wrong type",
+					nodeID:      7,
+					in:          &map[string]string{},
+					wantPayload: TestPayload{},
+					tenant:      tenant1,
+					wantErr:     closuretree.ItemIsNotTreeNode.Error(),
+				},
+				{
+					name:        "expect err because not passing pointer",
+					nodeID:      7,
+					in:          TestPayload{},
+					wantPayload: TestPayload{},
+					tenant:      tenant1,
+					wantErr:     "item needs to be a pointer to a struct",
+				},
+				{
+					name:        "empty result on wrong Tenant",
+					nodeID:      7,
+					in:          &TestPayload{},
+					wantPayload: TestPayload{},
+					tenant:      tenant1,
+					wantErr:     closuretree.NodeNotFoundErr.Error(),
+				},
+			}
+			for _, tc := range tcs {
+				t.Run(tc.name, func(t *testing.T) {
+					setup(t)
+					err := ct.GetNode(tc.nodeID, tc.tenant, tc.in)
+
+					if tc.wantErr != "" {
+						if err == nil {
+							t.Fatalf("expected error: %s, but got none ", tc.wantErr)
+						}
+						if err.Error() != tc.wantErr {
+							t.Errorf("expected error: %s, but got %v ", tc.wantErr, err.Error())
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("unexpected error: %v", err)
+						}
+
+						if diff := cmp.Diff(tc.in, &tc.wantPayload); diff != "" {
+							t.Errorf("unexpected result (-want +got):\n%s", diff)
+						}
+					}
+
+				})
+			}
 		})
 	}
 }
@@ -506,39 +631,4 @@ func TestDelete(t *testing.T) {
 			}
 		})
 	}
-}
-
-func getNodeDetails(item any) (bool, int, string) {
-
-	itemValue := reflect.ValueOf(item)
-	if itemValue.Kind() == reflect.Ptr {
-		itemValue = itemValue.Elem()
-	}
-	if itemValue.Kind() != reflect.Struct {
-		return false, 0, ""
-	}
-
-	idField := itemValue.FieldByName("NodeId")
-	var tenantField reflect.Value
-
-	if !idField.IsValid() {
-		// Look for the "NodeId" field in embedded structs
-		for i := 0; i < itemValue.NumField(); i++ {
-			field := itemValue.Field(i)
-			if field.Kind() == reflect.Struct {
-				idField = field.FieldByName("NodeId")
-				tenantField = field.FieldByName("Tenant")
-				if idField.IsValid() {
-					break
-				}
-			}
-		}
-	} else {
-		tenantField = itemValue.FieldByName("Tenant")
-	}
-
-	if idField.IsValid() && idField.Kind() == reflect.Uint && tenantField.IsValid() && tenantField.Kind() == reflect.String {
-		return true, int(idField.Uint()), tenantField.String()
-	}
-	return false, 0, ""
 }

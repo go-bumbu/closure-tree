@@ -13,6 +13,7 @@ const closureTblName = "_ct_relations"
 
 var ItemIsNotTreeNode = errors.New("the item does not embed Node")
 var ParentNotFoundErr = errors.New("wrong parent ID")
+var NodeNotFoundErr = errors.New("node not found")
 
 // todo add with** options factory
 func New(db *gorm.DB, item any, name string) (*Tree, error) {
@@ -57,7 +58,6 @@ func defaultTenant(in string) string {
 
 type Tree struct {
 	db *gorm.DB
-
 	// table names, allows multiple trees
 	nodesTbl     string
 	relationsTbl string
@@ -384,55 +384,26 @@ const deleteRelationsQuery = `WITH descendants AS
 	DELETE FROM %s
 	WHERE descendant_id IN (SELECT descendant_id FROM descendants);`
 
-//type Tree struct {
-//	db *gorm.DB
-//	closureTableName string
-//}
-//
-//type Node struct {
-//	ID       uint   `gorm:"primaryKey"`
-//	Name     string
-//	ParentID *uint // NULL for root
-//}
-//
-//// Callback type for custom operations
-//type NodeCallback func(node Node) error
-//func (t *Tree) WalkTree(rootID uint, callback NodeCallback) error {
-//	// Recursive helper function
-//	var walk func(nodeID uint) error
-//
-//	walk = func(nodeID uint) error {
-//		// Fetch the current node
-//		var node Node
-//		if err := t.db.First(&node, nodeID).Error; err != nil {
-//			return fmt.Errorf("failed to fetch node %d: %w", nodeID, err)
-//		}
-//
-//		// Invoke the callback for the current node
-//		if err := callback(node); err != nil {
-//			return fmt.Errorf("callback failed for node %d: %w", node.ID, err)
-//		}
-//
-//		// Fetch children of the current node
-//		var children []Node
-//		if err := t.db.Table(t.closureTableName).
-//			Select("nodes.*").
-//			Joins("JOIN nodes ON nodes.id = closure_tree.descendant_id").
-//			Where("closure_tree.ancestor_id = ? AND closure_tree.depth = 1", node.ID).
-//			Scan(&children).Error; err != nil {
-//			return fmt.Errorf("failed to fetch children for node %d: %w", node.ID, err)
-//		}
-//
-//		// Recur for each child
-//		for _, child := range children {
-//			if err := walk(child.ID); err != nil {
-//				return err
-//			}
-//		}
-//
-//		return nil
-//	}
-//
-//	// Start traversal from the root
-//	return walk(rootID)
-//}
+func (ct *Tree) GetNode(nodeID uint, tenant string, item any) error {
+
+	if !hasNode(item) {
+		return ItemIsNotTreeNode
+	}
+	tenant = defaultTenant(tenant)
+	t := reflect.TypeOf(item)
+
+	if t.Kind() != reflect.Ptr {
+		return fmt.Errorf("item needs to be a pointer to a struct")
+	}
+
+	err := ct.db.Table(ct.nodesTbl).
+		Where("node_id = ? AND tenant = ?", nodeID, tenant).
+		First(item).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return NodeNotFoundErr
+		}
+		return fmt.Errorf("unable to check parent node: %v", err)
+	}
+	return nil
+}
