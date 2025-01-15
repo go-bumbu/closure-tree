@@ -1,12 +1,17 @@
 # closure-tree
 
-A closure tree is an read efficient way to define tree dependencies of items, e.g. tags.
+A closure tree is a read efficient way to define tree dependencies of items, e.g. tags.
 
-This implementation relies on Gorm to add a tree structure to any struct and allows to manage and retrieve
-tree information.
+Features:
+* store any basic struct information in a tree structure (Uses GORM under the hood)
+* define multiple trees, one for each type if data you want to store
+* multitenant: allows to perform all the operations on a specific tenant
+* retrieve all the nested descendants of a node
 
-Tt uses Gorm as DB abstraction with some Raw queries.
-It is currently tested wiht:
+
+## DBs
+while all the Gorm supported databases should work, since closure-tree relies  heavily on Raw queries, 
+it might not be the case; currently it's tested with:
 * mysql
 * postgres
 * sqlite ("gorm.io/driver/sqlite")
@@ -39,5 +44,4 @@ now the sqlite files will be placed in ./ and can be inspected
 ## TODO
 * improve example_test.go
 * example of getting items between 2 trees, e.g. tag or tag b AND stars >= 5
-* add walker function to recurse the tree
 * add sort column and functions to change the sort order

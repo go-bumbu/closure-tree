@@ -198,6 +198,60 @@ const addRelsQuery = `INSERT INTO %s (ancestor_id, descendant_id, Tenant, depth)
 
 const addRootRelQuery = `INSERT INTO %s (ancestor_id, descendant_id, Tenant, depth)	VALUES (0, ?,?,1);`
 
+// Update  will update the entry with given ID and owned to a specific tenant
+// Note: the passed item has to embed a Node struct, but any value added to the Node will be ignored
+func (ct *Tree) Update(id uint, item any, tenant string) error {
+	if !hasNode(item) {
+		return ItemIsNotTreeNode
+	}
+	tenant = defaultTenant(tenant)
+
+	t := reflect.TypeOf(item)
+	itemIsPointer := false
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+		itemIsPointer = true
+	}
+	reflectItem := reflect.New(t).Interface()
+	if itemIsPointer {
+		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item).Elem())
+	} else {
+		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item))
+	}
+
+	// modify the embedded Node struct
+	v := reflect.ValueOf(reflectItem).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Field(i)
+		fieldType := t.Field(i)
+
+		if fieldType.Anonymous && field.Type() == reflect.TypeOf(Node{}) {
+			if field.CanSet() {
+				nodeValue := Node{
+					NodeId: id,
+					Tenant: tenant,
+				}
+				field.Set(reflect.ValueOf(nodeValue))
+			}
+		}
+	}
+
+	err := ct.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(reflectItem)
+
+		if res.Error != nil {
+			tx.Rollback()
+			return fmt.Errorf("unable to update node: %v", res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return NodeNotFoundErr
+		}
+
+		return nil
+	})
+	return err
+}
+
 // Descendants allows to load a part of the tree into a slice of node pointers
 // parent determines the root node id of to load.
 // maxDepth determines the depth of the relationship o load: 0 means all children, 1 only direct children and so on.

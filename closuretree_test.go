@@ -367,6 +367,85 @@ func TestTreeGetNode(t *testing.T) {
 		})
 	}
 }
+func TestUpdate(t *testing.T) {
+	for _, db := range targetDBs {
+		t.Run(db.name, func(t *testing.T) {
+
+			var setupOnce sync.Once
+			var ct *closuretree.Tree
+			setup := func(t *testing.T) {
+				var err error
+				setupOnce.Do(func() {
+					ct, err = closuretree.New(db.conn, TestPayload{}, "IT_descendant")
+					if err != nil {
+						t.Fatal(err)
+					}
+					populateTree(t, ct)
+				})
+			}
+			tcs := []struct {
+				name        string
+				nodeID      uint
+				in          any
+				wantPayload TestPayload
+				tenant      string
+				wantErr     string
+			}{
+				{
+					name:        "get root node for tenant 1",
+					nodeID:      1,
+					in:          TestPayload{Name: "Banana"},
+					wantPayload: TestPayload{Name: "Banana", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
+					tenant:      tenant1,
+				},
+				{
+					name:        "expect err because of wrong type",
+					nodeID:      7,
+					in:          &map[string]string{},
+					wantPayload: TestPayload{},
+					tenant:      tenant1,
+					wantErr:     closuretree.ItemIsNotTreeNode.Error(),
+				},
+				{
+					name:        "empty result on wrong Tenant",
+					nodeID:      7,
+					in:          TestPayload{Name: "Banana"},
+					wantPayload: TestPayload{},
+					tenant:      tenant1,
+					wantErr:     closuretree.NodeNotFoundErr.Error(),
+				},
+			}
+			for _, tc := range tcs {
+				t.Run(tc.name, func(t *testing.T) {
+					setup(t)
+					err := ct.Update(tc.nodeID, tc.in, tc.tenant)
+					if tc.wantErr != "" {
+						if err == nil {
+							t.Fatalf("expected error: %s, but got none ", tc.wantErr)
+						}
+						if err.Error() != tc.wantErr {
+							t.Errorf("expected error: %s, but got %v ", tc.wantErr, err.Error())
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("unexpected error: %v", err)
+						}
+
+						got := TestPayload{}
+						err = ct.GetNode(tc.nodeID, tc.tenant, &got)
+						if err != nil {
+							t.Fatalf("unexpected error %v", err)
+						}
+						if diff := cmp.Diff(got, tc.wantPayload); diff != "" {
+							t.Errorf("unexpected result (-want +got):\n%s", diff)
+						}
+					}
+
+				})
+			}
+		})
+	}
+}
 func TestGetDescendants(t *testing.T) {
 	for _, db := range targetDBs {
 		t.Run(db.name, func(t *testing.T) {
