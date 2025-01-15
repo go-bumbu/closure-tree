@@ -3,12 +3,24 @@ package closuretree_test
 import (
 	"fmt"
 	closuretree "github.com/go-bumbu/closure-tree"
+	"github.com/go-bumbu/closure-tree/testdbs"
 	"github.com/google/go-cmp/cmp"
+	"os"
 	"reflect"
 	"sort"
 	"sync"
 	"testing"
 )
+
+// TestMain modifies how test are run,
+// it makes sure that the needed DBs are ready and does cleanup in the end.
+func TestMain(m *testing.M) {
+	testdbs.InitDBS()
+	// main block that runs tests
+	code := m.Run()
+	testdbs.Clean()
+	os.Exit(code)
+}
 
 // key us id, value is parent
 type treeData struct {
@@ -102,8 +114,8 @@ func getNodeDetails(item any) (bool, int, string) {
 	return false, 0, ""
 }
 func TestAddNodes(t *testing.T) {
-	for _, db := range targetDBs {
-		t.Run(db.name, func(t *testing.T) {
+	for _, db := range testdbs.TargetDBS {
+		t.Run(db.Name, func(t *testing.T) {
 			type SampleStruct struct {
 				closuretree.Node
 				Name string
@@ -179,7 +191,7 @@ func TestAddNodes(t *testing.T) {
 					var ct *closuretree.Tree
 					var err error
 
-					ct, _ = closuretree.New(db.conn, tc.topItem, fmt.Sprintf("IT_add_%d", i))
+					ct, _ = closuretree.New(db.Conn, tc.topItem, fmt.Sprintf("IT_add_%d", i))
 
 					// add topItem as parent
 					err = ct.Add(tc.topItem, 0, tc.topItemDetails.Tenant)
@@ -264,12 +276,12 @@ func populateTree(t *testing.T, ct *closuretree.Tree) {
 	}
 }
 func TestPopulateTree(t *testing.T) {
-	for _, db := range targetDBs {
-		t.Run(db.name, func(t *testing.T) {
+	for _, db := range testdbs.TargetDBS {
+		t.Run(db.Name, func(t *testing.T) {
 			var ct *closuretree.Tree
 			var err error
 
-			ct, err = closuretree.New(db.conn, TestPayload{}, "IT_populate_tree")
+			ct, err = closuretree.New(db.Conn, TestPayload{}, "IT_populate_tree")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -278,15 +290,15 @@ func TestPopulateTree(t *testing.T) {
 	}
 }
 func TestTreeGetNode(t *testing.T) {
-	for _, db := range targetDBs {
-		t.Run(db.name, func(t *testing.T) {
+	for _, db := range testdbs.TargetDBS {
+		t.Run(db.Name, func(t *testing.T) {
 
 			var setupOnce sync.Once
 			var ct *closuretree.Tree
 			setup := func(t *testing.T) {
 				var err error
 				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.conn, TestPayload{}, "IT_getnode")
+					ct, err = closuretree.New(db.Conn, TestPayload{}, "IT_getnode")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -368,15 +380,15 @@ func TestTreeGetNode(t *testing.T) {
 	}
 }
 func TestUpdate(t *testing.T) {
-	for _, db := range targetDBs {
-		t.Run(db.name, func(t *testing.T) {
+	for _, db := range testdbs.TargetDBS {
+		t.Run(db.Name, func(t *testing.T) {
 
 			var setupOnce sync.Once
 			var ct *closuretree.Tree
 			setup := func(t *testing.T) {
 				var err error
 				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.conn, TestPayload{}, "IT_descendant")
+					ct, err = closuretree.New(db.Conn, TestPayload{}, "IT_update")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -447,15 +459,15 @@ func TestUpdate(t *testing.T) {
 	}
 }
 func TestGetDescendants(t *testing.T) {
-	for _, db := range targetDBs {
-		t.Run(db.name, func(t *testing.T) {
+	for _, db := range testdbs.TargetDBS {
+		t.Run(db.Name, func(t *testing.T) {
 
 			var setupOnce sync.Once
 			var ct *closuretree.Tree
 			setup := func(t *testing.T) {
 				var err error
 				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.conn, TestPayload{}, "IT_descendant")
+					ct, err = closuretree.New(db.Conn, TestPayload{}, "IT_descendant")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -553,11 +565,11 @@ func TestGetDescendants(t *testing.T) {
 	}
 }
 func TestMove(t *testing.T) {
-	for _, db := range targetDBs {
-		t.Run(db.name, func(t *testing.T) {
+	for _, db := range testdbs.TargetDBS {
+		t.Run(db.Name, func(t *testing.T) {
 
 			setup := func(t *testing.T, name string) *closuretree.Tree {
-				ct, err := closuretree.New(db.conn, TestPayload{}, name)
+				ct, err := closuretree.New(db.Conn, TestPayload{}, name)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -633,11 +645,11 @@ func TestMove(t *testing.T) {
 	}
 }
 func TestDelete(t *testing.T) {
-	for _, db := range targetDBs {
-		t.Run(db.name, func(t *testing.T) {
+	for _, db := range testdbs.TargetDBS {
+		t.Run(db.Name, func(t *testing.T) {
 
 			setup := func(t *testing.T, name string) *closuretree.Tree {
-				ct, err := closuretree.New(db.conn, TestPayload{}, name)
+				ct, err := closuretree.New(db.Conn, TestPayload{}, name)
 				if err != nil {
 					t.Fatal(err)
 				}

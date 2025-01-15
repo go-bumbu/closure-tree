@@ -1,10 +1,9 @@
-package closuretree_test
+package testdbs
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/glebarez/sqlite"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -16,31 +15,21 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"testing"
 	"time"
 )
 
-type targetDB struct {
-	name  string
-	conn  *gorm.DB
+type DbItem struct {
+	Name  string
+	Conn  *gorm.DB
 	clean func()
 }
 
-var targetDBs = []targetDB{}
+var tmpDir = ""
 
-func TestMain(m *testing.M) {
-	tmpDir, cleanTmpdir := mkTmpDir()
-	initDbs(tmpDir)
+var TargetDBS = []DbItem{}
 
-	// main block that runs tests
-	code := m.Run()
-
-	closeDbs()
-	cleanTmpdir()
-	os.Exit(code)
-}
-
-func initDbs(tmpDir string) {
+func InitDBS() {
+	mkTmpDir()
 	gormLogger := logger.New(
 		log.New(os.Stdout, "\r\n", log.LstdFlags),
 		logger.Config{
@@ -53,51 +42,66 @@ func initDbs(tmpDir string) {
 
 	// Initialize sqlite using the NO CGO implementation
 	sqliteDbFile := newSqliteDbNoCgo(tmpDir, gormLogger)
-	targetDBs = append(targetDBs, targetDB{
-		name: "sqlite_no_cgo",
-		conn: sqliteDbFile,
-	})
-
-	// Initialize sqlite using the CGO implementation
-	sqliteDbFileCgo := newSqliteCgo(tmpDir, gormLogger)
-	targetDBs = append(targetDBs, targetDB{
-		name: "sqlite_cgo",
-		conn: sqliteDbFileCgo,
+	TargetDBS = append(TargetDBS, DbItem{
+		Name: "sqlite_no_cgo",
+		Conn: sqliteDbFile,
 	})
 
 	// stop here if running short tests
 	flag.Parse()
-	if testing.Short() {
+	_, testAllEnv := os.LookupEnv("TESTDBS_ALL")
+	if !testAllEnv && !testAll() {
 		return
 	}
 
+	// Initialize sqlite using the CGO implementation
+	sqliteDbFileCgo := newSqliteCgo(tmpDir, gormLogger)
+	TargetDBS = append(TargetDBS, DbItem{
+		Name: "sqlite_cgo",
+		Conn: sqliteDbFileCgo,
+	})
+
 	// Initialize MySQL and add it to the map
-	_, skipMysql := os.LookupEnv("SKIP_MYSQL")
-	if !skipMysql {
-		mysqlDb, clean := newMySQLDb(gormLogger)
-		targetDBs = append(targetDBs, targetDB{
-			name:  "mysql",
-			conn:  mysqlDb,
-			clean: clean,
-		})
-	}
+	mysqlDb, clean := newMySQLDb(gormLogger)
+	TargetDBS = append(TargetDBS, DbItem{
+		Name:  "mysql",
+		Conn:  mysqlDb,
+		clean: clean,
+	})
 
 	// Initialize PostgresSQL and add it to the map
-	_, skipPostgres := os.LookupEnv("SKIP_POSTGRES")
-	if !skipPostgres {
-		postgresDb, clean := newPostgresDb(gormLogger)
-		targetDBs = append(targetDBs, targetDB{
-			name:  "postgres",
-			conn:  postgresDb,
-			clean: clean,
-		})
-	}
+	postgresDb, clean := newPostgresDb(gormLogger)
+	TargetDBS = append(TargetDBS, DbItem{
+		Name:  "postgres",
+		Conn:  postgresDb,
+		clean: clean,
+	})
+}
 
+var runAllDbs *bool
+
+func init() {
+	runAllDbs = flag.Bool("alldbs", false, "run the tests on all available DBs")
+}
+func testAll() bool {
+	if runAllDbs == nil {
+		panic("testing: testAll called before Init")
+	}
+	// Catch code that calls this from TestMain without first calling flag.Parse.
+	if !flag.Parsed() {
+		panic("testing: testAll called before Parse")
+	}
+	return *runAllDbs
+}
+
+func Clean() {
+	closeDbs()
+	cleanTmpDir()
 }
 
 func closeDbs() {
-	for _, db := range targetDBs {
-		sqlDB, err := db.conn.DB()
+	for _, db := range TargetDBS {
+		sqlDB, err := db.Conn.DB()
 		if err != nil {
 			panic(fmt.Sprintf("failed to get underlying DB: %v", err))
 		}
@@ -107,29 +111,27 @@ func closeDbs() {
 		}
 	}
 
-	for _, db := range targetDBs {
+	for _, db := range TargetDBS {
 		if db.clean != nil {
 			db.clean()
 		}
 	}
 }
 
-func mkTmpDir() (string, func()) {
-	tmpDir, err := os.MkdirTemp("", "example")
+func mkTmpDir() {
+	dir, err := os.MkdirTemp("", "example")
 	if err != nil {
 		panic(fmt.Sprintf("error creating temporary directory: %v", err))
 	}
-
-	fn := func() {
-		err := os.RemoveAll(tmpDir)
-		if err != nil {
-			panic(fmt.Sprintf("Error cleaning up temporary directory: %v", err))
-		}
-	}
-	return tmpDir, fn
+	tmpDir = dir
 }
 
-var _ = spew.Dump //keep the dependency
+func cleanTmpDir() {
+	err := os.RemoveAll(tmpDir)
+	if err != nil {
+		panic(fmt.Sprintf("Error cleaning up temporary directory: %v", err))
+	}
+}
 
 func newSqliteDbNoCgo(tmpDir string, logger logger.Interface) *gorm.DB {
 	// NOTE: in memory database does not work well with concurrency, if not used with shared

@@ -7,10 +7,10 @@ default: help
 ##@ Testing
 #==========================================================================================
 test: ## run fast go tests
-	@go test ./... --short -cover
+	@go test ./...  -cover
 
 test-full: ## run go full tests (uses test containers)
-	@go test ./... -cover
+	@go test ./... -alldbs -cover
 
 test-race: ## run go full tests with race test (uses test containers)
 	@go test ./... -race -count 2
