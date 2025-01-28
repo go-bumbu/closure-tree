@@ -35,6 +35,9 @@ cover-report: ## generate a coverage report
 	go tool cover -html cover.out -o cover.html
 	open cover.html
 
+clean:  ## delete test generated data
+	@rm -f *.sqlite
+
 #==========================================================================================
 ##@ Release
 #==========================================================================================

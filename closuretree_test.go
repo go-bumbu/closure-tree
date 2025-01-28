@@ -3,7 +3,7 @@ package closuretree_test
 import (
 	"fmt"
 	closuretree "github.com/go-bumbu/closure-tree"
-	"github.com/go-bumbu/closure-tree/testdbs"
+	"github.com/go-bumbu/testdbs"
 	"github.com/google/go-cmp/cmp"
 	"os"
 	"reflect"
