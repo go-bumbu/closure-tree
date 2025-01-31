@@ -54,6 +54,10 @@ func New2(db *gorm.DB, item any) (*Tree, error) {
 	return &ct, nil
 }
 
+func (ct *Tree) GetNodeTableName() string {
+	return ct.nodesTbl
+}
+
 // todo add with** options factory
 func New(db *gorm.DB, item any, name string) (*Tree, error) {
 

@@ -5,7 +5,7 @@ import (
 	"reflect"
 )
 
-// Node is an embeddable ID to be used in closure tree, this is not mandatory.
+// Node is an embeddable ID to be used in closure tree, this is mandatory.
 type Node struct {
 	NodeId uint   `gorm:"AUTO_INCREMENT;PRIMARY_KEY;not null"`
 	Tenant string `gorm:"index"`
