@@ -55,7 +55,7 @@ check-branch:
 	fi
 
 check_env: # check for needed envs
-	@[ "${version}" ] || ( echo ">> version is not set, usage: make release version=\"v1.2.3\" "; exit 1 )
+	@[ "${version}" ] || ( echo ">> version is not set, usage: make tag version=\"v1.2.3\" "; exit 1 )
 
 
 tag: check_env check-branch check-git-clean verify ## create a tag and push to git
