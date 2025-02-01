@@ -21,7 +21,7 @@ func ExampleTree_Descendants() {
 	db := getGormDb("tagTree.example")
 	// A table suffix should be added, this allows to use multiple trees on the same database
 	// two tables will be created: one for tags and one to keep the closure tree structure
-	tree, _ := ct.New(db, Tag{}, "tags")
+	tree, _ := ct.New(db, Tag{})
 
 	// add nodes with a tree structure
 
@@ -86,7 +86,7 @@ func ExampleTreeWithM2MRelations() {
 
 	db := getGormDb("booksM2M.example")
 
-	tree, err := ct.New2(db, Genre{})
+	tree, err := ct.New(db, Genre{})
 	handleErr(err)
 	_ = tree
 	// add this sample data
@@ -199,7 +199,7 @@ func ExampleTreeWithLeaves() {
 
 	db := getGormDb("booksM2M.example")
 
-	tree, err := ct.New2(db, Genre{})
+	tree, err := ct.New(db, Genre{})
 	handleErr(err)
 	_ = tree
 	// add this sample data

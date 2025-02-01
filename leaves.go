@@ -143,7 +143,7 @@ func (ct *Tree) GetLeaves(target any, parentID uint, tenant string) error {
 	joinSql := fmt.Sprintf(leavesJoinQuery, m2mTbl, leaveTblName, leaveIDDBField, m2mTbl, singular(leaveTblName), leaveIDDBField)
 	err = ct.db.Model(target).InnerJoins(joinSql).
 		Preload(fieldName).
-		Where(fmt.Sprintf(leavesWhereQuery, m2mTbl, singular(ct.nodesTbl), nodeIdDBField, leaveTblName), ids, tenant). // TODO check also tenant
+		Where(fmt.Sprintf(leavesWhereQuery, m2mTbl, singular(ct.nodesTbl), nodeIdDBField, leaveTblName), ids, tenant).
 		Distinct().
 		Find(target).Error
 

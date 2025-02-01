@@ -8,21 +8,13 @@ import (
 	"strings"
 )
 
-const branchTblName = "closure_tree_nodes"
-const closureTblName = "closure_tree_relations"
+const closureTblName = "closure_tree_rel"
 
 var ItemIsNotTreeNode = errors.New("the item does not embed Node")
 var ParentNotFoundErr = errors.New("wrong parent ID")
 var NodeNotFoundErr = errors.New("node not found")
 
-func New2(db *gorm.DB, item any) (*Tree, error) {
-
-	//ln := branchTblName
-	//cn := closureTblName
-	//if name != "" {
-	//	ln = strings.ToLower(fmt.Sprintf("%s_%s", branchTblName, name))
-	//	cn = strings.ToLower(fmt.Sprintf("%s_%s", closureTblName, name))
-	//}
+func New(db *gorm.DB, item any) (*Tree, error) {
 
 	stmt := &gorm.Statement{DB: db}
 	err := stmt.Parse(item)
@@ -56,38 +48,6 @@ func New2(db *gorm.DB, item any) (*Tree, error) {
 
 func (ct *Tree) GetNodeTableName() string {
 	return ct.nodesTbl
-}
-
-// todo add with** options factory
-func New(db *gorm.DB, item any, name string) (*Tree, error) {
-
-	ln := branchTblName
-	cn := closureTblName
-	if name != "" {
-		ln = strings.ToLower(fmt.Sprintf("%s_%s", branchTblName, name))
-		cn = strings.ToLower(fmt.Sprintf("%s_%s", closureTblName, name))
-	}
-
-	ct := Tree{
-		db:           db,
-		nodesTbl:     ln,
-		relationsTbl: cn,
-	}
-
-	if !hasNode(item) {
-		return nil, ItemIsNotTreeNode
-	}
-
-	err := db.Table(ct.nodesTbl).AutoMigrate(item)
-	if err != nil {
-		return nil, fmt.Errorf("unable to migreate node table: %v", err)
-	}
-
-	err = db.Table(ct.relationsTbl).AutoMigrate(closureTree{})
-	if err != nil {
-		return nil, fmt.Errorf("unable to migrate closure table: %v", err)
-	}
-	return &ct, nil
 }
 
 const DefaultTenant = "DefaultTenant"
