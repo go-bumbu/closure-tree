@@ -82,6 +82,7 @@ type Genre struct {
 	Name    string
 }
 
+//nolint:govet
 func ExampleTreeWithM2MRelations() {
 
 	db := getGormDb("booksM2M.example")
@@ -195,6 +196,7 @@ type Song struct {
 	Genres []Genre `gorm:"many2many:songs_genres;"`
 }
 
+//nolint:govet
 func ExampleTreeWithLeaves() {
 
 	db := getGormDb("booksM2M.example")

@@ -18,7 +18,7 @@ func TestMain(m *testing.M) {
 	testdbs.InitDBS()
 	// main block that runs tests
 	code := m.Run()
-	testdbs.Clean()
+	_ = testdbs.Clean()
 	os.Exit(code)
 }
 
