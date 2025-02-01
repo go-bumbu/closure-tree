@@ -5,7 +5,7 @@ import (
 	"reflect"
 )
 
-// Node is an embeddable ID to be used in closure tree, this is not mandatory.
+// Node is an embeddable ID to be used in closure tree, this is mandatory.
 type Node struct {
 	NodeId uint   `gorm:"AUTO_INCREMENT;PRIMARY_KEY;not null"`
 	Tenant string `gorm:"index"`
@@ -18,7 +18,7 @@ func (n *Node) Id() uint {
 const nodeIDField = "NodeId"
 const tenantIdField = "Tenant"
 
-// hasNode uses reflection to verify if the passed struct has the embedded branch struct
+// hasNode uses reflection to verify if the passed struct has the embedded Node struct
 func hasNode(item any) bool {
 	if item == nil {
 		return false
@@ -45,7 +45,6 @@ func hasNode(item any) bool {
 			return true
 		}
 	}
-
 	return false
 }
 
