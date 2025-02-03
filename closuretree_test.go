@@ -566,6 +566,129 @@ func TestGetDescendants(t *testing.T) {
 	}
 }
 
+func TestGetTreeDescendants(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			var setupOnce sync.Once
+			var ct *closuretree.Tree
+			setup := func(t *testing.T) {
+				var err error
+				setupOnce.Do(func() {
+					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+					if err != nil {
+						t.Fatal(err)
+					}
+					populateTree(t, ct)
+				})
+			}
+			tcs := []struct {
+				name        string
+				parent      uint
+				depth       int
+				wantPayload []TestPayload
+				wantIds     []*closuretree.TreeNode
+				tenant      string
+			}{
+				{
+					name:   "get descendants on Tenant 1",
+					parent: 1,
+					depth:  0,
+					wantPayload: []TestPayload{
+						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1}},
+						{Name: "Laptops", Node: closuretree.Node{NodeId: 4, Tenant: tenant1}},
+						{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, Tenant: tenant1}},
+					},
+					wantIds: []*closuretree.TreeNode{
+						{
+							NodeId: 2, AncestorID: 1,
+							Children: []*closuretree.TreeNode{
+								{NodeId: 6, AncestorID: 2},
+							},
+						},
+						{NodeId: 4, AncestorID: 1},
+					},
+					tenant: tenant1,
+				},
+				{
+					name:   "get descendants on Tenant 2",
+					parent: 7,
+					depth:  0,
+					wantPayload: []TestPayload{
+						{Name: "Warm", Node: closuretree.Node{NodeId: 8, Tenant: tenant2}},
+						{Name: "Cold", Node: closuretree.Node{NodeId: 10, Tenant: tenant2}},
+						{Name: "Red", Node: closuretree.Node{NodeId: 12, Tenant: tenant2}},
+						{Name: "Orange", Node: closuretree.Node{NodeId: 13, Tenant: tenant2}},
+						{Name: "Blue", Node: closuretree.Node{NodeId: 14, Tenant: tenant2}},
+					},
+					//wantIds: []uint{8, 10, 12, 13, 14},
+					wantIds: []*closuretree.TreeNode{
+						{
+							NodeId: 8, AncestorID: 7,
+							Children: []*closuretree.TreeNode{
+								{NodeId: 12, AncestorID: 8},
+								{NodeId: 13, AncestorID: 8},
+							},
+						},
+						{
+							NodeId: 10, AncestorID: 7,
+							Children: []*closuretree.TreeNode{
+								{NodeId: 14, AncestorID: 10},
+							},
+						},
+					},
+					tenant: tenant2,
+				},
+				{
+					name:   "get root items for tenant 1",
+					parent: 0,
+					depth:  1,
+					wantPayload: []TestPayload{
+						{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
+						{Name: "Clothing", Node: closuretree.Node{NodeId: 3, Tenant: tenant1}},
+					},
+					wantIds: []*closuretree.TreeNode{
+						{NodeId: 1, AncestorID: 0},
+						{NodeId: 3, AncestorID: 0},
+					},
+					tenant: tenant1,
+				},
+				{
+					name:        "empty result on wrong Tenant",
+					parent:      7,
+					depth:       0,
+					wantPayload: []TestPayload{},
+					wantIds:     nil,
+					tenant:      tenant1,
+				},
+			}
+			for _, tc := range tcs {
+				t.Run(tc.name, func(t *testing.T) {
+					setup(t)
+					//gotTags := []TestPayload{}
+					//err := ct.Descendants(tc.parent, tc.depth, tc.tenant, &gotTags)
+					//if err != nil {
+					//	t.Fatal(err)
+					//}
+					//
+					//if diff := cmp.Diff(gotTags, tc.wantPayload); diff != "" {
+					//	t.Errorf("unexpected result (-want +got):\n%s", diff)
+					//}
+
+					got, err := ct.TreeDescendantsIds(tc.parent, tc.depth, tc.tenant)
+					if err != nil {
+						t.Fatal(err)
+					}
+					closuretree.SortTree(got)
+
+					if diff := cmp.Diff(got, tc.wantIds); diff != "" {
+						t.Errorf("unexpected result (-want +got):\n%s", diff)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestMove(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -636,6 +759,7 @@ func TestMove(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
+
 						if diff := cmp.Diff(got, checkId.want); diff != "" {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}

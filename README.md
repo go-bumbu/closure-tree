@@ -64,7 +64,7 @@ descendantsIds, err:= tree.DescendantIds(parentId, 0, "user1")
 This will return a flat list of all children to the passed parent id, in this case 0 is all.
 
 
-### querying leaver
+### Querying leaves 
 with the basic implementation you have now an efficient way to store and manage items in a tree structure, you could
 use any other storage mechanism and simple reference nodeIDs.
 
@@ -78,6 +78,22 @@ For convenience Closure tree also allows to manage many 2 many relationships bet
 ---
 
 For detailed usage check out the examples in [example_test.go]
+
+##  Closure Tree methods
+
+this is a quick overview of the exposed methods, check the actual signature/doc for details.
+
+* `New(db *gorm.DB, item any) (*Tree, error)` Return a new tree instance
+* `GetNodeTableName` Return the table name of the nodes you store
+* `Add` Adds a new node to the tree under the specified parent.
+* `Update` Updates a node with specified ID and payload
+* `Move` Move a node from pne parent to another one.
+* `DeleteRecurse` Deletes all of the children for a given ID.
+* `GetNode` Load a single item.
+* `Descendants` Loads a pointer of a slice a flat list of all nested children of specific parent
+* `DescendantIds` Return a flat list of nesterd children of specific parent.
+* `TreeDescendantsIds` Return a nested struct that contains all nesterd children of specific parent.
+* `func SortTree(nodes []*TreeNode)` Helper function to sort a TreeNode by ID
 
 ## Development
 

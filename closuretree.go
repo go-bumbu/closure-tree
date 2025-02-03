@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"gorm.io/gorm"
 	"reflect"
+	"sort"
 	"strings"
 )
 
@@ -14,6 +15,15 @@ var ItemIsNotTreeNode = errors.New("the item does not embed Node")
 var ParentNotFoundErr = errors.New("wrong parent ID")
 var NodeNotFoundErr = errors.New("node not found")
 
+// Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items
+type Tree struct {
+	db *gorm.DB
+	// table names, allows multiple trees
+	nodesTbl     string
+	relationsTbl string
+}
+
+// New returns a Tree for the given item on the specific gorm Database
 func New(db *gorm.DB, item any) (*Tree, error) {
 
 	stmt := &gorm.Statement{DB: db}
@@ -46,24 +56,10 @@ func New(db *gorm.DB, item any) (*Tree, error) {
 	return &ct, nil
 }
 
+// GetNodeTableName returns the table name of the stored Nodes, used if you need to interact directly
+// with the database
 func (ct *Tree) GetNodeTableName() string {
 	return ct.nodesTbl
-}
-
-const DefaultTenant = "DefaultTenant"
-
-func defaultTenant(in string) string {
-	if in == "" {
-		return DefaultTenant
-	}
-	return in
-}
-
-type Tree struct {
-	db *gorm.DB
-	// table names, allows multiple trees
-	nodesTbl     string
-	relationsTbl string
 }
 
 // represents the table that store the relationships
@@ -72,6 +68,16 @@ type closureTree struct {
 	DescendantID uint   `gorm:"not null,primaryKey,uniqueIndex"`
 	Tenant       string `gorm:"index"`
 	Depth        int
+}
+
+// DefaultTenant is used in the database as a stub if not tenant was passed
+const DefaultTenant = "DefaultTenant"
+
+func defaultTenant(in string) string {
+	if in == "" {
+		return DefaultTenant
+	}
+	return in
 }
 
 // Add will add a new entry into the node Database under a specific parent and owned to a specific tenant
@@ -340,6 +346,90 @@ JOIN %s AS ct ON ct.descendant_id = nodes.node_id
 WHERE ct.ancestor_id = ? AND ct.depth > 0 AND nodes.Tenant = ?
 ORDER BY ct.depth;`
 
+type TreeNode struct {
+	NodeId     uint `json:"id"`
+	AncestorID uint
+	Children   []*TreeNode `json:"children"`
+}
+
+const MaxInt = 2147483647 // limited by the max value of postgres bigint
+// NOTE should you ever need this deep level of nesting in a production environment, please reach out to me
+// directly I'm really really really interested into knowing why and how!!!
+
+// TreeDescendantsIds returns the tree structure of the descendants to the passed item
+func (ct *Tree) TreeDescendantsIds(parent uint, maxDepth int, tenant string) ([]*TreeNode, error) {
+	tenant = defaultTenant(tenant)
+	nodeMap := make(map[uint]*TreeNode)
+
+	if maxDepth <= 0 {
+		maxDepth = MaxInt
+	} else {
+		// this is needed because the query will list first level as depth =0, children are depth = 1
+		maxDepth = maxDepth - 1
+	}
+
+	sqlstr := fmt.Sprintf(treeDescendantsIDQueryAll, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl, ct.nodesTbl)
+	rows, err := ct.db.Raw(sqlstr, parent, tenant, tenant, maxDepth).Rows()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch tree descendants: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var node TreeNode
+		err := rows.Scan(&node.NodeId, &node.AncestorID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch tree descendants: %w", err)
+		}
+		nodeMap[node.NodeId] = &node
+	}
+
+	// Now, iterate over the node map and compose the tree
+	var trees []*TreeNode
+	for _, node := range nodeMap {
+		if par, exists := nodeMap[node.AncestorID]; exists {
+			par.Children = append(par.Children, node)
+		} else {
+			trees = append(trees, node)
+		}
+	}
+	return trees, nil
+}
+
+func SortTree(nodes []*TreeNode) {
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].NodeId < nodes[j].NodeId
+	})
+	for _, node := range nodes {
+		SortTree(node.Children)
+	}
+}
+
+const treeDescendantsIDQueryAll = `WITH RECURSIVE Tree AS (
+	-- Base case: Start with the parent node
+	SELECT 
+		nodes.node_id,
+   		ct.ancestor_id AS  ancestor_id,    
+		0 AS depth  
+	FROM %s AS nodes
+  	JOIN %s AS ct ON ct.descendant_id = nodes.node_id
+    WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.Tenant = ?
+
+	UNION ALL
+
+  -- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree,
+
+	SELECT 
+		nodes.node_id, 
+		t.node_id AS ancestor_id, 
+    	t.depth + 1 AS depth
+	FROM Tree AS t
+  	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1  -- use only immediate children relationships
+  	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
+  	WHERE nodes.Tenant = ? AND t.depth < ?
+	)
+	SELECT  Tree.node_id, Tree.ancestor_id FROM Tree ORDER BY depth;`
+
 func (ct *Tree) Move(nodeId, newParentID uint, tenant string) error {
 	tenant = defaultTenant(tenant)
 	return ct.db.Transaction(func(tx *gorm.DB) error {
@@ -441,6 +531,7 @@ const deleteRelationsQuery = `WITH descendants AS
 	DELETE FROM %s
 	WHERE descendant_id IN (SELECT descendant_id FROM descendants);`
 
+// GetNode loads a single item into the passed pointer
 func (ct *Tree) GetNode(nodeID uint, tenant string, item any) error {
 
 	if !hasNode(item) {
