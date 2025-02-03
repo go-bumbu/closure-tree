@@ -282,22 +282,14 @@ func (ct *Tree) Descendants(parent uint, maxDepth int, tenant string, items inte
 		return errors.New("items must be a pointer to a slice")
 	}
 
-	if maxDepth > 0 {
-		// return aup to max depth
-		sqlstr := fmt.Sprintf(descendantsQuery, ct.nodesTbl, ct.relationsTbl)
-		err := ct.db.Raw(sqlstr, parent, maxDepth, tenant).Scan(slice.Addr().Interface()).Error
-		if err != nil {
-			return fmt.Errorf("failed to fetch descendants: %w", err)
-		}
-	} else {
-		// return all children
-		sqlstr := fmt.Sprintf(descendantsQueryAll, ct.nodesTbl, ct.relationsTbl)
-		err := ct.db.Raw(sqlstr, parent, tenant).Scan(slice.Addr().Interface()).Error
-		if err != nil {
-			return fmt.Errorf("failed to fetch descendants: %w", err)
-		}
+	if maxDepth <= 0 {
+		maxDepth = absMaxDepth
 	}
-
+	sqlstr := fmt.Sprintf(descendantsQuery, ct.nodesTbl, ct.relationsTbl)
+	err := ct.db.Raw(sqlstr, parent, maxDepth, tenant).Scan(slice.Addr().Interface()).Error
+	if err != nil {
+		return fmt.Errorf("failed to fetch descendants: %w", err)
+	}
 	return nil
 }
 
@@ -307,31 +299,20 @@ JOIN %s AS ct ON ct.descendant_id = nodes.node_id
 WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.Tenant = ?
 ORDER BY ct.depth;`
 
-const descendantsQueryAll = `SELECT nodes.*
-FROM %s AS nodes
-JOIN %s AS ct ON ct.descendant_id = nodes.node_id
-WHERE ct.ancestor_id = ? AND ct.depth > 0 AND nodes.Tenant = ?
-ORDER BY ct.depth;`
-
 // DescendantIds behaves the same as Descendants but only returns the node IDs for the search query.
 func (ct *Tree) DescendantIds(parent uint, maxDepth int, tenant string) ([]uint, error) {
 	tenant = defaultTenant(tenant)
 	ids := []uint{}
-	if maxDepth > 0 {
-		sqlstr := fmt.Sprintf(descendantsIDQuery, ct.nodesTbl, ct.relationsTbl)
-		err := ct.db.Raw(sqlstr, parent, maxDepth, tenant).Scan(&ids).Error
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch descendants: %w", err)
-		}
-		return ids, nil
-	} else {
-		sqlstr := fmt.Sprintf(descendantsIDQueryAll, ct.nodesTbl, ct.relationsTbl)
-		err := ct.db.Raw(sqlstr, parent, tenant).Scan(&ids).Error
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch descendants: %w", err)
-		}
-		return ids, nil
+
+	if maxDepth <= 0 {
+		maxDepth = absMaxDepth
 	}
+	sqlstr := fmt.Sprintf(descendantsIDQuery, ct.nodesTbl, ct.relationsTbl)
+	err := ct.db.Raw(sqlstr, parent, maxDepth, tenant).Scan(&ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch descendants: %w", err)
+	}
+	return ids, nil
 }
 
 const descendantsIDQuery = `SELECT nodes.node_id
@@ -340,19 +321,13 @@ JOIN %s AS ct ON ct.descendant_id = nodes.node_id
 WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.Tenant = ?
 ORDER BY ct.depth;`
 
-const descendantsIDQueryAll = `SELECT nodes.node_id
-FROM %s AS nodes
-JOIN %s AS ct ON ct.descendant_id = nodes.node_id
-WHERE ct.ancestor_id = ? AND ct.depth > 0 AND nodes.Tenant = ?
-ORDER BY ct.depth;`
-
 type TreeNode struct {
 	NodeId     uint `json:"id"`
 	AncestorID uint
 	Children   []*TreeNode `json:"children"`
 }
 
-const MaxInt = 2147483647 // limited by the max value of postgres bigint
+const absMaxDepth = 2147483647 // limited by the max value of postgres bigint
 // NOTE should you ever need this deep level of nesting in a production environment, please reach out to me
 // directly I'm really really really interested into knowing why and how!!!
 
@@ -362,7 +337,7 @@ func (ct *Tree) TreeDescendantsIds(parent uint, maxDepth int, tenant string) ([]
 	nodeMap := make(map[uint]*TreeNode)
 
 	if maxDepth <= 0 {
-		maxDepth = MaxInt
+		maxDepth = absMaxDepth
 	} else {
 		// this is needed because the query will list first level as depth =0, children are depth = 1
 		maxDepth = maxDepth - 1
