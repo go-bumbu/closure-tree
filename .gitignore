@@ -13,3 +13,5 @@
 *.iml
 .idea/
 *.sqlite
+cover.html
+cover.out

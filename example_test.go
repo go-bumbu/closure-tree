@@ -71,6 +71,70 @@ func ExampleTree_Descendants() {
 	// all ids: 1,5,2,3,4,6,7
 }
 
+type NestedTag struct {
+	Tag
+	Children []*NestedTag
+}
+
+func ExampleTree_TreeDescendants() {
+
+	db := getGormDb("tagTree2.example")
+	// A table suffix should be added, this allows to use multiple trees on the same database
+	// two tables will be created: one for tags and one to keep the closure tree structure
+	tree, _ := ct.New(db, Tag{})
+
+	// add nodes with a tree structure
+
+	// This represents a tree like:
+	// 1 -  colors
+	// 2 -   | -  warm
+	// 3 -   |      |  - orange
+	// 4 -   | -  cold
+	// 5 -  sizes
+	// 6 -   | - small
+	// 7 -   | - medium
+	tenant := "sampleTenant"
+
+	colorTag := Tag{Name: "colors"}
+	// since we pass colorTag as pointer, the NodeId is going to be updated
+	_ = tree.Add(&colorTag, 0, tenant)
+
+	warmTag := Tag{Name: "warm", Node: ct.Node{}}
+	_ = tree.Add(&warmTag, colorTag.Id(), tenant)
+	_ = tree.Add(Tag{Name: "orange", Node: ct.Node{}}, warmTag.Id(), tenant)
+	// you can specify an unique ID for the branch
+	_ = tree.Add(Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
+
+	sizes := Tag{Name: "sizes"}
+	_ = tree.Add(&sizes, 0, tenant)
+	_ = tree.Add(Tag{Name: "small"}, sizes.NodeId, tenant)
+	_ = tree.Add(Tag{Name: "medium"}, sizes.NodeId, tenant)
+
+	// Get the Nested tree structure for the Tags
+	descendants := []*NestedTag{}
+	err := tree.TreeDescendants(colorTag.NodeId, 0, tenant, &descendants)
+	if err != nil {
+		fmt.Print(err)
+	}
+
+	printTree(descendants, "")
+
+	// Output:
+	// 2=> warm
+	// |- 3=> orange
+	// 4=> cold
+
+}
+
+func printTree(nodes []*NestedTag, indent string) {
+	for _, n := range nodes {
+		fmt.Printf("%s%d=> %s\n", indent, n.Node.NodeId, n.Name)
+		if len(n.Children) > 0 {
+			printTree(n.Children, "|- ")
+		}
+	}
+}
+
 type Book struct {
 	ID     uint `gorm:"primarykey"`
 	Name   string
@@ -266,7 +330,7 @@ func ExampleTreeWithLeaves() {
 
 	// query space operas
 	var gotSongs []Song
-	err = tree.GetLeaves(&gotSongs, 2, tenant)
+	err = tree.GetLeaves(&gotSongs, 2, 0, tenant)
 	if err != nil {
 		fmt.Print(err)
 	}
@@ -276,7 +340,7 @@ func ExampleTreeWithLeaves() {
 	}
 
 	// query Fantasy
-	err = tree.GetLeaves(&gotSongs, 8, tenant)
+	err = tree.GetLeaves(&gotSongs, 8, 0, tenant)
 	if err != nil {
 		fmt.Print(err)
 	}

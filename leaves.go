@@ -114,9 +114,9 @@ func getGormM2MTblName(item any) (string, string, error) {
 const nodeIdDBField = "node_id"
 const leaveIDDBField = "leave_id"
 
-func (ct *Tree) GetLeaves(target any, parentID uint, tenant string) error {
+func (ct *Tree) GetLeaves(target any, parentID uint, maxDepth int, tenant string) error {
 
-	ids, err := ct.DescendantIds(parentID, 0, tenant)
+	ids, err := ct.DescendantIds(parentID, maxDepth, tenant)
 	if err != nil {
 		return err
 	}
