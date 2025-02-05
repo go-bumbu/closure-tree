@@ -65,13 +65,52 @@ This will return a flat list of all children to the passed parent id, in this ca
 
 
 ### Querying leaves 
-with the basic implementation you have now an efficient way to store and manage items in a tree structure, you could
-use any other storage mechanism and simple reference nodeIDs.
+with the basic implementation you have now an efficient way to store and manage items in a tree structure,
 
 For convenience Closure tree also allows to manage many 2 many relationships between _leaves_ and _nodes_
 
 ```GO
-// TODO
+// define your leave data structs, e.g. Book
+// important to add the many2many annotation
+type Book struct {
+    ID     uint `gorm:"primarykey"`
+    Name   string
+    Tags []Tag `gorm:"many2many:books_tags;"` // Tag is the item stored in the tree
+}
+
+parentId := 2
+maxDepth := 0
+tennant := "user1"
+
+var books []Book // will be populated 
+err = tree.GetLeaves(&books, parentId, maxDepth, tenant)
+if err != nil {
+fmt.Print(err)
+}
+
+
+```
+
+Alternative if you need more advanced queries here is an example on how to use GORM with a many2many relationships table
+```GO
+// define your leave data structs, e.g. Book
+// important to add the many2many annotation
+type Book struct {
+    ID     uint `gorm:"primarykey"`
+    Name   string
+    Tags []Tag `gorm:"many2many:books_tags;"` // Tag is the item stored in the tree
+}
+
+// get all the ids of a specific type
+tags, _ := tree.DescendantIds(2, 0, tenant)
+
+// use Gorm pn your leaves 
+var gotBooks []Book
+db.Model(&Book{}).InnerJoins("INNER JOIN books_tags ON books.id = books_tags.book_id").
+  Preload("Tags").
+  Where("books_tags.tag_node_id IN ?", spaceOperaIds).
+  Distinct().
+  Find(&gotBooks)
 ```
 
 
@@ -92,6 +131,7 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 * `GetNode` Load a single item.
 * `Descendants` Loads a pointer of a slice a flat list of all nested children of specific parent
 * `DescendantIds` Return a flat list of nesterd children of specific parent.
+* `TreeDescendants` Loads a part of the tree into a nested slice of pointers with Children field
 * `TreeDescendantsIds` Return a nested struct that contains all nesterd children of specific parent.
 * `func SortTree(nodes []*TreeNode)` Helper function to sort a TreeNode by ID
 
@@ -108,7 +148,7 @@ Notes for local development
 
 * to generate the sqlite database in the working dir instead of on a tmp dir:
 ```
-export SQLITE_LOCAL_DIR=true
+export LOCAL_SQLITE=true
 ```
 then run the tests
 ```

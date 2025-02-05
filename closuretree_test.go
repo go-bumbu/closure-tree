@@ -67,7 +67,8 @@ var testTree2 = []treeData{
 
 type TestPayload struct {
 	closuretree.Node
-	Name string
+	Name     string
+	Children []*TestPayload `gorm:"-"`
 }
 
 type NodeDetails struct {
@@ -585,7 +586,7 @@ func TestGetTreeDescendants(t *testing.T) {
 				name        string
 				parent      uint
 				depth       int
-				wantPayload []TestPayload
+				wantPayload []*TestPayload
 				wantIds     []*closuretree.TreeNode
 				tenant      string
 			}{
@@ -593,10 +594,13 @@ func TestGetTreeDescendants(t *testing.T) {
 					name:   "get descendants on Tenant 1",
 					parent: 1,
 					depth:  0,
-					wantPayload: []TestPayload{
-						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1}},
+					wantPayload: []*TestPayload{
+						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1},
+							Children: []*TestPayload{
+								{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, Tenant: tenant1}},
+							},
+						},
 						{Name: "Laptops", Node: closuretree.Node{NodeId: 4, Tenant: tenant1}},
-						{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, Tenant: tenant1}},
 					},
 					wantIds: []*closuretree.TreeNode{
 						{
@@ -613,12 +617,16 @@ func TestGetTreeDescendants(t *testing.T) {
 					name:   "get descendants on Tenant 2",
 					parent: 7,
 					depth:  0,
-					wantPayload: []TestPayload{
-						{Name: "Warm", Node: closuretree.Node{NodeId: 8, Tenant: tenant2}},
-						{Name: "Cold", Node: closuretree.Node{NodeId: 10, Tenant: tenant2}},
-						{Name: "Red", Node: closuretree.Node{NodeId: 12, Tenant: tenant2}},
-						{Name: "Orange", Node: closuretree.Node{NodeId: 13, Tenant: tenant2}},
-						{Name: "Blue", Node: closuretree.Node{NodeId: 14, Tenant: tenant2}},
+					wantPayload: []*TestPayload{
+						{Name: "Warm", Node: closuretree.Node{NodeId: 8, Tenant: tenant2},
+							Children: []*TestPayload{
+								{Name: "Red", Node: closuretree.Node{NodeId: 12, Tenant: tenant2}},
+								{Name: "Orange", Node: closuretree.Node{NodeId: 13, Tenant: tenant2}},
+							}},
+						{Name: "Cold", Node: closuretree.Node{NodeId: 10, Tenant: tenant2},
+							Children: []*TestPayload{
+								{Name: "Blue", Node: closuretree.Node{NodeId: 14, Tenant: tenant2}},
+							}},
 					},
 					//wantIds: []uint{8, 10, 12, 13, 14},
 					wantIds: []*closuretree.TreeNode{
@@ -642,7 +650,7 @@ func TestGetTreeDescendants(t *testing.T) {
 					name:   "get root items for tenant 1",
 					parent: 0,
 					depth:  1,
-					wantPayload: []TestPayload{
+					wantPayload: []*TestPayload{
 						{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
 						{Name: "Clothing", Node: closuretree.Node{NodeId: 3, Tenant: tenant1}},
 					},
@@ -656,7 +664,7 @@ func TestGetTreeDescendants(t *testing.T) {
 					name:        "empty result on wrong Tenant",
 					parent:      7,
 					depth:       0,
-					wantPayload: []TestPayload{},
+					wantPayload: []*TestPayload{},
 					wantIds:     nil,
 					tenant:      tenant1,
 				},
@@ -664,15 +672,16 @@ func TestGetTreeDescendants(t *testing.T) {
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
 					setup(t)
-					//gotTags := []TestPayload{}
-					//err := ct.Descendants(tc.parent, tc.depth, tc.tenant, &gotTags)
-					//if err != nil {
-					//	t.Fatal(err)
-					//}
-					//
-					//if diff := cmp.Diff(gotTags, tc.wantPayload); diff != "" {
-					//	t.Errorf("unexpected result (-want +got):\n%s", diff)
-					//}
+					gotPayload := []*TestPayload{}
+					err := ct.TreeDescendants(tc.parent, tc.depth, tc.tenant, &gotPayload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					SortTestPayload(gotPayload)
+
+					if diff := cmp.Diff(gotPayload, tc.wantPayload); diff != "" {
+						t.Errorf("unexpected result (-want +got):\n%s", diff)
+					}
 
 					got, err := ct.TreeDescendantsIds(tc.parent, tc.depth, tc.tenant)
 					if err != nil {
@@ -686,6 +695,15 @@ func TestGetTreeDescendants(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func SortTestPayload(nodes []*TestPayload) {
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].NodeId < nodes[j].NodeId
+	})
+	for _, node := range nodes {
+		SortTestPayload(node.Children)
 	}
 }
 
