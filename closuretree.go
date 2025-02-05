@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"gorm.io/gorm"
-	"log"
 	"reflect"
 	"sort"
 	"strings"
@@ -611,114 +610,6 @@ func (ct *Tree) TreeDescendants(parent uint, maxDepth int, tenant string, items 
 
 	return nil
 
-}
-
-// transform builds a tree structure from a flat map where each node's data
-// is represented by a map[string]interface{}. It populates the slice pointed
-// to by items with root nodes that have their Children fields recursively set.
-func transform(items interface{}, treeMap map[int64]map[string]interface{}) error {
-	// Validate that items is a pointer to a slice.
-	itemsVal := reflect.ValueOf(items)
-	if itemsVal.Kind() != reflect.Ptr {
-		return errors.New("items must be a pointer to a slice")
-	}
-	sliceVal := itemsVal.Elem()
-	if sliceVal.Kind() != reflect.Slice {
-		return errors.New("items must point to a slice")
-	}
-
-	// Get the slice element type. We expect a pointer to a struct.
-	elemType := sliceVal.Type().Elem() // e.g., *MyCustom
-	if elemType.Kind() != reflect.Ptr || elemType.Elem().Kind() != reflect.Struct {
-		return errors.New("slice element type must be a pointer to a struct")
-	}
-
-	// Step 1. Create an instance for each node.
-	// We'll store these in a map keyed by NodeId.
-	nodes := make(map[int64]reflect.Value)
-	for nodeID, nodeData := range treeMap {
-		// Create a new instance (pointer to struct).
-		newElem := reflect.New(elemType.Elem())
-
-		// Populate struct fields from the map.
-		// (We assume keys in nodeData correspond to exported field names.)
-		for key, value := range nodeData {
-			// Skip the ancestor field if the struct does not have it.
-			// (It may be used only for tree assembly.)
-			fieldVal := newElem.Elem().FieldByName(key)
-			if !fieldVal.IsValid() || !fieldVal.CanSet() {
-				continue
-			}
-			val := reflect.ValueOf(value)
-			if val.Type().AssignableTo(fieldVal.Type()) {
-				fieldVal.Set(val)
-			} else if val.Type().ConvertibleTo(fieldVal.Type()) {
-				fieldVal.Set(val.Convert(fieldVal.Type()))
-			} else {
-				return fmt.Errorf("cannot assign value of type %s to field %s of type %s", val.Type(), key, fieldVal.Type())
-			}
-		}
-
-		// Store the newly created node in our map.
-		nodes[nodeID] = newElem
-	}
-
-	// Step 2. Build the tree.
-	// For each node, look up its "ancestorId" in the original map and
-	// append it as a child to the parent's Children slice.
-	// Nodes without an ancestor are considered root nodes.
-	roots := []reflect.Value{}
-	for nodeID, nodeVal := range nodes {
-		// Retrieve the corresponding data map.
-		nodeData := treeMap[nodeID]
-		ancestor, exists := nodeData["ancestorId"]
-		if !exists || ancestor == nil {
-			// No ancestorId means this is a root node.
-			roots = append(roots, nodeVal)
-		} else {
-			// Assert that the ancestorId is an int64.
-			ancID, ok := ancestor.(int64)
-			if !ok {
-				return fmt.Errorf("ancestorId for node %d is not int64", nodeID)
-			}
-			parent, found := nodes[ancID]
-			if !found {
-				// If the parent is not found, treat this node as a root.
-				roots = append(roots, nodeVal)
-			} else {
-				// Append nodeVal to the parent's Children field.
-				childrenField := parent.Elem().FieldByName("Children")
-				if !childrenField.IsValid() {
-					return fmt.Errorf("Children field not found in node %d", nodeID)
-				}
-				// Append the child.
-				childrenField.Set(reflect.Append(childrenField, nodeVal))
-			}
-		}
-	}
-
-	// Step 3. Set the result slice (pointed to by items) to the slice of root nodes.
-	for _, node := range roots {
-		sliceVal.Set(reflect.Append(sliceVal, node))
-	}
-
-	return nil
-}
-
-// getFieldNameByColumn is an internal function that uses gorm and a model struct to transform
-// the column name as present in the Database to the FieldName as exposed in GO
-func getFieldNameByColumn(db *gorm.DB, model interface{}, columnName string) (string, bool) {
-	stmt := &gorm.Statement{DB: db}
-	if err := stmt.Parse(model); err != nil {
-		log.Fatal(err)
-	}
-
-	for _, field := range stmt.Schema.Fields {
-		if field.DBName == columnName { // DBName holds the actual column name in the database
-			return field.Name, true // field.Name is the struct field name
-		}
-	}
-	return "", false // Not found
 }
 
 const treeDescendantsQuery = `WITH RECURSIVE Tree AS (
