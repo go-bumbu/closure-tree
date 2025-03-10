@@ -124,6 +124,7 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 
 * `New(db *gorm.DB, item any) (*Tree, error)` Return a new tree instance
 * `GetNodeTableName` Return the table name of the nodes you store
+* `GetClosureTableName` Return the table name of the closure tree relationship
 * `Add` Adds a new node to the tree under the specified parent.
 * `Update` Updates a node with specified ID and payload
 * `Move` Move a node from pne parent to another one.
