@@ -71,6 +71,12 @@ func (ct *Tree) GetNodeTableName() string {
 	return ct.nodesTbl
 }
 
+// GetClosureTableName returns the table name of the node closure tree relationship, used if you need to interact directly
+// with the database
+func (ct *Tree) GetClosureTableName() string {
+	return ct.relationsTbl
+}
+
 // represents the table that store the relationships
 type closureTree struct {
 	AncestorID   uint   `gorm:"not null,primaryKey,uniqueIndex"`
