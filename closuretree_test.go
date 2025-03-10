@@ -2,7 +2,7 @@ package closuretree_test
 
 import (
 	"fmt"
-	closuretree "github.com/go-bumbu/closure-tree"
+	ct "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
 	"github.com/google/go-cmp/cmp"
 	"os"
@@ -66,7 +66,7 @@ var testTree2 = []treeData{
 }
 
 type TestPayload struct {
-	closuretree.Node
+	ct.Node
 	Name     string
 	Children []*TestPayload `gorm:"-"`
 }
@@ -118,7 +118,7 @@ func TestAddNodes(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			type SampleStruct struct {
-				closuretree.Node
+				ct.Node
 				Name string
 			}
 
@@ -136,8 +136,8 @@ func TestAddNodes(t *testing.T) {
 					name:            "Pointer to struct with ID field",
 					topItem:         &SampleStruct{Name: "Sample"},
 					childItem:       &SampleStruct{Name: "Sample2"},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					topItemExpect:   NodeDetails{Id: 1, Tenant: ct.DefaultTenant},
+					childItemExpect: NodeDetails{Id: 2, Tenant: ct.DefaultTenant},
 				},
 				{
 					name:      "struct with ID field",
@@ -150,9 +150,9 @@ func TestAddNodes(t *testing.T) {
 				{
 					name:            "Ensure embedded NodeId is ignored",
 					topItem:         &SampleStruct{Name: "Sample"},
-					childItem:       &SampleStruct{Name: "Sample2", Node: closuretree.Node{NodeId: 4}},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					childItem:       &SampleStruct{Name: "Sample2", Node: ct.Node{NodeId: 4}},
+					topItemExpect:   NodeDetails{Id: 1, Tenant: ct.DefaultTenant},
+					childItemExpect: NodeDetails{Id: 2, Tenant: ct.DefaultTenant},
 				},
 				{
 					name:             "asert tenant is set",
@@ -166,9 +166,9 @@ func TestAddNodes(t *testing.T) {
 				{
 					name:            "Ensure embedded Tenant is ignored",
 					topItem:         &SampleStruct{Name: "Sample"},
-					childItem:       &SampleStruct{Name: "Sample2", Node: closuretree.Node{Tenant: "bla"}},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					childItem:       &SampleStruct{Name: "Sample2", Node: ct.Node{Tenant: "bla"}},
+					topItemExpect:   NodeDetails{Id: 1, Tenant: ct.DefaultTenant},
+					childItemExpect: NodeDetails{Id: 2, Tenant: ct.DefaultTenant},
 				},
 				{
 					name:             "Avoid cross tenant Add",
@@ -177,22 +177,22 @@ func TestAddNodes(t *testing.T) {
 					topItemDetails:   NodeDetails{Tenant: "T1"},
 					childItemDetails: NodeDetails{Tenant: "T2"},
 					topItemExpect:    NodeDetails{Id: 1, Tenant: "T1"},
-					childItemExpect:  NodeDetails{Err: closuretree.ParentNotFoundErr.Error()},
+					childItemExpect:  NodeDetails{Err: ct.ParentNotFoundErr.Error()},
 				},
 				{
 					name:            "Struct without ID field",
 					topItem:         &struct{ Name string }{Name: "NoID"},
-					topItemExpect:   NodeDetails{Err: closuretree.ItemIsNotTreeNode.Error()},
-					childItemExpect: NodeDetails{Err: closuretree.ItemIsNotTreeNode.Error()},
+					topItemExpect:   NodeDetails{Err: ct.ItemIsNotTreeNode.Error()},
+					childItemExpect: NodeDetails{Err: ct.ItemIsNotTreeNode.Error()},
 				},
 			}
 
 			for i, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					var ct *closuretree.Tree
+					var tree *ct.Tree
 					var err error
 
-					ct, _ = closuretree.New(db.ConnDbName(fmt.Sprintf("addnodes%d", i)), tc.topItem)
+					ct, _ = ct.New(db.ConnDbName(fmt.Sprintf("addnodes%d", i)), tc.topItem)
 
 					// add topItem as parent
 					err = ct.Add(tc.topItem, 0, tc.topItemDetails.Tenant)
@@ -245,11 +245,11 @@ func TestAddNodes(t *testing.T) {
 	}
 }
 
-func populateTree(t *testing.T, ct *closuretree.Tree) {
+func populateTree(t *testing.T, ct *ct.Tree) {
 	for _, item := range testTree1 {
 		tagItem := TestPayload{
 			Name: item.name,
-			Node: closuretree.Node{
+			Node: ct.Node{
 				NodeId: item.id,
 				Tenant: tenant1,
 			},
@@ -264,7 +264,7 @@ func populateTree(t *testing.T, ct *closuretree.Tree) {
 	for _, item := range testTree2 {
 		tagItem := TestPayload{
 			Name: item.name,
-			Node: closuretree.Node{
+			Node: ct.Node{
 				NodeId: item.id,
 				Tenant: tenant2,
 			},
@@ -280,10 +280,10 @@ func populateTree(t *testing.T, ct *closuretree.Tree) {
 func TestPopulateTree(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var ct *closuretree.Tree
+			var ct *ct.Tree
 			var err error
 
-			ct, err = closuretree.New(db.ConnDbName("populatetree"), TestPayload{})
+			ct, err = ct.New(db.ConnDbName("populatetree"), TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -296,11 +296,11 @@ func TestTreeGetNode(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			var setupOnce sync.Once
-			var ct *closuretree.Tree
+			var ct *ct.Tree
 			setup := func(t *testing.T) {
 				var err error
 				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+					ct, err = ct.New(db.ConnDbName(t.Name()), TestPayload{})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -319,14 +319,14 @@ func TestTreeGetNode(t *testing.T) {
 					name:        "get root node for tenant 1",
 					nodeID:      1,
 					in:          &TestPayload{},
-					wantPayload: TestPayload{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
+					wantPayload: TestPayload{Name: "Electronics", Node: ct.Node{NodeId: 1, Tenant: tenant1}},
 					tenant:      tenant1,
 				},
 				{
 					name:        "get node on Tenant 2",
 					nodeID:      7,
 					in:          &TestPayload{},
-					wantPayload: TestPayload{Name: "Colors", Node: closuretree.Node{NodeId: 7, Tenant: tenant2}},
+					wantPayload: TestPayload{Name: "Colors", Node: ct.Node{NodeId: 7, Tenant: tenant2}},
 					tenant:      tenant2,
 				},
 				{
@@ -335,7 +335,7 @@ func TestTreeGetNode(t *testing.T) {
 					in:          &map[string]string{},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.ItemIsNotTreeNode.Error(),
+					wantErr:     ct.ItemIsNotTreeNode.Error(),
 				},
 				{
 					name:        "expect err because not passing pointer",
@@ -351,7 +351,7 @@ func TestTreeGetNode(t *testing.T) {
 					in:          &TestPayload{},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.NodeNotFoundErr.Error(),
+					wantErr:     ct.NodeNotFoundErr.Error(),
 				},
 			}
 			for _, tc := range tcs {
@@ -386,11 +386,11 @@ func TestUpdate(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			var setupOnce sync.Once
-			var ct *closuretree.Tree
+			var ct *ct.Tree
 			setup := func(t *testing.T) {
 				var err error
 				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+					ct, err = ct.New(db.ConnDbName(t.Name()), TestPayload{})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -409,7 +409,7 @@ func TestUpdate(t *testing.T) {
 					name:        "get root node for tenant 1",
 					nodeID:      1,
 					in:          TestPayload{Name: "Banana"},
-					wantPayload: TestPayload{Name: "Banana", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
+					wantPayload: TestPayload{Name: "Banana", Node: ct.Node{NodeId: 1, Tenant: tenant1}},
 					tenant:      tenant1,
 				},
 				{
@@ -418,7 +418,7 @@ func TestUpdate(t *testing.T) {
 					in:          &map[string]string{},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.ItemIsNotTreeNode.Error(),
+					wantErr:     ct.ItemIsNotTreeNode.Error(),
 				},
 				{
 					name:        "empty result on wrong Tenant",
@@ -426,7 +426,7 @@ func TestUpdate(t *testing.T) {
 					in:          TestPayload{Name: "Banana"},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.NodeNotFoundErr.Error(),
+					wantErr:     ct.NodeNotFoundErr.Error(),
 				},
 			}
 			for _, tc := range tcs {
@@ -465,11 +465,11 @@ func TestGetDescendants(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			var setupOnce sync.Once
-			var ct *closuretree.Tree
+			var ct *ct.Tree
 			setup := func(t *testing.T) {
 				var err error
 				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+					ct, err = ct.New(db.ConnDbName(t.Name()), TestPayload{})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -489,9 +489,9 @@ func TestGetDescendants(t *testing.T) {
 					parent: 1,
 					depth:  0,
 					wantPayload: []TestPayload{
-						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1}},
-						{Name: "Laptops", Node: closuretree.Node{NodeId: 4, Tenant: tenant1}},
-						{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, Tenant: tenant1}},
+						{Name: "Mobile Phones", Node: ct.Node{NodeId: 2, Tenant: tenant1}},
+						{Name: "Laptops", Node: ct.Node{NodeId: 4, Tenant: tenant1}},
+						{Name: "Touch Screen", Node: ct.Node{NodeId: 6, Tenant: tenant1}},
 					},
 					wantIds: []uint{2, 4, 6},
 					tenant:  tenant1,
@@ -501,11 +501,11 @@ func TestGetDescendants(t *testing.T) {
 					parent: 7,
 					depth:  0,
 					wantPayload: []TestPayload{
-						{Name: "Warm", Node: closuretree.Node{NodeId: 8, Tenant: tenant2}},
-						{Name: "Cold", Node: closuretree.Node{NodeId: 10, Tenant: tenant2}},
-						{Name: "Red", Node: closuretree.Node{NodeId: 12, Tenant: tenant2}},
-						{Name: "Orange", Node: closuretree.Node{NodeId: 13, Tenant: tenant2}},
-						{Name: "Blue", Node: closuretree.Node{NodeId: 14, Tenant: tenant2}},
+						{Name: "Warm", Node: ct.Node{NodeId: 8, Tenant: tenant2}},
+						{Name: "Cold", Node: ct.Node{NodeId: 10, Tenant: tenant2}},
+						{Name: "Red", Node: ct.Node{NodeId: 12, Tenant: tenant2}},
+						{Name: "Orange", Node: ct.Node{NodeId: 13, Tenant: tenant2}},
+						{Name: "Blue", Node: ct.Node{NodeId: 14, Tenant: tenant2}},
 					},
 					wantIds: []uint{8, 10, 12, 13, 14},
 					tenant:  tenant2,
@@ -515,8 +515,8 @@ func TestGetDescendants(t *testing.T) {
 					parent: 0,
 					depth:  1,
 					wantPayload: []TestPayload{
-						{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
-						{Name: "Clothing", Node: closuretree.Node{NodeId: 3, Tenant: tenant1}},
+						{Name: "Electronics", Node: ct.Node{NodeId: 1, Tenant: tenant1}},
+						{Name: "Clothing", Node: ct.Node{NodeId: 3, Tenant: tenant1}},
 					},
 					wantIds: []uint{1, 3},
 					tenant:  tenant1,
@@ -526,8 +526,8 @@ func TestGetDescendants(t *testing.T) {
 					parent: 0,
 					depth:  1,
 					wantPayload: []TestPayload{
-						{Name: "Colors", Node: closuretree.Node{NodeId: 7, Tenant: tenant2}},
-						{Name: "Sizes", Node: closuretree.Node{NodeId: 9, Tenant: tenant2}},
+						{Name: "Colors", Node: ct.Node{NodeId: 7, Tenant: tenant2}},
+						{Name: "Sizes", Node: ct.Node{NodeId: 9, Tenant: tenant2}},
 					},
 					wantIds: []uint{7, 9},
 					tenant:  tenant2,
@@ -571,11 +571,11 @@ func TestGetTreeDescendants(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			var setupOnce sync.Once
-			var ct *closuretree.Tree
+			var ct *ct.Tree
 			setup := func(t *testing.T) {
 				var err error
 				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+					ct, err = ct.New(db.ConnDbName(t.Name()), TestPayload{})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -587,7 +587,7 @@ func TestGetTreeDescendants(t *testing.T) {
 				parent      uint
 				depth       int
 				wantPayload []*TestPayload
-				wantIds     []*closuretree.TreeNode
+				wantIds     []*ct.TreeNode
 				tenant      string
 			}{
 				{
@@ -595,17 +595,17 @@ func TestGetTreeDescendants(t *testing.T) {
 					parent: 1,
 					depth:  0,
 					wantPayload: []*TestPayload{
-						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1},
+						{Name: "Mobile Phones", Node: ct.Node{NodeId: 2, Tenant: tenant1},
 							Children: []*TestPayload{
-								{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, Tenant: tenant1}},
+								{Name: "Touch Screen", Node: ct.Node{NodeId: 6, Tenant: tenant1}},
 							},
 						},
-						{Name: "Laptops", Node: closuretree.Node{NodeId: 4, Tenant: tenant1}},
+						{Name: "Laptops", Node: ct.Node{NodeId: 4, Tenant: tenant1}},
 					},
-					wantIds: []*closuretree.TreeNode{
+					wantIds: []*ct.TreeNode{
 						{
 							NodeId: 2, AncestorID: 1,
-							Children: []*closuretree.TreeNode{
+							Children: []*ct.TreeNode{
 								{NodeId: 6, AncestorID: 2},
 							},
 						},
@@ -618,28 +618,28 @@ func TestGetTreeDescendants(t *testing.T) {
 					parent: 7,
 					depth:  0,
 					wantPayload: []*TestPayload{
-						{Name: "Warm", Node: closuretree.Node{NodeId: 8, Tenant: tenant2},
+						{Name: "Warm", Node: ct.Node{NodeId: 8, Tenant: tenant2},
 							Children: []*TestPayload{
-								{Name: "Red", Node: closuretree.Node{NodeId: 12, Tenant: tenant2}},
-								{Name: "Orange", Node: closuretree.Node{NodeId: 13, Tenant: tenant2}},
+								{Name: "Red", Node: ct.Node{NodeId: 12, Tenant: tenant2}},
+								{Name: "Orange", Node: ct.Node{NodeId: 13, Tenant: tenant2}},
 							}},
-						{Name: "Cold", Node: closuretree.Node{NodeId: 10, Tenant: tenant2},
+						{Name: "Cold", Node: ct.Node{NodeId: 10, Tenant: tenant2},
 							Children: []*TestPayload{
-								{Name: "Blue", Node: closuretree.Node{NodeId: 14, Tenant: tenant2}},
+								{Name: "Blue", Node: ct.Node{NodeId: 14, Tenant: tenant2}},
 							}},
 					},
 					//wantIds: []uint{8, 10, 12, 13, 14},
-					wantIds: []*closuretree.TreeNode{
+					wantIds: []*ct.TreeNode{
 						{
 							NodeId: 8, AncestorID: 7,
-							Children: []*closuretree.TreeNode{
+							Children: []*ct.TreeNode{
 								{NodeId: 12, AncestorID: 8},
 								{NodeId: 13, AncestorID: 8},
 							},
 						},
 						{
 							NodeId: 10, AncestorID: 7,
-							Children: []*closuretree.TreeNode{
+							Children: []*ct.TreeNode{
 								{NodeId: 14, AncestorID: 10},
 							},
 						},
@@ -651,10 +651,10 @@ func TestGetTreeDescendants(t *testing.T) {
 					parent: 0,
 					depth:  1,
 					wantPayload: []*TestPayload{
-						{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1}},
-						{Name: "Clothing", Node: closuretree.Node{NodeId: 3, Tenant: tenant1}},
+						{Name: "Electronics", Node: ct.Node{NodeId: 1, Tenant: tenant1}},
+						{Name: "Clothing", Node: ct.Node{NodeId: 3, Tenant: tenant1}},
 					},
-					wantIds: []*closuretree.TreeNode{
+					wantIds: []*ct.TreeNode{
 						{NodeId: 1, AncestorID: 0},
 						{NodeId: 3, AncestorID: 0},
 					},
@@ -687,7 +687,7 @@ func TestGetTreeDescendants(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					closuretree.SortTree(got)
+					ct.SortTree(got)
 
 					if diff := cmp.Diff(got, tc.wantIds); diff != "" {
 						t.Errorf("unexpected result (-want +got):\n%s", diff)
@@ -710,8 +710,8 @@ func SortTestPayload(nodes []*TestPayload) {
 func TestMove(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			setup := func(t *testing.T, name string) *closuretree.Tree {
-				ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			setup := func(t *testing.T, name string) *ct.Tree {
+				ct, err := ct.New(db.ConnDbName(t.Name()), TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -790,8 +790,8 @@ func TestMove(t *testing.T) {
 func TestDelete(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			setup := func(t *testing.T, name string) *closuretree.Tree {
-				ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			setup := func(t *testing.T, name string) *ct.Tree {
+				ct, err := ct.New(db.ConnDbName(t.Name()), TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
