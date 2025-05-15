@@ -292,7 +292,10 @@ func (ct *Tree) Move(nodeId, newParentID uint, tenant string) error {
 		}
 		// make sure we don't delete items if nothing was moved, e.g. if we try to move cross Tenant unsuccessful
 		if exec1.RowsAffected == 0 {
-			return nil
+			// todo: this situation might be that the target parent does not exist or that it is trying to move
+			// the item to a different tenant, other errors might happen as well
+			// this error is not able to identify the differences between
+			return errors.New("node not moved to desired parent")
 		}
 
 		// Delete old closure relationships

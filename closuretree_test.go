@@ -731,6 +731,7 @@ func TestMove(t *testing.T) {
 				dest    uint
 				tenant  string
 				wantIds []idCheck // for every key in the map check the resulting slice
+				wantErr string
 			}{
 				{
 					name:   "move a parent node on Tenant 1",
@@ -761,7 +762,8 @@ func TestMove(t *testing.T) {
 						{parent: 8, tenant: tenant2, want: []uint{12, 13}},
 						{parent: 8, tenant: tenant1, want: []uint{}},
 					},
-					tenant: tenant1,
+					wantErr: "node not moved to desired parent",
+					tenant:  tenant1,
 				},
 			}
 
@@ -769,10 +771,18 @@ func TestMove(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					ct := setup(t, fmt.Sprintf("IT_move_%d", i))
 					err := ct.Move(tc.origin, tc.dest, tc.tenant)
-					if err != nil {
-						t.Fatal(err)
+					if tc.wantErr != "" {
+						if err == nil {
+							t.Fatalf("expected error \"%s\" but got no error at all", tc.wantErr)
+						}
+						if err.Error() != tc.wantErr {
+							t.Errorf("unexpected error \"%s\" , want: \"%s\" ", err.Error(), tc.wantErr)
+						}
+					} else {
+						if err != nil {
+							t.Errorf("unexpected error \"%s\" ", err.Error())
+						}
 					}
-
 					for _, checkId := range tc.wantIds {
 						got, err := ct.DescendantIds(checkId.parent, 0, checkId.tenant)
 						if err != nil {
@@ -783,6 +793,7 @@ func TestMove(t *testing.T) {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
+
 				})
 			}
 		})
