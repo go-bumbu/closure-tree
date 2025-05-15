@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"gorm.io/gorm"
@@ -11,9 +12,9 @@ import (
 
 const closureTblName = "closure_tree_rel"
 
-var ItemIsNotTreeNode = errors.New("the item does not embed Node")
-var ParentNotFoundErr = errors.New("wrong parent ID")
-var NodeNotFoundErr = errors.New("node not found")
+var ErrItemIsNotTreeNode = errors.New("the item does not embed Node")
+var ErrParentNotFoundErr = errors.New("wrong parent ID")
+var ErrNodeNotFoundErr = errors.New("node not found")
 
 // Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items
 type Tree struct {
@@ -50,7 +51,7 @@ func New(db *gorm.DB, item any) (*Tree, error) {
 	}
 
 	if !hasNode(item) {
-		return nil, ItemIsNotTreeNode
+		return nil, ErrItemIsNotTreeNode
 	}
 
 	err = db.AutoMigrate(item)
@@ -97,9 +98,11 @@ func defaultTenant(in string) string {
 
 // Add will add a new entry into the node Database under a specific parent and owned to a specific tenant
 // Note: the passed item has to embed a Node struct, but any value added to the Node will be ignored
+//
+//nolint:gocyclo // excluding from linter since implementation was done before we enabled the linter
 func (ct *Tree) Add(item any, parentID uint, tenant string) error {
 	if !hasNode(item) {
-		return ItemIsNotTreeNode
+		return ErrItemIsNotTreeNode
 	}
 	tenant = defaultTenant(tenant)
 
@@ -141,7 +144,7 @@ func (ct *Tree) Add(item any, parentID uint, tenant string) error {
 			First(&parent).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ParentNotFoundErr
+				return ErrParentNotFoundErr
 			}
 			return fmt.Errorf("unable to check parent node: %v", err)
 		}
@@ -226,7 +229,7 @@ const addRootRelQuery = `INSERT INTO %s (ancestor_id, descendant_id, Tenant, dep
 // Note: the passed item has to embed a Node struct, but any value added to the Node will be ignored
 func (ct *Tree) Update(id uint, item any, tenant string) error {
 	if !hasNode(item) {
-		return ItemIsNotTreeNode
+		return ErrItemIsNotTreeNode
 	}
 	tenant = defaultTenant(tenant)
 
@@ -268,7 +271,7 @@ func (ct *Tree) Update(id uint, item any, tenant string) error {
 			return fmt.Errorf("unable to update node: %v", res.Error)
 		}
 		if res.RowsAffected == 0 {
-			return NodeNotFoundErr
+			return ErrNodeNotFoundErr
 		}
 
 		return nil
@@ -381,7 +384,7 @@ const deleteRelationsQuery = `WITH descendants AS
 func (ct *Tree) GetNode(nodeID uint, tenant string, item any) error {
 
 	if !hasNode(item) {
-		return ItemIsNotTreeNode
+		return ErrItemIsNotTreeNode
 	}
 	tenant = defaultTenant(tenant)
 	t := reflect.TypeOf(item)
@@ -395,7 +398,7 @@ func (ct *Tree) GetNode(nodeID uint, tenant string, item any) error {
 		First(item).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return NodeNotFoundErr
+			return ErrNodeNotFoundErr
 		}
 		return fmt.Errorf("unable to check parent node: %v", err)
 	}
@@ -480,8 +483,57 @@ const absMaxDepth = 2147483647 // limited by the max value of postgres bigint
 // parent determines the root node id of to load.
 // maxDepth determines the depth of the relationship o load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
-func (ct *Tree) TreeDescendants(parent uint, maxDepth int, tenant string, items any) error {
+func (ct *Tree) TreeDescendants(parent uint, maxDepth int, tenant string, items any) (err error) {
+	if err := validateItems(items); err != nil {
+		return err
+	}
 
+	itemsVal := reflect.ValueOf(items)
+	sliceVal := itemsVal.Elem()
+	elemType := sliceVal.Type().Elem()
+
+	tenant = defaultTenant(tenant)
+
+	if maxDepth <= 0 {
+		maxDepth = absMaxDepth
+	} else {
+		// this is needed because the query will list first level as depth =0, children are depth = 1
+		maxDepth = maxDepth - 1
+	}
+
+	sqlQuery := fmt.Sprintf(treeDescendantsQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl, ct.nodesTbl)
+	rows, err := ct.db.Raw(sqlQuery, parent, tenant, tenant, maxDepth).Rows()
+	if err != nil {
+		return fmt.Errorf("failed to fetch tree descendants: %w", err)
+	}
+	defer func() {
+		e := rows.Close()
+		if err == nil { // don't overwrite the original error
+			err = e
+		}
+	}()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return fmt.Errorf("failed to read column names: %w", err)
+	}
+
+	nodes, ancestorMap, err := scanRowsToNodes(rows, columns, ct.col2FieldMap, elemType)
+	if err != nil {
+		return err
+	}
+
+	rootNodes := buildTreeHierarchy(nodes, ancestorMap)
+	for _, node := range rootNodes {
+		sliceVal.Set(reflect.Append(sliceVal, node))
+	}
+
+	return nil
+}
+
+// --- Helper Functions ---
+
+func validateItems(items any) error {
 	if items == nil {
 		return errors.New("items cannot be nil")
 	}
@@ -493,129 +545,106 @@ func (ct *Tree) TreeDescendants(parent uint, maxDepth int, tenant string, items 
 	if sliceVal.Kind() != reflect.Slice {
 		return errors.New("items must point to a slice")
 	}
-	// Get the slice element type. We expect a pointer to a struct.
-	elemType := sliceVal.Type().Elem() // e.g., *MyCustom
+	elemType := sliceVal.Type().Elem()
 	if elemType.Kind() != reflect.Ptr || elemType.Elem().Kind() != reflect.Struct {
 		return errors.New("slice element type must be a pointer to a struct")
 	}
+	return nil
+}
 
-	tenant = defaultTenant(tenant)
-	if maxDepth <= 0 {
-		maxDepth = absMaxDepth
-	} else {
-		// this is needed because the query will list first level as depth =0, children are depth = 1
-		maxDepth = maxDepth - 1
-	}
-
-	sqlstr := fmt.Sprintf(treeDescendantsQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl, ct.nodesTbl)
-	rows, err := ct.db.Raw(sqlstr, parent, tenant, tenant, maxDepth).Rows()
-	if err != nil {
-		return fmt.Errorf("failed to fetch tree descendants: %w", err)
-	}
-	defer rows.Close()
-
-	columns, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("failed to fetch tree descendants: unable to read column names: %w", err)
-	}
-
-	// Step 1. Create an instance for each node stored in a flat map
+func scanRowsToNodes(rows *sql.Rows, columns []string, col2FieldMap map[string]string, elemType reflect.Type) (
+	map[int64]reflect.Value, map[int64]int64, error,
+) {
 	nodes := make(map[int64]reflect.Value)
 	ancestorMap := make(map[int64]int64)
 
 	for rows.Next() {
-		// Prepare a slice of empty interfaces to store values dynamically
 		values := make([]interface{}, len(columns))
 		valuePtrs := make([]interface{}, len(columns))
-
-		// Create pointers to each value
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
-
-		// Scan the row into pointers
 		if err := rows.Scan(valuePtrs...); err != nil {
-			return fmt.Errorf("failed to fetch tree descendants: unable to scan row: %w", err)
+			return nil, nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
-		// Store row in a map
-		//rowMap := make(map[string]interface{})
-
-		newElem := reflect.New(elemType.Elem())
-		var newElemId int64
-		var newElemAncestor int64
-
-		for i, col := range columns {
-			fieldName, ok := ct.col2FieldMap[col]
-			if ok {
-				var value any
-				if b, ok := values[i].([]byte); ok {
-					value = string(b)
-				} else {
-					value = values[i]
-				}
-				if fieldName == nodeIDField {
-					newElemId = value.(int64)
-				}
-				if fieldName == "ancestorId" {
-					newElemAncestor = value.(int64)
-				}
-
-				// skip private fields
-				fieldVal := newElem.Elem().FieldByName(fieldName)
-				if !fieldVal.IsValid() || !fieldVal.CanSet() {
-					continue
-				}
-				val := reflect.ValueOf(value)
-				if val.Type().AssignableTo(fieldVal.Type()) {
-					fieldVal.Set(val)
-				} else if val.Type().ConvertibleTo(fieldVal.Type()) {
-					fieldVal.Set(val.Convert(fieldVal.Type()))
-				} else {
-					return fmt.Errorf("cannot assign value of type %s to field %s of type %s", val.Type(), fieldName, fieldVal.Type())
-				}
-			}
+		node, nodeID, ancestorID, err := mapRowToStruct(values, columns, col2FieldMap, elemType)
+		if err != nil {
+			return nil, nil, err
 		}
-		// store the item in a map and the ancestor relationship in another
-		ancestorMap[newElemId] = newElemAncestor
-		nodes[newElemId] = newElem
+		nodes[nodeID] = node
+		ancestorMap[nodeID] = ancestorID
 	}
 
-	// Step 2. Build the tree.
-	// For each node, look up its "ancestorId"
-	// append it as a child to the parent's Children slice.
-	// Nodes without an ancestor are considered root nodes.
-	roots := []reflect.Value{}
-	for nodeID, nodeVal := range nodes {
-		// Retrieve the corresponding data map.
-		ancestor, exists := ancestorMap[nodeID]
-		if !exists {
-			// No ancestorId means this is a root node.
-			roots = append(roots, nodeVal)
+	return nodes, ancestorMap, nil
+}
+
+func mapRowToStruct(values []interface{}, columns []string, col2FieldMap map[string]string, elemType reflect.Type) (
+	reflect.Value, int64, int64, error,
+) {
+	newElem := reflect.New(elemType.Elem())
+	var nodeID, ancestorID int64
+
+	for i, col := range columns {
+		fieldName, ok := col2FieldMap[col]
+		if !ok {
+			continue
+		}
+
+		var value any
+		if b, ok := values[i].([]byte); ok {
+			value = string(b)
 		} else {
-			parentNode, found := nodes[ancestor]
-			if !found {
-				// If the parent is not found, treat this node as a root.
-				roots = append(roots, nodeVal)
-			} else {
-				// Append nodeVal to the parent's Children field.
-				childrenField := parentNode.Elem().FieldByName("Children")
-				if !childrenField.IsValid() {
-					return fmt.Errorf("children field not found in node %d", nodeID)
-				}
-				// Append the child.
-				childrenField.Set(reflect.Append(childrenField, nodeVal))
-			}
+			value = values[i]
+		}
+
+		if fieldName == nodeIDField {
+			nodeID = value.(int64)
+		}
+		if fieldName == "ancestorId" {
+			ancestorID = value.(int64)
+		}
+
+		fieldVal := newElem.Elem().FieldByName(fieldName)
+		if !fieldVal.IsValid() || !fieldVal.CanSet() {
+			continue
+		}
+
+		val := reflect.ValueOf(value)
+		if val.Type().AssignableTo(fieldVal.Type()) {
+			fieldVal.Set(val)
+		} else if val.Type().ConvertibleTo(fieldVal.Type()) {
+			fieldVal.Set(val.Convert(fieldVal.Type()))
+		} else {
+			return reflect.Value{}, 0, 0, fmt.Errorf("cannot assign type %s to field %s", val.Type(), fieldName)
 		}
 	}
 
-	// Step 3. Set the result slice (pointed to by items) to the slice of root nodes.
-	for _, node := range roots {
-		sliceVal.Set(reflect.Append(sliceVal, node))
+	return newElem, nodeID, ancestorID, nil
+}
+
+func buildTreeHierarchy(nodes map[int64]reflect.Value, ancestorMap map[int64]int64) []reflect.Value {
+	var roots []reflect.Value
+
+	for nodeID, node := range nodes {
+		ancestorID, hasAncestor := ancestorMap[nodeID]
+		if !hasAncestor {
+			roots = append(roots, node)
+			continue
+		}
+
+		parent, found := nodes[ancestorID]
+		if !found {
+			roots = append(roots, node)
+			continue
+		}
+
+		childrenField := parent.Elem().FieldByName("Children")
+		if childrenField.IsValid() {
+			childrenField.Set(reflect.Append(childrenField, node))
+		}
 	}
-
-	return nil
-
+	return roots
 }
 
 const treeDescendantsQuery = `WITH RECURSIVE Tree AS (
@@ -644,7 +673,7 @@ const treeDescendantsQuery = `WITH RECURSIVE Tree AS (
 	SELECT  * FROM Tree ORDER BY depth;`
 
 // TreeDescendantsIds returns the tree structure of the descendants to the passed item
-func (ct *Tree) TreeDescendantsIds(parent uint, maxDepth int, tenant string) ([]*TreeNode, error) {
+func (ct *Tree) TreeDescendantsIds(parent uint, maxDepth int, tenant string) (tree []*TreeNode, err error) {
 	tenant = defaultTenant(tenant)
 	nodeMap := make(map[uint]*TreeNode)
 
@@ -660,7 +689,12 @@ func (ct *Tree) TreeDescendantsIds(parent uint, maxDepth int, tenant string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch tree descendants: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		e := rows.Close()
+		if err == nil { // don't overwrite the original error
+			err = e
+		}
+	}()
 
 	for rows.Next() {
 		var node TreeNode

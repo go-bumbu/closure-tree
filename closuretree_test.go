@@ -80,6 +80,7 @@ type NodeDetails struct {
 const tenant1 = "t1"
 const tenant2 = "t2"
 
+//nolint:gosec // int conversion is not critical here
 func getNodeDetails(item any) (bool, int, string) {
 
 	itemValue := reflect.ValueOf(item)
@@ -177,13 +178,13 @@ func TestAddNodes(t *testing.T) {
 					topItemDetails:   NodeDetails{Tenant: "T1"},
 					childItemDetails: NodeDetails{Tenant: "T2"},
 					topItemExpect:    NodeDetails{Id: 1, Tenant: "T1"},
-					childItemExpect:  NodeDetails{Err: closuretree.ParentNotFoundErr.Error()},
+					childItemExpect:  NodeDetails{Err: closuretree.ErrParentNotFoundErr.Error()},
 				},
 				{
 					name:            "Struct without ID field",
 					topItem:         &struct{ Name string }{Name: "NoID"},
-					topItemExpect:   NodeDetails{Err: closuretree.ItemIsNotTreeNode.Error()},
-					childItemExpect: NodeDetails{Err: closuretree.ItemIsNotTreeNode.Error()},
+					topItemExpect:   NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
+					childItemExpect: NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
 				},
 			}
 
@@ -335,7 +336,7 @@ func TestTreeGetNode(t *testing.T) {
 					in:          &map[string]string{},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.ItemIsNotTreeNode.Error(),
+					wantErr:     closuretree.ErrItemIsNotTreeNode.Error(),
 				},
 				{
 					name:        "expect err because not passing pointer",
@@ -351,7 +352,7 @@ func TestTreeGetNode(t *testing.T) {
 					in:          &TestPayload{},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.NodeNotFoundErr.Error(),
+					wantErr:     closuretree.ErrNodeNotFoundErr.Error(),
 				},
 			}
 			for _, tc := range tcs {
@@ -418,7 +419,7 @@ func TestUpdate(t *testing.T) {
 					in:          &map[string]string{},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.ItemIsNotTreeNode.Error(),
+					wantErr:     closuretree.ErrItemIsNotTreeNode.Error(),
 				},
 				{
 					name:        "empty result on wrong Tenant",
@@ -426,7 +427,7 @@ func TestUpdate(t *testing.T) {
 					in:          TestPayload{Name: "Banana"},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.NodeNotFoundErr.Error(),
+					wantErr:     closuretree.ErrNodeNotFoundErr.Error(),
 				},
 			}
 			for _, tc := range tcs {

@@ -102,7 +102,7 @@ func ExampleTree_TreeDescendants() {
 	warmTag := Tag{Name: "warm", Node: ct.Node{}}
 	_ = tree.Add(&warmTag, colorTag.Id(), tenant)
 	_ = tree.Add(Tag{Name: "orange", Node: ct.Node{}}, warmTag.Id(), tenant)
-	// you can specify an unique ID for the branch
+	// you can specify a unique ID for the branch
 	_ = tree.Add(Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
 
 	sizes := Tag{Name: "sizes"}
@@ -128,7 +128,7 @@ func ExampleTree_TreeDescendants() {
 
 func printTree(nodes []*NestedTag, indent string) {
 	for _, n := range nodes {
-		fmt.Printf("%s%d=> %s\n", indent, n.Node.NodeId, n.Name)
+		fmt.Printf("%s%d=> %s\n", indent, n.NodeId, n.Name)
 		if len(n.Children) > 0 {
 			printTree(n.Children, "|- ")
 		}
@@ -146,7 +146,7 @@ type Genre struct {
 	Name    string
 }
 
-//nolint:govet
+//nolint:govet // example illustrates complex use-case
 func ExampleTreeWithM2MRelations() {
 
 	db := getGormDb("booksM2M.example")
@@ -260,7 +260,7 @@ type Song struct {
 	Genres []Genre `gorm:"many2many:songs_genres;"`
 }
 
-//nolint:govet
+//nolint:govet // example illustrates complex use-case
 func ExampleTreeWithLeaves() {
 
 	db := getGormDb("booksM2M.example")

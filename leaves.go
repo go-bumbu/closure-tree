@@ -18,7 +18,7 @@ func (n *Leave) Id() uint {
 	return n.LeaveId
 }
 
-var ItemIsNotTreeLeave = errors.New("the item does not embed Leave")
+var ErrItemIsNotTreeLeave = errors.New("the item does not embed Leave")
 
 // isLeaveSlice uses reflection to verify if the passed item is a pointer to a slise that embedded Leave struct
 // returns an error for every condition checked, returns nil if the passed item is as expected
@@ -68,7 +68,7 @@ func isLeaveSlice(item any) error {
 	}
 
 	if !hasLeave {
-		return ItemIsNotTreeLeave
+		return ErrItemIsNotTreeLeave
 	}
 
 	if !hasManyToMany {
