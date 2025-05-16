@@ -7,10 +7,10 @@ default: help
 ##@ Testing
 #==========================================================================================
 test: ## run fast go tests
-	@go test ./...  -cover
+	@go test ./...
 
 test-full: ## run go full tests (uses test containers)
-	@go test ./... -alldbs -cover
+	@go test ./... -alldbs
 
 test-race: ## run go full tests with race test (uses test containers)
 	@go test ./... -race -count 2
@@ -27,13 +27,34 @@ benchmark: ## run go benchmarks
 	@go test -run=^$$ -bench=. ./...
 
 .PHONY: verify
-verify: license-check lint test-full benchmark ## run all tests
+verify: lint test-full license-check benchmark coverage ## run all tests
 
+# Default coverage threshold is 80
+COVERAGE_THRESHOLD ?= 80
+
+.PHONY: coverage
+coverage: ## check code coverage numbers
+	@go test -coverprofile=coverage.out -covermode=atomic ./ > /dev/null; \
+	if [ -f coverage.out ]; then \
+		coverage=$$(go tool cover -func=coverage.out | grep total: | awk '{print $$3}' | sed 's/%//'); \
+		if [ $$(echo "$$coverage < $(COVERAGE_THRESHOLD)" | bc -l) -eq 1 ]; then \
+			echo "❌ Test coverage is below $(COVERAGE_THRESHOLD)%! Actual: $$coverage%"; \
+			exit 1; \
+		else \
+			echo "✅ Test coverage is $$coverage%"; \
+		fi; \
+		rm -f coverage.out; \
+	else \
+		echo "⚠️ No test coverage data found"; \
+		exit 1; \
+	fi
 
 cover-report: ## generate a coverage report
 	go test -covermode=count -coverpkg=./... -coverprofile cover.out  ./...
 	go tool cover -html cover.out -o cover.html
 	open cover.html
+
+
 
 clean:  ## delete test generated data
 	@rm -f *.sqlite

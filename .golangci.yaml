@@ -1,0 +1,41 @@
+version: "2"
+linters:
+  default: standard # errcheck,govet,ineffassign,staticcheck,unused
+  enable:
+    - nolintlint
+    - gocyclo
+    - nestif
+    - gosec
+    - dupl
+
+  # exclude test files
+  exclusions:
+    rules:
+      - path: '(.+)_test\.go'
+        linters:
+          - noop
+          - nestif
+          - dupl
+
+  settings:
+    nolintlint:
+      # Exclude following linters from requiring an explanation.
+      allow-no-explanation: []
+      # Enable to require an explanation of nonzero length after each nolint directive.
+      require-explanation: true
+      # Enable to require nolint directives to mention the specific linter being suppressed.
+      require-specific: true
+    gocyclo:
+      min-complexity: 20  # Default: 30 (but we recommend 10-20)
+    gocognit:
+      min-complexity: 20  # Default: 30 (but we recommend 10-20)
+    nestif:
+      min-complexity: 5   # Default: 5
+
+
+output:
+  sort-results: true
+  sort-order:
+    - file
+    - severity
+    - linter

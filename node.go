@@ -53,48 +53,53 @@ func getNodeData(item interface{}) (uint, string, error) {
 		return 0, "", errors.New("getTenant: item cannot be nil")
 	}
 
-	itemType := reflect.TypeOf(item)
-	itemValue := reflect.ValueOf(item)
-	if itemType.Kind() == reflect.Ptr {
-		itemType = itemType.Elem()
-		itemValue = itemValue.Elem()
-	}
-
+	itemType, itemValue := dereference(item)
 	if itemType.Kind() != reflect.Struct {
 		return 0, "", errors.New("getTenant: item is not a struct")
 	}
-	tenant := ""
-	id := uint(0)
-	// Check if the struct is the Node struct itself
+
+	// Try to extract data if it's a Node struct
 	if itemType == reflect.TypeOf(Node{}) {
-		tenantField := itemValue.FieldByName(tenantIdField)
-		if tenantField.IsValid() {
-			tenant = tenantField.String()
-		}
-		idField := itemValue.FieldByName(nodeIDField)
-		if idField.IsValid() && idField.CanUint() {
-			id = uint(idField.Uint())
-		}
-		return id, tenant, nil
+		return extractNodeFields(itemValue)
 	}
 
+	// Try to extract from anonymous embedded Node
 	for i := 0; i < itemType.NumField(); i++ {
 		field := itemType.Field(i)
 		fieldValue := itemValue.Field(i)
-		if field.Anonymous {
-			if field.Type == reflect.TypeOf(Node{}) {
-				embeddedTenant := fieldValue.FieldByName(tenantIdField)
-				if embeddedTenant.IsValid() {
-					tenant = embeddedTenant.String()
-				}
-				embeddedId := fieldValue.FieldByName(nodeIDField)
-				if embeddedId.IsValid() && embeddedId.CanUint() {
-					id = uint(embeddedId.Uint())
-				}
-				return id, tenant, nil
-			}
+
+		if field.Anonymous && field.Type == reflect.TypeOf(Node{}) {
+			return extractNodeFields(fieldValue)
 		}
 	}
 
 	return 0, "", errors.New("struct Node not found")
+}
+
+func dereference(item interface{}) (reflect.Type, reflect.Value) {
+	t := reflect.TypeOf(item)
+	v := reflect.ValueOf(item)
+
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+		v = v.Elem()
+	}
+	return t, v
+}
+
+func extractNodeFields(val reflect.Value) (uint, string, error) {
+	var tenant string
+	var id uint
+
+	tenantField := val.FieldByName(tenantIdField)
+	if tenantField.IsValid() {
+		tenant = tenantField.String()
+	}
+
+	idField := val.FieldByName(nodeIDField)
+	if idField.IsValid() && idField.CanUint() {
+		id = uint(idField.Uint())
+	}
+
+	return id, tenant, nil
 }
