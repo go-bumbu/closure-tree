@@ -350,7 +350,9 @@ func (ct *Tree) DeleteRecurse(nodeId uint, tenant string) error {
 
 		// make sure we don't delete relations if no node was deleted
 		if exec1.RowsAffected == 0 {
-			return nil
+			// note: for now we assume that if no row were affected we could not find either the node to move
+			// or the new parent, either because they don't exist or because they belong to another tenant
+			return ErrNodeNotFound
 		}
 
 		// Delete old closure relationships

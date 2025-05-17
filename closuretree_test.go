@@ -822,6 +822,7 @@ func TestDelete(t *testing.T) {
 				nodeId  uint
 				tenant  string
 				wantIds []idCheck // for every key in the map check the resulting slice
+				wantErr string
 			}{
 				{
 					name:   "delete a parent node on Tenant 1",
@@ -849,6 +850,7 @@ func TestDelete(t *testing.T) {
 					wantIds: []idCheck{
 						{parent: 1, tenant: tenant1, want: []uint{2, 4, 6}},
 					},
+					wantErr: "node not found",
 				},
 			}
 
@@ -856,8 +858,17 @@ func TestDelete(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					ct := setup(t, fmt.Sprintf("IT_delete_%d", i))
 					err := ct.DeleteRecurse(tc.nodeId, tc.tenant)
-					if err != nil {
-						t.Fatal(err)
+					if tc.wantErr != "" {
+						if err == nil {
+							t.Fatalf("expected error \"%s\" but got no error at all", tc.wantErr)
+						}
+						if err.Error() != tc.wantErr {
+							t.Errorf("unexpected error \"%s\" , want: \"%s\" ", err.Error(), tc.wantErr)
+						}
+					} else {
+						if err != nil {
+							t.Errorf("unexpected error \"%s\" ", err.Error())
+						}
 					}
 
 					for _, checkId := range tc.wantIds {
