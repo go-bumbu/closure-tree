@@ -178,7 +178,7 @@ func TestAddNodes(t *testing.T) {
 					topItemDetails:   NodeDetails{Tenant: "T1"},
 					childItemDetails: NodeDetails{Tenant: "T2"},
 					topItemExpect:    NodeDetails{Id: 1, Tenant: "T1"},
-					childItemExpect:  NodeDetails{Err: closuretree.ErrParentNotFoundErr.Error()},
+					childItemExpect:  NodeDetails{Err: closuretree.ErrParentNotFound.Error()},
 				},
 				{
 					name:            "Struct without ID field",
@@ -352,7 +352,7 @@ func TestTreeGetNode(t *testing.T) {
 					in:          &TestPayload{},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.ErrNodeNotFoundErr.Error(),
+					wantErr:     closuretree.ErrNodeNotFound.Error(),
 				},
 			}
 			for _, tc := range tcs {
@@ -427,7 +427,7 @@ func TestUpdate(t *testing.T) {
 					in:          TestPayload{Name: "Banana"},
 					wantPayload: TestPayload{},
 					tenant:      tenant1,
-					wantErr:     closuretree.ErrNodeNotFoundErr.Error(),
+					wantErr:     closuretree.ErrNodeNotFound.Error(),
 				},
 			}
 			for _, tc := range tcs {
@@ -762,7 +762,7 @@ func TestMove(t *testing.T) {
 						{parent: 8, tenant: tenant2, want: []uint{12, 13}},
 						{parent: 8, tenant: tenant1, want: []uint{}},
 					},
-					wantErr: "node not moved to desired parent",
+					wantErr: closuretree.ErrNodeNotFound.Error(),
 					tenant:  tenant1,
 				},
 			}

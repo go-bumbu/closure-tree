@@ -13,8 +13,8 @@ import (
 const closureTblName = "closure_tree_rel"
 
 var ErrItemIsNotTreeNode = errors.New("the item does not embed Node")
-var ErrParentNotFoundErr = errors.New("wrong parent ID")
-var ErrNodeNotFoundErr = errors.New("node not found")
+var ErrParentNotFound = errors.New("wrong parent ID")
+var ErrNodeNotFound = errors.New("node not found")
 
 // Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items
 type Tree struct {
@@ -144,7 +144,7 @@ func (ct *Tree) Add(item any, parentID uint, tenant string) error {
 			First(&parent).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrParentNotFoundErr
+				return ErrParentNotFound
 			}
 			return fmt.Errorf("unable to check parent node: %v", err)
 		}
@@ -271,7 +271,7 @@ func (ct *Tree) Update(id uint, item any, tenant string) error {
 			return fmt.Errorf("unable to update node: %v", res.Error)
 		}
 		if res.RowsAffected == 0 {
-			return ErrNodeNotFoundErr
+			return ErrNodeNotFound
 		}
 
 		return nil
@@ -292,10 +292,9 @@ func (ct *Tree) Move(nodeId, newParentID uint, tenant string) error {
 		}
 		// make sure we don't delete items if nothing was moved, e.g. if we try to move cross Tenant unsuccessful
 		if exec1.RowsAffected == 0 {
-			// todo: this situation might be that the target parent does not exist or that it is trying to move
-			// the item to a different tenant, other errors might happen as well
-			// this error is not able to identify the differences between
-			return errors.New("node not moved to desired parent")
+			// note: for now we assume that if no row were affected we could not find either the node to move
+			// or the new parent, either because they don't exist or because they belong to another tenant
+			return ErrNodeNotFound
 		}
 
 		// Delete old closure relationships
@@ -401,7 +400,7 @@ func (ct *Tree) GetNode(nodeID uint, tenant string, item any) error {
 		First(item).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrNodeNotFoundErr
+			return ErrNodeNotFound
 		}
 		return fmt.Errorf("unable to check parent node: %v", err)
 	}
