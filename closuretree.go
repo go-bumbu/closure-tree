@@ -418,33 +418,71 @@ func (ct *Tree) Descendants(parent uint, maxDepth int, tenant string, items inte
 		return errors.New("items cannot be nil")
 	}
 
-	// Check if items is a pointer to a slice using reflection
-	itemsValue := reflect.ValueOf(items)
-	if itemsValue.Kind() != reflect.Ptr {
+	itemsVal := reflect.ValueOf(items)
+	if itemsVal.Kind() != reflect.Ptr {
+		return errors.New("items must be a pointer to a slice")
+	}
+	sliceVal := itemsVal.Elem()
+	if sliceVal.Kind() != reflect.Slice {
 		return errors.New("items must be a pointer to a slice")
 	}
 
-	// Get the underlying slice
-	slice := itemsValue.Elem()
-	if slice.Kind() != reflect.Slice {
-		return errors.New("items must be a pointer to a slice")
+	elemType := sliceVal.Type().Elem()
+
+	// Prepare temp struct type with overridden ParentId tag
+	var fields []reflect.StructField
+	for i := 0; i < elemType.NumField(); i++ {
+		field := elemType.Field(i)
+		if field.Name == "ParentId" {
+			field.Tag = `json:"parentId"`
+		}
+		fields = append(fields, field)
+	}
+	tempStructType := reflect.StructOf(fields)
+
+	if tempStructType.Kind() != reflect.Struct {
+		return errors.New("tempStructType is not a struct")
 	}
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
 	}
-	sqlstr := fmt.Sprintf(descendantsQuery, ct.nodesTbl, ct.relationsTbl)
-	err := ct.db.Raw(sqlstr, parent, maxDepth, tenant).Scan(slice.Addr().Interface()).Error
+	sqlstr := fmt.Sprintf(descendantsQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl)
+
+	rows, err := ct.db.Raw(sqlstr, parent, maxDepth, tenant).Rows()
 	if err != nil {
-		return fmt.Errorf("failed to fetch descendants: %w", err)
+		return fmt.Errorf("failed to execute query: %w", err)
 	}
+	defer rows.Close()
+
+	for rows.Next() {
+		tempItem := reflect.New(tempStructType).Interface()
+		if err := ct.db.ScanRows(rows, tempItem); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
+		}
+
+		tempVal := reflect.ValueOf(tempItem).Elem()
+		origItem := reflect.New(elemType).Elem()
+
+		for i := 0; i < elemType.NumField(); i++ {
+			origField := origItem.Field(i)
+			tempField := tempVal.Field(i)
+			if origField.CanSet() {
+				origField.Set(tempField)
+			}
+		}
+
+		sliceVal.Set(reflect.Append(sliceVal, origItem))
+	}
+
 	return nil
 }
 
-const descendantsQuery = `SELECT nodes.*
+const descendantsQuery = `SELECT nodes.*, parent_rel.ancestor_id AS parent_id
 FROM %s AS nodes
 JOIN %s AS ct ON ct.descendant_id = nodes.node_id
-WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.Tenant = ?
+LEFT JOIN %s AS parent_rel ON parent_rel.descendant_id = nodes.node_id AND parent_rel.depth = 1
+WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.tenant = ?
 ORDER BY ct.depth;`
 
 // DescendantIds behaves the same as Descendants but only returns the node IDs for the search query.
