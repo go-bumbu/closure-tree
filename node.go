@@ -17,6 +17,10 @@ func (n *Node) Id() uint {
 	return n.NodeId
 }
 
+func (n *Node) Parent() uint {
+	return n.ParentId
+}
+
 const nodeIDField = "NodeId"
 const tenantIdField = "Tenant"
 

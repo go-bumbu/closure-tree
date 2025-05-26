@@ -413,7 +413,7 @@ func (ct *Tree) GetNode(nodeID uint, tenant string, item any) error {
 // parent determines the root node id of to load.
 // maxDepth determines the depth of the relationship o load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
-func (ct *Tree) Descendants(parent uint, maxDepth int, tenant string, items interface{}) error {
+func (ct *Tree) Descendants(parent uint, maxDepth int, tenant string, items interface{}) (err error) {
 	if items == nil {
 		return errors.New("items cannot be nil")
 	}
@@ -453,7 +453,12 @@ func (ct *Tree) Descendants(parent uint, maxDepth int, tenant string, items inte
 	if err != nil {
 		return fmt.Errorf("failed to execute query: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		e := rows.Close()
+		if err == nil { // don't overwrite the original error
+			err = e
+		}
+	}()
 
 	for rows.Next() {
 		tempItem := reflect.New(tempStructType).Interface()
