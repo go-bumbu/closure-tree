@@ -146,9 +146,9 @@ type Genre struct {
 	Name    string
 }
 
-//nolint:govet // example illustrates complex use-case
-func ExampleTreeWithM2MRelations() {
-
+// ExampleTree_DescendantIds_treeWithM2MRelations illustrates on how to get the descendant IDs of a particular node
+// and construct a custom sql query to get the leaves belonging to this list of IDs
+func ExampleTree_DescendantIds_treeWithM2MRelations() {
 	db := getGormDb("booksM2M.example")
 
 	tree, err := ct.New(db, Genre{})
@@ -260,9 +260,9 @@ type Song struct {
 	Genres []Genre `gorm:"many2many:songs_genres;"`
 }
 
-//nolint:govet // example illustrates complex use-case
-func ExampleTreeWithLeaves() {
-
+// ExampleTree_GetLeaves illustrates on how to use the build in leave type to get all (leave) items belonging
+// to a specific category, in this example leaves might belong to more than one node
+func ExampleTree_GetLeaves() {
 	db := getGormDb("booksM2M.example")
 
 	tree, err := ct.New(db, Genre{})
