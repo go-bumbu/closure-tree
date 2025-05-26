@@ -1,6 +1,7 @@
 package closuretree_test
 
 import (
+	"context"
 	"fmt"
 	"github.com/glebarez/sqlite"
 	ct "github.com/go-bumbu/closure-tree"
@@ -34,30 +35,31 @@ func ExampleTree_Descendants() {
 	// 6 -   | - small
 	// 7 -   | - medium
 	tenant := "sampleTenant"
+	ctx := context.Background()
 
 	colorTag := Tag{Name: "colors"}
 	// since we pass colorTag as pointer, the NodeId is going to be updated
-	_ = tree.Add(&colorTag, 0, tenant)
+	_ = tree.Add(ctx, &colorTag, 0, tenant)
 
-	_ = tree.Add(Tag{Name: "warm", Node: ct.Node{}}, colorTag.Id(), tenant)
-	_ = tree.Add(Tag{Name: "orange", Node: ct.Node{}}, colorTag.Id(), tenant)
+	_ = tree.Add(ctx, Tag{Name: "warm", Node: ct.Node{}}, colorTag.Id(), tenant)
+	_ = tree.Add(ctx, Tag{Name: "orange", Node: ct.Node{}}, colorTag.Id(), tenant)
 	// you can specify an unique ID for the branch
-	_ = tree.Add(Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
+	_ = tree.Add(ctx, Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
 
 	sizes := Tag{Name: "sizes"}
-	_ = tree.Add(&sizes, 0, tenant)
-	_ = tree.Add(Tag{Name: "small"}, sizes.NodeId, tenant)
-	_ = tree.Add(Tag{Name: "medium"}, sizes.NodeId, tenant)
+	_ = tree.Add(ctx, &sizes, 0, tenant)
+	_ = tree.Add(ctx, Tag{Name: "small"}, sizes.NodeId, tenant)
+	_ = tree.Add(ctx, Tag{Name: "medium"}, sizes.NodeId, tenant)
 
 	// Get the descendants of color
 	descendants := []Tag{}
-	_ = tree.Descendants(colorTag.NodeId, 0, tenant, &descendants)
+	_ = tree.Descendants(ctx, colorTag.NodeId, 0, tenant, &descendants)
 	for _, item := range descendants {
 		fmt.Printf("%d=> %s\n", item.NodeId, item.Name)
 	}
 
 	// Get all the nodeIds starting on the root
-	descendantsIds, _ := tree.DescendantIds(0, 0, tenant)
+	descendantsIds, _ := tree.DescendantIds(ctx, 0, 0, tenant)
 	descendantsIdsStr := []string{}
 	for _, item := range descendantsIds {
 		descendantsIdsStr = append(descendantsIdsStr, fmt.Sprintf("%d", item))
@@ -94,25 +96,26 @@ func ExampleTree_TreeDescendants() {
 	// 6 -   | - small
 	// 7 -   | - medium
 	tenant := "sampleTenant"
+	ctx := context.Background()
 
 	colorTag := Tag{Name: "colors"}
 	// since we pass colorTag as pointer, the NodeId is going to be updated
-	_ = tree.Add(&colorTag, 0, tenant)
+	_ = tree.Add(ctx, &colorTag, 0, tenant)
 
 	warmTag := Tag{Name: "warm", Node: ct.Node{}}
-	_ = tree.Add(&warmTag, colorTag.Id(), tenant)
-	_ = tree.Add(Tag{Name: "orange", Node: ct.Node{}}, warmTag.Id(), tenant)
+	_ = tree.Add(ctx, &warmTag, colorTag.Id(), tenant)
+	_ = tree.Add(ctx, Tag{Name: "orange", Node: ct.Node{}}, warmTag.Id(), tenant)
 	// you can specify a unique ID for the branch
-	_ = tree.Add(Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
+	_ = tree.Add(ctx, Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
 
 	sizes := Tag{Name: "sizes"}
-	_ = tree.Add(&sizes, 0, tenant)
-	_ = tree.Add(Tag{Name: "small"}, sizes.NodeId, tenant)
-	_ = tree.Add(Tag{Name: "medium"}, sizes.NodeId, tenant)
+	_ = tree.Add(ctx, &sizes, 0, tenant)
+	_ = tree.Add(ctx, Tag{Name: "small"}, sizes.NodeId, tenant)
+	_ = tree.Add(ctx, Tag{Name: "medium"}, sizes.NodeId, tenant)
 
 	// Get the Nested tree structure for the Tags
 	descendants := []*NestedTag{}
-	err := tree.TreeDescendants(colorTag.NodeId, 0, tenant, &descendants)
+	err := tree.TreeDescendants(ctx, colorTag.NodeId, 0, tenant, &descendants)
 	if err != nil {
 		fmt.Print(err)
 	}
@@ -171,33 +174,34 @@ func ExampleTree_DescendantIds_treeWithM2MRelations() {
 	// 14 -   |      |  - Supernatural Detectives
 
 	tenant := "sampleTenant"
+	ctx := context.Background()
 
 	scifi := Genre{Name: "Science Fiction"}
-	err = tree.Add(&scifi, 0, tenant)
+	err = tree.Add(ctx, &scifi, 0, tenant)
 	handleErr(err)
 
 	spaceOpera := Genre{Name: "Space Opera"}
-	_ = tree.Add(&spaceOpera, scifi.NodeId, tenant)
-	_ = tree.Add(Genre{Name: "Galactic Empires"}, spaceOpera.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Interstellar Wars"}, spaceOpera.Id(), tenant)
+	_ = tree.Add(ctx, &spaceOpera, scifi.NodeId, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Galactic Empires"}, spaceOpera.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Interstellar Wars"}, spaceOpera.Id(), tenant)
 
 	hardScifi := Genre{Name: "Hard Sci-Fi"}
-	_ = tree.Add(&hardScifi, scifi.NodeId, tenant)
-	_ = tree.Add(Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
+	_ = tree.Add(ctx, &hardScifi, scifi.NodeId, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
 
 	fantasy := Genre{Name: "Science Fiction"}
-	_ = tree.Add(&fantasy, 0, tenant)
+	_ = tree.Add(ctx, &fantasy, 0, tenant)
 
 	highFantasy := Genre{Name: "High Fantasy"}
-	_ = tree.Add(&highFantasy, fantasy.NodeId, tenant)
-	_ = tree.Add(Genre{Name: "Epic Quests"}, highFantasy.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Mythical Creatures"}, highFantasy.Id(), tenant)
+	_ = tree.Add(ctx, &highFantasy, fantasy.NodeId, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Epic Quests"}, highFantasy.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Mythical Creatures"}, highFantasy.Id(), tenant)
 
 	urbanFantasy := Genre{Name: "Urban Fantasy"}
-	_ = tree.Add(&urbanFantasy, fantasy.NodeId, tenant)
-	_ = tree.Add(Genre{Name: "Magic in the Modern World"}, urbanFantasy.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Supernatural Detectives"}, urbanFantasy.Id(), tenant)
+	_ = tree.Add(ctx, &urbanFantasy, fantasy.NodeId, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Magic in the Modern World"}, urbanFantasy.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Supernatural Detectives"}, urbanFantasy.Id(), tenant)
 
 	// Create the Books table
 	_ = db.AutoMigrate(Book{})
@@ -214,7 +218,7 @@ func ExampleTree_DescendantIds_treeWithM2MRelations() {
 	db.Create(books) // pass a slice to insert multiple row
 
 	// query space operas
-	spaceOperaIds, _ := tree.DescendantIds(2, 0, tenant)
+	spaceOperaIds, _ := tree.DescendantIds(ctx, 2, 0, tenant)
 	var gotBooks []Book
 	db.Model(&Book{}).InnerJoins("INNER JOIN books_genres ON books.id = books_genres.book_id").
 		Preload("Genres").
@@ -229,7 +233,7 @@ func ExampleTree_DescendantIds_treeWithM2MRelations() {
 	//spew.Dump(gotBooks)
 
 	// query Fantasy
-	fantasyIds, _ := tree.DescendantIds(8, 0, tenant)
+	fantasyIds, _ := tree.DescendantIds(ctx, 8, 0, tenant)
 	fantasyIds = append(fantasyIds, 8)
 	db.Model(&Book{}).InnerJoins("INNER JOIN books_genres ON books.id = books_genres.book_id").
 		Preload("Genres").
@@ -285,33 +289,34 @@ func ExampleTree_GetLeaves() {
 	// 14 -   |      |  - Supernatural Detectives
 
 	tenant := "sampleTenant"
+	ctx := context.Background()
 
 	scifi := Genre{Name: "Science Fiction"}
-	err = tree.Add(&scifi, 0, tenant)
+	err = tree.Add(ctx, &scifi, 0, tenant)
 	handleErr(err)
 
 	spaceOpera := Genre{Name: "Space Opera"}
-	_ = tree.Add(&spaceOpera, scifi.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Galactic Empires"}, spaceOpera.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Interstellar Wars"}, spaceOpera.Id(), tenant)
+	_ = tree.Add(ctx, &spaceOpera, scifi.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Galactic Empires"}, spaceOpera.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Interstellar Wars"}, spaceOpera.Id(), tenant)
 
 	hardScifi := Genre{Name: "Hard Sci-Fi"}
-	_ = tree.Add(&hardScifi, scifi.NodeId, tenant)
-	_ = tree.Add(Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
+	_ = tree.Add(ctx, &hardScifi, scifi.NodeId, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
 
 	fantasy := Genre{Name: "Science Fiction"}
-	_ = tree.Add(&fantasy, 0, tenant)
+	_ = tree.Add(ctx, &fantasy, 0, tenant)
 
 	highFantasy := Genre{Name: "High Fantasy"}
-	_ = tree.Add(&highFantasy, fantasy.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Epic Quests"}, highFantasy.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Mythical Creatures"}, highFantasy.Id(), tenant)
+	_ = tree.Add(ctx, &highFantasy, fantasy.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Epic Quests"}, highFantasy.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Mythical Creatures"}, highFantasy.Id(), tenant)
 
 	urbanFantasy := Genre{Name: "Urban Fantasy"}
-	_ = tree.Add(&urbanFantasy, fantasy.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Magic in the Modern World"}, urbanFantasy.Id(), tenant)
-	_ = tree.Add(Genre{Name: "Supernatural Detectives"}, urbanFantasy.Id(), tenant)
+	_ = tree.Add(ctx, &urbanFantasy, fantasy.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Magic in the Modern World"}, urbanFantasy.Id(), tenant)
+	_ = tree.Add(ctx, Genre{Name: "Supernatural Detectives"}, urbanFantasy.Id(), tenant)
 
 	// Create the Books table
 	_ = db.AutoMigrate(Song{})
@@ -330,7 +335,7 @@ func ExampleTree_GetLeaves() {
 
 	// query space operas
 	var gotSongs []Song
-	err = tree.GetLeaves(&gotSongs, 2, 0, tenant)
+	err = tree.GetLeaves(ctx, &gotSongs, 2, 0, tenant)
 	if err != nil {
 		fmt.Print(err)
 	}
@@ -340,7 +345,7 @@ func ExampleTree_GetLeaves() {
 	}
 
 	// query Fantasy
-	err = tree.GetLeaves(&gotSongs, 8, 0, tenant)
+	err = tree.GetLeaves(ctx, &gotSongs, 8, 0, tenant)
 	if err != nil {
 		fmt.Print(err)
 	}

@@ -1,6 +1,7 @@
 package closuretree_test
 
 import (
+	"context"
 	"fmt"
 	closuretree "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
@@ -196,7 +197,7 @@ func TestAddNodes(t *testing.T) {
 					ct, _ = closuretree.New(db.ConnDbName(fmt.Sprintf("addnodes%d", i)), tc.topItem)
 
 					// add topItem as parent
-					err = ct.Add(tc.topItem, 0, tc.topItemDetails.Tenant)
+					err = ct.Add(context.Background(), tc.topItem, 0, tc.topItemDetails.Tenant)
 					if tc.topItemExpect.Err != "" {
 						if err == nil {
 							t.Fatal("expecting an error but got none")
@@ -219,7 +220,7 @@ func TestAddNodes(t *testing.T) {
 					}
 
 					// add childItem to parent
-					err = ct.Add(tc.childItem, 1, tc.childItemDetails.Tenant)
+					err = ct.Add(context.Background(), tc.childItem, 1, tc.childItemDetails.Tenant)
 					if tc.childItemExpect.Err != "" {
 						if err == nil {
 							t.Error("expecting an error but got none")
@@ -256,7 +257,7 @@ func populateTree(t *testing.T, ct *closuretree.Tree) {
 			},
 		}
 
-		err := ct.Add(tagItem, item.parent, tenant1)
+		err := ct.Add(context.Background(), tagItem, item.parent, tenant1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -271,7 +272,7 @@ func populateTree(t *testing.T, ct *closuretree.Tree) {
 			},
 		}
 
-		err := ct.Add(tagItem, item.parent, tenant2)
+		err := ct.Add(context.Background(), tagItem, item.parent, tenant2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -358,7 +359,7 @@ func TestTreeGetNode(t *testing.T) {
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
 					setup(t)
-					err := ct.GetNode(tc.nodeID, tc.tenant, tc.in)
+					err := ct.GetNode(context.Background(), tc.nodeID, tc.tenant, tc.in)
 
 					if tc.wantErr != "" {
 						if err == nil {
@@ -433,7 +434,7 @@ func TestUpdate(t *testing.T) {
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
 					setup(t)
-					err := ct.Update(tc.nodeID, tc.in, tc.tenant)
+					err := ct.Update(context.Background(), tc.nodeID, tc.in, tc.tenant)
 					if tc.wantErr != "" {
 						if err == nil {
 							t.Fatalf("expected error: %s, but got none ", tc.wantErr)
@@ -447,7 +448,7 @@ func TestUpdate(t *testing.T) {
 						}
 
 						got := TestPayload{}
-						err = ct.GetNode(tc.nodeID, tc.tenant, &got)
+						err = ct.GetNode(context.Background(), tc.nodeID, tc.tenant, &got)
 						if err != nil {
 							t.Fatalf("unexpected error %v", err)
 						}
@@ -546,7 +547,7 @@ func TestGetDescendants(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					setup(t)
 					gotTags := []TestPayload{}
-					err := ct.Descendants(tc.parent, tc.depth, tc.tenant, &gotTags)
+					err := ct.Descendants(context.Background(), tc.parent, tc.depth, tc.tenant, &gotTags)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -555,7 +556,7 @@ func TestGetDescendants(t *testing.T) {
 						t.Errorf("unexpected result (-want +got):\n%s", diff)
 					}
 
-					got, err := ct.DescendantIds(tc.parent, tc.depth, tc.tenant)
+					got, err := ct.DescendantIds(context.Background(), tc.parent, tc.depth, tc.tenant)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -674,7 +675,7 @@ func TestGetTreeDescendants(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					setup(t)
 					gotPayload := []*TestPayload{}
-					err := ct.TreeDescendants(tc.parent, tc.depth, tc.tenant, &gotPayload)
+					err := ct.TreeDescendants(context.Background(), tc.parent, tc.depth, tc.tenant, &gotPayload)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -684,7 +685,7 @@ func TestGetTreeDescendants(t *testing.T) {
 						t.Errorf("unexpected result (-want +got):\n%s", diff)
 					}
 
-					got, err := ct.TreeDescendantsIds(tc.parent, tc.depth, tc.tenant)
+					got, err := ct.TreeDescendantsIds(context.Background(), tc.parent, tc.depth, tc.tenant)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -770,7 +771,7 @@ func TestMove(t *testing.T) {
 			for i, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
 					ct := setup(t, fmt.Sprintf("IT_move_%d", i))
-					err := ct.Move(tc.origin, tc.dest, tc.tenant)
+					err := ct.Move(context.Background(), tc.origin, tc.dest, tc.tenant)
 					if tc.wantErr != "" {
 						if err == nil {
 							t.Fatalf("expected error \"%s\" but got no error at all", tc.wantErr)
@@ -784,7 +785,7 @@ func TestMove(t *testing.T) {
 						}
 					}
 					for _, checkId := range tc.wantIds {
-						got, err := ct.DescendantIds(checkId.parent, 0, checkId.tenant)
+						got, err := ct.DescendantIds(context.Background(), checkId.parent, 0, checkId.tenant)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -857,7 +858,7 @@ func TestDelete(t *testing.T) {
 			for i, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
 					ct := setup(t, fmt.Sprintf("IT_delete_%d", i))
-					err := ct.DeleteRecurse(tc.nodeId, tc.tenant)
+					err := ct.DeleteRecurse(context.Background(), tc.nodeId, tc.tenant)
 					if tc.wantErr != "" {
 						if err == nil {
 							t.Fatalf("expected error \"%s\" but got no error at all", tc.wantErr)
@@ -872,7 +873,7 @@ func TestDelete(t *testing.T) {
 					}
 
 					for _, checkId := range tc.wantIds {
-						got, err := ct.DescendantIds(checkId.parent, 0, checkId.tenant)
+						got, err := ct.DescendantIds(context.Background(), checkId.parent, 0, checkId.tenant)
 						if err != nil {
 							t.Fatal(err)
 						}
