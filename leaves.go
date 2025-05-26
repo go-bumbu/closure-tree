@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"gorm.io/gorm"
@@ -114,9 +115,9 @@ func getGormM2MTblName(item any) (string, string, error) {
 const nodeIdDBField = "node_id"
 const leaveIDDBField = "leave_id"
 
-func (ct *Tree) GetLeaves(target any, parentID uint, maxDepth int, tenant string) error {
+func (ct *Tree) GetLeaves(ctx context.Context, target any, parentID uint, maxDepth int, tenant string) error {
 
-	ids, err := ct.DescendantIds(parentID, maxDepth, tenant)
+	ids, err := ct.DescendantIds(ctx, parentID, maxDepth, tenant)
 	if err != nil {
 		return err
 	}
