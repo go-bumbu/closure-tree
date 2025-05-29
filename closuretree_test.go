@@ -739,7 +739,10 @@ func TestMove(t *testing.T) {
 					origin: 3,
 					dest:   4,
 					wantIds: []idCheck{
-						{parent: 4, tenant: tenant1, want: []uint{3, 5}},
+						{parent: 4, tenant: tenant1, want: []uint{3}},
+						{parent: 3, tenant: tenant1, want: []uint{5}},
+						{parent: 0, tenant: tenant1, want: []uint{1}},    // expect id 3 to not be bellow id 0
+						{parent: 1, tenant: tenant1, want: []uint{2, 4}}, // expect id 3 to not be bellow id 0
 					},
 					tenant: tenant1,
 				},
@@ -748,10 +751,34 @@ func TestMove(t *testing.T) {
 					origin: 2,
 					dest:   5,
 					wantIds: []idCheck{
-						{parent: 3, tenant: tenant1, want: []uint{5, 2, 6}},
+						{parent: 3, tenant: tenant1, want: []uint{5}},
+						{parent: 5, tenant: tenant1, want: []uint{2}},
+						{parent: 2, tenant: tenant1, want: []uint{6}},
 						{parent: 1, tenant: tenant1, want: []uint{4}},
 					},
 					tenant: tenant1,
+				},
+				{
+					name:   "move a child to the same depth",
+					origin: 10,
+					dest:   9,
+					wantIds: []idCheck{
+						{parent: 9, tenant: tenant2, want: []uint{11, 10}},
+						{parent: 0, tenant: tenant2, want: []uint{7, 9}},
+						{parent: 10, tenant: tenant2, want: []uint{14}},
+					},
+					tenant: tenant2,
+				},
+				{
+					name:   "move a child to root",
+					origin: 10,
+					dest:   0,
+					wantIds: []idCheck{
+						{parent: 0, tenant: tenant2, want: []uint{7, 9, 10}},
+						{parent: 10, tenant: tenant2, want: []uint{14}},
+						{parent: 14, tenant: tenant2, want: []uint{}},
+					},
+					tenant: tenant2,
 				},
 				{
 					name:   "dont move between tenants",
@@ -765,6 +792,77 @@ func TestMove(t *testing.T) {
 					},
 					wantErr: closuretree.ErrNodeNotFound.Error(),
 					tenant:  tenant1,
+				},
+				{
+					name:    "move node under its own descendant (should fail)",
+					origin:  2,
+					dest:    6, // 6 is a descendant of 2
+					tenant:  tenant1,
+					wantErr: closuretree.ErrInvalidMove.Error(),
+				},
+				{
+					name:   "move leaf node to a different branch",
+					origin: 6,
+					dest:   4,
+					tenant: tenant1,
+					wantIds: []idCheck{
+						{parent: 4, tenant: tenant1, want: []uint{6}},
+						{parent: 2, tenant: tenant1, want: []uint{}}, // 6 no longer under 2
+					},
+				},
+				{
+					name:   "move root level node below another root level node",
+					origin: 1,
+					dest:   3,
+					tenant: tenant1,
+					wantIds: []idCheck{
+						{parent: 3, tenant: tenant1, want: []uint{5, 1}},
+						{parent: 1, tenant: tenant1, want: []uint{2, 4}},
+						{parent: 0, tenant: tenant1, want: []uint{3}},
+					},
+				},
+				{
+					name:    "expect err when move node to same parent",
+					origin:  2,
+					dest:    1, // already the parent
+					tenant:  tenant1,
+					wantErr: closuretree.ErrInvalidMove.Error(),
+				},
+				{
+					name:    "expect err when move node to same parent, root node edition",
+					origin:  3,
+					dest:    0, // already the parent
+					tenant:  tenant1,
+					wantErr: closuretree.ErrInvalidMove.Error(),
+				},
+				{
+					name:   "move single node subtree (no children)",
+					origin: 14,
+					dest:   9,
+					tenant: tenant2,
+					wantIds: []idCheck{
+						{parent: 9, tenant: tenant2, want: []uint{11, 14}},
+						{parent: 10, tenant: tenant2, want: []uint{}}, // 14 no longer under 10
+					},
+				},
+				{
+					name:   "move a deep node to unrelated branch",
+					origin: 11,
+					dest:   13,
+					tenant: tenant2,
+					wantIds: []idCheck{
+						{parent: 13, tenant: tenant2, want: []uint{11}},
+					},
+				},
+				{
+					name:   "move node to its sibling",
+					origin: 10,
+					dest:   11,
+					tenant: tenant2,
+					wantIds: []idCheck{
+						{parent: 11, tenant: tenant2, want: []uint{10}},
+						{parent: 10, tenant: tenant2, want: []uint{14}},
+					},
 				},
 			}
 
@@ -785,12 +883,14 @@ func TestMove(t *testing.T) {
 						}
 					}
 					for _, checkId := range tc.wantIds {
-						got, err := ct.DescendantIds(context.Background(), checkId.parent, 0, checkId.tenant)
+
+						// check only one level deep
+						got, err := ct.DescendantIds(context.Background(), checkId.parent, 1, checkId.tenant)
 						if err != nil {
 							t.Fatal(err)
 						}
 
-						if diff := cmp.Diff(got, checkId.want); diff != "" {
+						if diff := cmp.Diff(checkId.want, got); diff != "" {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
@@ -800,6 +900,28 @@ func TestMove(t *testing.T) {
 		})
 	}
 }
+
+// used for debugging, e.g.
+// items := []*TestPayload{}
+//
+// err = ct.TreeDescendants(context.Background(), 0, 0, checkId.tenant, &items)
+// if err != nil {
+// t.Fatal(err)
+// }
+// fmt.Println("================")
+// printTreeTest(items, "")
+// fmt.Println("================")
+var _ = printTreeTest
+
+func printTreeTest(nodes []*TestPayload, indent string) {
+	for _, n := range nodes {
+		fmt.Printf("%s%d=> %s\n", indent, n.NodeId, n.Name)
+		if len(n.Children) > 0 {
+			printTreeTest(n.Children, indent+"|- ")
+		}
+	}
+}
+
 func TestDelete(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -883,6 +1005,128 @@ func TestDelete(t *testing.T) {
 						if diff := cmp.Diff(got, checkId.want); diff != "" {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestIsDescendant(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			tcs := []struct {
+				name     string
+				nodeID   uint
+				parentID uint
+				tenant   string
+				want     bool
+			}{
+				{
+					name:     "node is a descendant",
+					nodeID:   6,
+					parentID: 2,
+					tenant:   tenant1,
+					want:     true,
+				},
+				{
+					name:     "node is not a descendant",
+					nodeID:   3,
+					parentID: 5,
+					tenant:   tenant1,
+					want:     false,
+				},
+				{
+					name:     "node is descendant in another tenant",
+					nodeID:   14,
+					parentID: 10,
+					tenant:   tenant2,
+					want:     true,
+				},
+				{
+					name:     "node is not descendant - cross tenant",
+					nodeID:   14,
+					parentID: 10,
+					tenant:   tenant1,
+					want:     false,
+				},
+			}
+
+			for _, tc := range tcs {
+				t.Run(tc.name, func(t *testing.T) {
+					got, err := ct.IsDescendant(context.Background(), tc.parentID, tc.nodeID, tc.tenant)
+					if err != nil {
+						t.Fatalf("unexpected error: %v", err)
+					}
+					if got != tc.want {
+						t.Errorf("IsDescendant(%d, %d) = %v; want %v", tc.parentID, tc.nodeID, got, tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestIsChildOf(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			tcs := []struct {
+				name      string
+				nodeID    uint
+				parentID  uint
+				tenant    string
+				wantChild bool
+			}{
+				{
+					name:      "direct child",
+					nodeID:    2,
+					parentID:  1,
+					tenant:    tenant1,
+					wantChild: true,
+				},
+				{
+					name:      "not a direct child (descendant only)",
+					nodeID:    6,
+					parentID:  1,
+					tenant:    tenant1,
+					wantChild: false,
+				},
+				{
+					name:      "child in tenant 2",
+					nodeID:    14,
+					parentID:  10,
+					tenant:    tenant2,
+					wantChild: true,
+				},
+				{
+					name:      "not child - cross tenant",
+					nodeID:    14,
+					parentID:  10,
+					tenant:    tenant1,
+					wantChild: false,
+				},
+			}
+
+			for _, tc := range tcs {
+				t.Run(tc.name, func(t *testing.T) {
+					got, err := ct.IsChildOf(context.Background(), tc.nodeID, tc.parentID, tc.tenant)
+					if err != nil {
+						t.Fatalf("unexpected error: %v", err)
+					}
+					if got != tc.wantChild {
+						t.Errorf("IsChildOf(%d, %d) = %v; want %v", tc.nodeID, tc.parentID, got, tc.wantChild)
 					}
 				})
 			}

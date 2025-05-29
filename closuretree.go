@@ -279,16 +279,44 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 	return err
 }
 
+var ErrInvalidMove = errors.New("invalid move")
+
 func (ct *Tree) Move(ctx context.Context, nodeId, newParentID uint, tenant string) error {
 	tenant = defaultTenant(tenant)
 	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var err error
-		insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
-		exec1 := tx.Exec(insertSql, nodeId, newParentID, tenant, tenant)
-		err = exec1.Error
+
+		// Prevent duplicate move to same parent
+		hasSameParent, err := ct.IsChildOf(ctx, nodeId, newParentID, tenant)
 		if err != nil {
-			tx.Rollback()
 			return err
+		}
+		if hasSameParent {
+			return ErrInvalidMove
+		}
+
+		var exec1 *gorm.DB
+		// insert nodes on the new position
+		if newParentID == 0 {
+			// Special case: move to root
+			insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl)
+			exec1 = tx.Exec(insertSql, nodeId, tenant)
+		} else {
+			// Normal move
+			// make sure that move is allowed
+			isDesc, err := ct.IsDescendant(ctx, nodeId, newParentID, tenant)
+			if err != nil {
+				return err
+			}
+			if isDesc {
+				return ErrInvalidMove
+			}
+
+			insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
+			exec1 = tx.Exec(insertSql, nodeId, newParentID, tenant, tenant)
+		}
+
+		if exec1.Error != nil {
+			return exec1.Error
 		}
 		// make sure we don't delete items if nothing was moved, e.g. if we try to move cross Tenant unsuccessful
 		if exec1.RowsAffected == 0 {
@@ -297,18 +325,60 @@ func (ct *Tree) Move(ctx context.Context, nodeId, newParentID uint, tenant strin
 			return ErrNodeNotFound
 		}
 
-		// Delete old closure relationships
-		delSql := fmt.Sprintf(moveQueryDeleteOld, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
-		exec2 := tx.Exec(delSql, nodeId, tenant, newParentID, tenant, tenant)
-		err = exec2.Error
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
+		// carefully delete old closure relationships
+		var exec2 *gorm.DB
+		if newParentID == 0 {
+			// Special case: move to root
+			delSql := fmt.Sprintf(
+				moveQueryToRootDeleteOld, // your SQL with placeholders
+				ct.relationsTbl,          // %s: subtree CTE table name
+				ct.relationsTbl,          // %s: old_paths CTE table name
+				ct.relationsTbl,          // %s: new_paths alias p table name
+				ct.relationsTbl,          // %s: new_paths alias c table name
+				ct.relationsTbl,          // %s: DELETE FROM target table name
+			)
+			exec2 = tx.Exec(delSql,
+				nodeId,      // ?1: subtree -> ancestor_id = moved_node_id (e.g., 2)
+				tenant,      // ?2: subtree -> tenant string (e.g., "t1")
+				tenant,      // ?3: old_paths -> tenant string
+				nodeId,      // ?4: new_paths c.ancestor_id = moved_node_id
+				newParentID, // ?5: new_paths p.descendant_id = new_parent_node_id (e.g., 5)
+				tenant,      // ?6: new_paths p.tenant
+				tenant,      // ?7: new_paths c.tenant
+				nodeId,      // ?8: SELECT 0 AS ancestor_id, ? AS descendant_id, 1 AS depth
+			)
+		} else {
+			// Normal move
 
-		return nil
+			delSql := fmt.Sprintf(
+				moveQueryDeleteOld, // your SQL with placeholders
+				ct.relationsTbl,    // %s: subtree CTE table name
+				ct.relationsTbl,    // %s: old_paths CTE table name
+				ct.relationsTbl,    // %s: new_paths alias p table name
+				ct.relationsTbl,    // %s: new_paths alias c table name
+				ct.relationsTbl,    // %s: DELETE FROM target table name
+			)
+
+			exec2 = tx.Exec(delSql,
+				nodeId,      // ?1: subtree -> ancestor_id = moved_node_id (e.g., 2)
+				tenant,      // ?2: subtree -> tenant string (e.g., "t1")
+				tenant,      // ?3: old_paths -> tenant string
+				nodeId,      // ?4: new_paths c.ancestor_id = moved_node_id
+				newParentID, // ?5: new_paths p.descendant_id = new_parent_node_id (e.g., 5)
+				tenant,      // ?6: new_paths p.tenant
+				tenant,      // ?7: new_paths c.tenant
+			)
+		}
+		return exec2.Error
 	})
 }
+
+const moveQueryInsertNewToRoot = `
+INSERT INTO  %s (ancestor_id, descendant_id, depth, tenant)
+SELECT 0, c.descendant_id, c.depth + 1, c.tenant
+FROM  %s c
+WHERE c.ancestor_id = ? AND c.tenant = ?;
+`
 
 const moveQueryInsertNew = `
 INSERT INTO %s (ancestor_id, descendant_id, depth, Tenant)
@@ -318,21 +388,71 @@ JOIN %s c ON c.ancestor_id = ?
 WHERE p.descendant_id = ? AND p.Tenant = ? AND c.Tenant = ?;
 `
 
-const moveQueryDeleteOld = `WITH descendants AS (
-    SELECT descendant_id
-    FROM %s
-    WHERE ancestor_id = ? AND Tenant = ?
+// descendants contains the list of nodes moved
+// take this quey and replace closure_tree_rel_test_payloads by %s also replace the node ids 2, 5 and the tenant string with a placeholder ?, write a comment on every placeholder replacement stating what it is used for
+
+const moveQueryDeleteOld = `
+WITH subtree AS (
+  SELECT descendant_id
+  FROM %s
+  WHERE ancestor_id = ? AND tenant = ? -- the node to be moved
 ),
-excluded_ancestors AS (
-    SELECT ancestor_id
-    FROM %s
-    WHERE descendant_id = ? AND Tenant = ?
+old_paths AS (
+  SELECT *
+  FROM %s
+  WHERE descendant_id IN (SELECT descendant_id FROM subtree)
+    AND tenant = ?
+    AND ancestor_id != descendant_id  -- skip self-links
+    AND ancestor_id NOT IN (SELECT descendant_id FROM subtree) -- skip internal subtree links
+),
+new_paths AS (
+  SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1 AS depth
+  FROM %s p
+  JOIN %s c ON c.ancestor_id = ?   -- the node to be moved
+  WHERE p.descendant_id = ?     -- the new parent
+    AND p.tenant = ?   AND c.tenant = ?
 )
 DELETE FROM %s
-WHERE descendant_id IN (SELECT descendant_id FROM descendants)
-  AND ancestor_id NOT IN (SELECT ancestor_id FROM excluded_ancestors)
-  AND Tenant = ?
-  AND depth != 0;
+WHERE (ancestor_id, descendant_id, tenant, depth) IN (
+  SELECT o.ancestor_id, o.descendant_id, o.tenant, o.depth
+  FROM old_paths o
+  LEFT JOIN new_paths n
+    ON o.ancestor_id = n.ancestor_id AND o.descendant_id = n.descendant_id
+  WHERE n.descendant_id IS NULL OR o.depth != n.depth
+);
+`
+
+const moveQueryToRootDeleteOld = `
+WITH subtree AS (
+  SELECT descendant_id
+  FROM %s
+  WHERE ancestor_id = ? AND tenant = ?
+),
+old_paths AS (
+  SELECT *
+  FROM %s
+  WHERE descendant_id IN (SELECT descendant_id FROM subtree)
+	AND tenant = ?
+	AND ancestor_id != descendant_id
+	AND ancestor_id NOT IN (SELECT descendant_id FROM subtree)
+),
+new_paths AS (
+  SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1 AS depth
+  FROM %s p
+  JOIN %s c ON c.ancestor_id = ?
+  WHERE p.descendant_id = ?
+	AND p.tenant = ? AND c.tenant = ?
+  UNION ALL
+  SELECT 0 AS ancestor_id, ? AS descendant_id, 1 AS depth
+)
+DELETE FROM %s
+WHERE (ancestor_id, descendant_id, tenant, depth) IN (
+  SELECT o.ancestor_id, o.descendant_id, o.tenant, o.depth
+  FROM old_paths o
+  LEFT JOIN new_paths n
+	ON o.ancestor_id = n.ancestor_id AND o.descendant_id = n.descendant_id
+  WHERE n.descendant_id IS NULL OR o.depth != n.depth
+);
 `
 
 func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) error {
@@ -407,6 +527,35 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 		return fmt.Errorf("unable to check parent node: %v", err)
 	}
 	return nil
+}
+
+// TODO write unit tests
+// IsDescendant returns true if targetID is a descendant of nodeID in the given tenant.
+func (ct *Tree) IsDescendant(ctx context.Context, nodeID, parentId uint, tenant string) (bool, error) {
+	var count int64
+	err := ct.db.WithContext(ctx).
+		Table(ct.relationsTbl).
+		Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", nodeID, parentId, tenant).
+		Limit(1).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// IsChildOf checks if nodeID already has newParentID as its parent in the closure table.
+func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant string) (bool, error) {
+	var count int64
+	err := ct.db.WithContext(ctx).
+		Table(ct.relationsTbl).
+		Where("ancestor_id = ? AND descendant_id = ? AND depth = 1 AND tenant = ?", parentID, nodeID, tenant).
+		Limit(1).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // Descendants allows to load a part of the tree into a flat slice of node pointers
