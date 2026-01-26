@@ -1,0 +1,23 @@
+name: License check
+on: [push]
+jobs:
+  license-check:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+      ## Setup GO
+      - name: Setup Go 1.24.2
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.2'
+
+      # Install go-licence-detector
+      - name: Install go-licence-detector
+        run: |
+          go install go.elastic.co/go-licence-detector@v0.10.0
+
+      - name: License check
+        run: make license-check
+
