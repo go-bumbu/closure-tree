@@ -325,6 +325,13 @@ func TestTreeGetNode(t *testing.T) {
 					tenant:      tenant1,
 				},
 				{
+					name:        "get child node for tenant 1",
+					nodeID:      2,
+					in:          &TestPayload{},
+					wantPayload: TestPayload{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1, ParentId: 1}},
+					tenant:      tenant1,
+				},
+				{
 					name:        "get node on Tenant 2",
 					nodeID:      7,
 					in:          &TestPayload{},

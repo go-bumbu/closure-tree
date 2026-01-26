@@ -517,17 +517,28 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 		return fmt.Errorf("item needs to be a pointer to a struct")
 	}
 
-	err := ct.db.WithContext(ctx).Table(ct.nodesTbl).
-		Where("node_id = ? AND tenant = ?", nodeID, tenant).
-		First(item).Error
+	sqlstr := fmt.Sprintf(getNodeQuery, ct.nodesTbl, ct.relationsTbl)
+	err := ct.db.WithContext(ctx).Raw(sqlstr, nodeID, tenant).Scan(item).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("failed to get node: %w", err)
+	}
+
+	// Check if node was found by verifying NodeId was populated
+	if n, ok := item.(interface{ Id() uint }); ok {
+		if n.Id() == 0 {
 			return ErrNodeNotFound
 		}
-		return fmt.Errorf("unable to check parent node: %v", err)
+	} else {
+		// this error should never happen since the item has always an Id() method
+		return fmt.Errorf("unable to cast item to interface with method Id()s")
 	}
 	return nil
 }
+
+const getNodeQuery = `SELECT nodes.*, parent_rel.ancestor_id AS parent_id
+FROM %s AS nodes
+LEFT JOIN %s AS parent_rel ON parent_rel.descendant_id = nodes.node_id AND parent_rel.depth = 1
+WHERE nodes.node_id = ? AND nodes.tenant = ?`
 
 // TODO write unit tests
 // IsDescendant returns true if targetID is a descendant of nodeID in the given tenant.
