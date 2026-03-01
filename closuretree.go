@@ -7,12 +7,22 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
 )
+
+var validTableName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+func validateTableName(name string) error {
+	if !validTableName.MatchString(name) {
+		return fmt.Errorf("invalid table name %q: must match [a-z][a-z0-9_]*", name)
+	}
+	return nil
+}
 
 const closureTblName = "closure_tree_rel"
 const ancestorIDMapKey = "ancestorId"
@@ -52,6 +62,10 @@ func New(db *gorm.DB, item any) (*Tree, error) {
 
 // newTree parses the schema and validates the item but does not run migrations.
 func newTree(db *gorm.DB, item any) (*Tree, error) {
+	if !hasNode(item) {
+		return nil, ErrItemIsNotTreeNode
+	}
+
 	stmt := &gorm.Statement{DB: db}
 	err := stmt.Parse(item)
 	if err != nil {
@@ -59,6 +73,13 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 	}
 	name := stmt.Schema.Table
 	relTbl := strings.ToLower(fmt.Sprintf("%s_%s", closureTblName, name))
+
+	if err := validateTableName(name); err != nil {
+		return nil, err
+	}
+	if err := validateTableName(relTbl); err != nil {
+		return nil, err
+	}
 
 	// Generate a map of column names to field names
 	columnFieldMap := make(map[string]string)
@@ -72,10 +93,6 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		nodesTbl:     name,
 		col2FieldMap: columnFieldMap,
 		relationsTbl: relTbl,
-	}
-
-	if !hasNode(item) {
-		return nil, ErrItemIsNotTreeNode
 	}
 
 	return ct, nil
@@ -106,8 +123,8 @@ func checkMySQLVersion(db *gorm.DB) error {
 	if len(parts) < 1 {
 		return fmt.Errorf("unable to parse MySQL version: %s", version)
 	}
-	var major int
-	if _, err := fmt.Sscanf(parts[0], "%d", &major); err != nil || major < 8 {
+	major, err := strconv.Atoi(parts[0])
+	if err != nil || major < 8 {
 		return fmt.Errorf("MySQL 8.0+ required; got %s", version)
 	}
 	return nil
@@ -126,21 +143,25 @@ func (ct *Tree) GetClosureTableName() string {
 }
 
 // represents the table that store the relationships
+// Note: if upgrading from a previous version, manually run: DROP INDEX idx_desc_ten
 type closureTree struct {
 	AncestorID   uint   `gorm:"not null;index:idx_anc_ten_dep,composite:1;uniqueIndex:idx_closure_uniq,composite:a"`
-	DescendantID uint   `gorm:"not null;index:idx_desc_ten,composite:1;uniqueIndex:idx_closure_uniq,composite:b"`
-	Tenant       string `gorm:"not null;index:idx_anc_ten_dep,composite:2;index:idx_desc_ten,composite:2;uniqueIndex:idx_closure_uniq,composite:c"`
-	Depth        int    `gorm:"not null;default:0;check:chk_depth,depth >= 0;index:idx_anc_ten_dep,composite:3"`
+	DescendantID uint   `gorm:"not null;index:idx_desc_ten_dep,composite:1;uniqueIndex:idx_closure_uniq,composite:b"`
+	Tenant       string `gorm:"not null;index:idx_anc_ten_dep,composite:2;index:idx_desc_ten_dep,composite:2;uniqueIndex:idx_closure_uniq,composite:c"`
+	Depth        int    `gorm:"not null;default:0;check:chk_depth,depth >= 0;index:idx_anc_ten_dep,composite:3;index:idx_desc_ten_dep,composite:3;uniqueIndex:idx_closure_uniq,composite:d"`
 }
 
 // DefaultTenant is used in the database as a stub if not tenant was passed
 const DefaultTenant = "DefaultTenant"
 
-func defaultTenant(in string) string {
+// ErrEmptyTenant is returned when an empty tenant string is passed to any tree operation.
+var ErrEmptyTenant = errors.New("tenant must not be empty; pass closuretree.DefaultTenant to use the default")
+
+func validateTenant(in string) (string, error) {
 	if in == "" {
-		return DefaultTenant
+		return "", ErrEmptyTenant
 	}
-	return in
+	return in, nil
 }
 
 // Add will add a new entry into the node Database under a specific parent and owned to a specific tenant
@@ -151,7 +172,11 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, tenant string)
 	if !hasNode(item) {
 		return ErrItemIsNotTreeNode
 	}
-	tenant = defaultTenant(tenant)
+	var err error
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return err
+	}
 
 	t := reflect.TypeOf(item)
 	itemIsPointer := false
@@ -168,22 +193,11 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, tenant string)
 
 	// modify the embedded Node struct
 	v := reflect.ValueOf(reflectItem).Elem()
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
-
-		if fieldType.Anonymous && field.Type() == reflect.TypeOf(Node{}) {
-			if field.CanSet() {
-				nodeValue := Node{
-					NodeId: 0,
-					Tenant: tenant,
-				}
-				field.Set(reflect.ValueOf(nodeValue))
-			}
-		}
+	if nodeField, ok := findNodeValue(t, v); ok && nodeField.CanSet() {
+		nodeField.Set(reflect.ValueOf(Node{NodeId: 0, Tenant: tenant}))
 	}
 
-	err := ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Check if the parent node exists and the tenant is the same (inside tx to avoid TOCTOU)
 		if parentID != 0 {
 			var parent Node
@@ -272,7 +286,11 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 	if !hasNode(item) {
 		return ErrItemIsNotTreeNode
 	}
-	tenant = defaultTenant(tenant)
+	var err error
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return err
+	}
 
 	t := reflect.TypeOf(item)
 	itemIsPointer := false
@@ -289,23 +307,28 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 
 	// modify the embedded Node struct
 	v := reflect.ValueOf(reflectItem).Elem()
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
+	if nodeField, ok := findNodeValue(t, v); ok && nodeField.CanSet() {
+		nodeField.Set(reflect.ValueOf(Node{NodeId: id, Tenant: tenant}))
+	}
 
-		if fieldType.Anonymous && field.Type() == reflect.TypeOf(Node{}) {
-			if field.CanSet() {
-				nodeValue := Node{
-					NodeId: id,
-					Tenant: tenant,
-				}
-				field.Set(reflect.ValueOf(nodeValue))
-			}
+	// Build a map of non-Node fields to update (preserves zero values)
+	updateStmt := &gorm.Statement{DB: ct.db}
+	_ = updateStmt.Parse(reflectItem)
+	updateMap := make(map[string]any)
+	v2 := reflect.ValueOf(reflectItem).Elem()
+	t2 := v2.Type()
+	for i := 0; i < v2.NumField(); i++ {
+		ft := t2.Field(i)
+		if ft.Anonymous && ft.Type == reflect.TypeOf(Node{}) {
+			continue
+		}
+		if f := updateStmt.Schema.LookUpField(ft.Name); f != nil && f.DBName != "" {
+			updateMap[f.DBName] = v2.Field(i).Interface()
 		}
 	}
 
-	err := ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(reflectItem)
+	err = ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(updateMap)
 
 		if res.Error != nil {
 			return fmt.Errorf("unable to update node: %w", res.Error)
@@ -320,7 +343,11 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 }
 
 func (ct *Tree) Move(ctx context.Context, nodeId, newParentID uint, tenant string) error {
-	tenant = defaultTenant(tenant)
+	var err error
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return err
+	}
 	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 
 		// Prevent duplicate move to same parent (uses tx to avoid TOCTOU)
@@ -375,7 +402,7 @@ func (ct *Tree) Move(ctx context.Context, nodeId, newParentID uint, tenant strin
 			insExec = tx.Exec(insertSql, nodeId, newParentID, tenant, tenant)
 			if insExec.Error == nil && insExec.RowsAffected == 0 {
 				// New parent not found in this tenant
-				return ErrNodeNotFound
+				return ErrParentNotFound
 			}
 		}
 		return insExec.Error
@@ -412,12 +439,16 @@ AND ancestor_id NOT IN (SELECT descendant_id FROM subtree)
 AND tenant = ?`
 
 func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) error {
-	tenant = defaultTenant(tenant)
+	var err error
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return err
+	}
 	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 
 		// delete the nodes
 		delNodesSql := fmt.Sprintf(deleteNodesRec, ct.nodesTbl, ct.relationsTbl, ct.nodesTbl)
-		exec1 := tx.Exec(delNodesSql, nodeId, tenant)
+		exec1 := tx.Exec(delNodesSql, nodeId, tenant, tenant)
 		if exec1.Error != nil {
 			return exec1.Error
 		}
@@ -443,14 +474,18 @@ const deleteNodesRec = `WITH nodes_to_delete AS (
     WHERE ct.ancestor_id = ? AND nodes.tenant = ?
 )
 DELETE FROM %s
-WHERE node_id IN (SELECT node_id FROM nodes_to_delete);`
+WHERE node_id IN (SELECT node_id FROM nodes_to_delete)
+  AND tenant = ?;`
 
 const deleteRelationsQuery = `WITH descendants AS (
 	SELECT descendant_id FROM %s WHERE ancestor_id = ? AND tenant = ?
 )
 DELETE FROM %s
-WHERE descendant_id IN (SELECT descendant_id FROM descendants)
-  AND tenant = ?;`
+WHERE tenant = ?
+  AND (
+      descendant_id IN (SELECT descendant_id FROM descendants)
+   OR ancestor_id  IN (SELECT descendant_id FROM descendants)
+  );`
 
 // GetNode loads a single item into the passed pointer
 func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item any) error {
@@ -458,7 +493,11 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 	if !hasNode(item) {
 		return ErrItemIsNotTreeNode
 	}
-	tenant = defaultTenant(tenant)
+	var err error
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return err
+	}
 	t := reflect.TypeOf(item)
 
 	if t.Kind() != reflect.Ptr {
@@ -466,19 +505,12 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 	}
 
 	sqlstr := fmt.Sprintf(getNodeQuery, ct.nodesTbl, ct.relationsTbl)
-	err := ct.db.WithContext(ctx).Raw(sqlstr, nodeID, tenant).Scan(item).Error
-	if err != nil {
-		return fmt.Errorf("failed to get node: %w", err)
+	result := ct.db.WithContext(ctx).Raw(sqlstr, nodeID, tenant).Scan(item)
+	if result.Error != nil {
+		return fmt.Errorf("failed to get node: %w", result.Error)
 	}
-
-	// Check if node was found by verifying NodeId was populated
-	if n, ok := item.(interface{ Id() uint }); ok {
-		if n.Id() == 0 {
-			return ErrNodeNotFound
-		}
-	} else {
-		// this error should never happen since the item has always an Id() method
-		return fmt.Errorf("unable to cast item to interface with method Id()")
+	if result.RowsAffected == 0 {
+		return ErrNodeNotFound
 	}
 	return nil
 }
@@ -494,9 +526,13 @@ LIMIT 1`
 
 // IsDescendant returns true if descendantID is a descendant of ancestorID in the given tenant.
 func (ct *Tree) IsDescendant(ctx context.Context, ancestorID, descendantID uint, tenant string) (bool, error) {
-	tenant = defaultTenant(tenant)
+	var err error
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return false, err
+	}
 	var count int64
-	err := ct.db.WithContext(ctx).
+	err = ct.db.WithContext(ctx).
 		Table(ct.relationsTbl).
 		Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", ancestorID, descendantID, tenant).
 		Limit(1).
@@ -509,9 +545,13 @@ func (ct *Tree) IsDescendant(ctx context.Context, ancestorID, descendantID uint,
 
 // IsChildOf checks if nodeID already has newParentID as its parent in the closure table.
 func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant string) (bool, error) {
-	tenant = defaultTenant(tenant)
+	var err error
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return false, err
+	}
 	var count int64
-	err := ct.db.WithContext(ctx).
+	err = ct.db.WithContext(ctx).
 		Table(ct.relationsTbl).
 		Where("ancestor_id = ? AND descendant_id = ? AND depth = 1 AND tenant = ?", parentID, nodeID, tenant).
 		Limit(1).
@@ -541,7 +581,11 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 	}
 
 	elemType := sliceVal.Type().Elem()
-	tenant = defaultTenant(tenant)
+	var tenantErr error
+	tenant, tenantErr = validateTenant(tenant)
+	if tenantErr != nil {
+		return tenantErr
+	}
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
@@ -582,14 +626,18 @@ ORDER BY ct.depth;`
 
 // DescendantIds behaves the same as Descendants but only returns the node IDs for the search query.
 func (ct *Tree) DescendantIds(ctx context.Context, parent uint, maxDepth int, tenant string) ([]uint, error) {
-	tenant = defaultTenant(tenant)
+	var err error
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return nil, err
+	}
 	ids := []uint{}
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
 	}
 	sqlstr := fmt.Sprintf(descendantsIDQuery, ct.nodesTbl, ct.relationsTbl)
-	err := ct.db.WithContext(ctx).Raw(sqlstr, parent, maxDepth, tenant).Scan(&ids).Error
+	err = ct.db.WithContext(ctx).Raw(sqlstr, parent, maxDepth, tenant).Scan(&ids).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch descendants: %w", err)
 	}
@@ -598,15 +646,12 @@ func (ct *Tree) DescendantIds(ctx context.Context, parent uint, maxDepth int, te
 
 const descendantsIDQuery = `SELECT nodes.node_id
 FROM %s AS nodes
-JOIN %s AS ct ON ct.descendant_id = nodes.node_id
+JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
 WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.tenant = ?
 ORDER BY ct.depth;`
 
 // absMaxDepth is limited by the max value of a 32-bit signed integer (matches the Depth column type)
 const absMaxDepth = 2147483647
-
-// NOTE should you ever need this deep level of nesting in a production environment, please reach out to me directly
-// I'm really really really interested into knowing why and how!!! :)
 
 // TreeDescendants  allows to load a part of the tree into a slice of node pointers keeping the tree structure of the DB
 // note that the item passed needs to be a []*MyCustomType, and it needs to contain a field Children of type []*MyCustomType
@@ -631,7 +676,11 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 	sliceVal := itemsVal.Elem()
 	elemType := sliceVal.Type().Elem()
 
-	tenant = defaultTenant(tenant)
+	var tenantErr error
+	tenant, tenantErr = validateTenant(tenant)
+	if tenantErr != nil {
+		return tenantErr
+	}
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
@@ -823,7 +872,7 @@ const treeDescendantsQuery = `WITH RECURSIVE Tree AS (
 	SELECT
 		nodes.*,
 		ct.ancestor_id AS ancestor_id,
-		1 AS depth
+		1 AS cte_depth
 	FROM %s AS nodes
 	JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
 	WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.tenant = ? AND ct.tenant = ?
@@ -834,17 +883,20 @@ const treeDescendantsQuery = `WITH RECURSIVE Tree AS (
 	SELECT
 		nodes.*,
 		t.node_id AS ancestor_id,
-		t.depth + 1 AS depth
+		t.cte_depth + 1 AS cte_depth
 	FROM Tree AS t
 	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?
 	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
-	WHERE nodes.tenant = ? AND t.depth < ?
+	WHERE nodes.tenant = ? AND t.cte_depth < ?
 	)
-	SELECT  * FROM Tree ORDER BY depth;`
+	SELECT  * FROM Tree ORDER BY cte_depth;`
 
 // TreeDescendantsIds returns the tree structure of the descendants to the passed item
 func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth int, tenant string) (tree []*TreeNode, err error) {
-	tenant = defaultTenant(tenant)
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return nil, err
+	}
 	nodeMap := make(map[uint]*TreeNode)
 
 	if maxDepth <= 0 {
@@ -865,7 +917,7 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 
 	for rows.Next() {
 		var node TreeNode
-		err := rows.Scan(&node.NodeId, &node.AncestorID)
+		err := rows.Scan(&node.NodeId, &node.ParentID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch tree descendants: %w", err)
 		}
@@ -875,7 +927,7 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 	// Now, iterate over the node map and compose the tree
 	var trees []*TreeNode
 	for _, node := range nodeMap {
-		if par, exists := nodeMap[node.AncestorID]; exists {
+		if par, exists := nodeMap[node.ParentID]; exists {
 			par.Children = append(par.Children, node)
 		} else {
 			trees = append(trees, node)
@@ -885,9 +937,9 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 }
 
 type TreeNode struct {
-	NodeId     uint        `json:"id"`
-	AncestorID uint        `json:"ancestorId"`
-	Children   []*TreeNode `json:"children"`
+	NodeId   uint        `json:"id"`
+	ParentID uint        `json:"parentId"`
+	Children []*TreeNode `json:"children"`
 }
 
 const treeDescendantsIDQuery = `WITH RECURSIVE Tree AS (
@@ -895,7 +947,7 @@ const treeDescendantsIDQuery = `WITH RECURSIVE Tree AS (
 	SELECT
 		nodes.node_id,
 		ct.ancestor_id AS ancestor_id,
-		1 AS depth
+		1 AS cte_depth
 	FROM %s AS nodes
 	JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
 	WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.tenant = ? AND ct.tenant = ?
@@ -906,13 +958,13 @@ const treeDescendantsIDQuery = `WITH RECURSIVE Tree AS (
 	SELECT
 		nodes.node_id,
 		t.node_id AS ancestor_id,
-		t.depth + 1 AS depth
+		t.cte_depth + 1 AS cte_depth
 	FROM Tree AS t
 	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?
 	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
-	WHERE nodes.tenant = ? AND t.depth < ?
+	WHERE nodes.tenant = ? AND t.cte_depth < ?
 	)
-	SELECT  Tree.node_id, Tree.ancestor_id FROM Tree ORDER BY depth;`
+	SELECT  Tree.node_id, Tree.ancestor_id FROM Tree ORDER BY cte_depth;`
 
 func SortTree(nodes []*TreeNode) {
 	sort.Slice(nodes, func(i, j int) bool {

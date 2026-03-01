@@ -11,19 +11,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// Leave is an embeddable ID to be used in closure tree, this is mandatory if you want to use leaves functionality
-type Leave struct {
-	LeaveId uint   `gorm:"autoIncrement;primaryKey;not null"`
-	Tenant  string `gorm:"index"`
+// Leaf is an embeddable ID to be used in closure tree, this is mandatory if you want to use leaves functionality
+type Leaf struct {
+	LeafId uint   `gorm:"autoIncrement;primaryKey;not null;column:leaf_id"`
+	Tenant string `gorm:"index"`
 }
 
-func (n *Leave) Id() uint {
-	return n.LeaveId
+func (n *Leaf) Id() uint {
+	return n.LeafId
 }
 
-var ErrItemIsNotTreeLeave = errors.New("the item does not embed Leave")
+var ErrItemIsNotTreeLeaf = errors.New("the item does not embed Leaf")
 
-// isLeaveSlice uses reflection to verify if the passed item is a pointer to a slice that embedded Leave struct
+// isLeaveSlice uses reflection to verify if the passed item is a pointer to a slice that embedded Leaf struct
 // returns an error for every condition checked, returns nil if the passed item is as expected
 func isLeaveSlice(item any) error {
 	if item == nil {
@@ -49,16 +49,16 @@ func isLeaveSlice(item any) error {
 		return fmt.Errorf("item is not a slice of structs")
 	}
 
-	// Check if the struct embeds Leave
-	hasLeave := false
+	// Check if the struct embeds Leaf
+	hasLeaf := false
 	hasManyToMany := false
 
 	for i := 0; i < elemType.NumField(); i++ {
 		field := elemType.Field(i)
 
-		// Check if the struct embeds Leave
-		if field.Anonymous && field.Type == reflect.TypeOf(Leave{}) {
-			hasLeave = true
+		// Check if the struct embeds Leaf
+		if field.Anonymous && field.Type == reflect.TypeOf(Leaf{}) {
+			hasLeaf = true
 		}
 
 		// Check if the struct has a slice field with a gorm "many2many" annotation
@@ -70,8 +70,8 @@ func isLeaveSlice(item any) error {
 		}
 	}
 
-	if !hasLeave {
-		return ErrItemIsNotTreeLeave
+	if !hasLeaf {
+		return ErrItemIsNotTreeLeaf
 	}
 
 	if !hasManyToMany {
@@ -115,9 +115,13 @@ func getGormM2MTblName(item any) (string, string, error) {
 }
 
 const nodeIdDBField = "node_id"
-const leaveIDDBField = "leave_id"
+const leafIDDBField = "leaf_id"
 
 func (ct *Tree) GetLeaves(ctx context.Context, target any, parentID uint, maxDepth int, tenant string) error {
+	tenant, err := validateTenant(tenant)
+	if err != nil {
+		return err
+	}
 
 	ids, err := ct.DescendantIds(ctx, parentID, maxDepth, tenant)
 	if err != nil {
@@ -142,9 +146,15 @@ func (ct *Tree) GetLeaves(ctx context.Context, target any, parentID uint, maxDep
 	if err != nil {
 		return err
 	}
+	if err := validateTableName(m2mTbl); err != nil {
+		return err
+	}
+	if err := validateTableName(leaveTblName); err != nil {
+		return err
+	}
 
-	joinSql := fmt.Sprintf(leavesJoinQuery, m2mTbl, leaveTblName, leaveIDDBField, m2mTbl, singular(leaveTblName), leaveIDDBField)
-	err = ct.db.Model(target).InnerJoins(joinSql).
+	joinSql := fmt.Sprintf(leavesJoinQuery, m2mTbl, leaveTblName, leafIDDBField, m2mTbl, singular(leaveTblName), leafIDDBField)
+	err = ct.db.WithContext(ctx).Model(target).InnerJoins(joinSql).
 		Preload(fieldName).
 		Where(fmt.Sprintf(leavesWhereQuery, m2mTbl, singular(ct.nodesTbl), nodeIdDBField, leaveTblName), ids, tenant).
 		Distinct().

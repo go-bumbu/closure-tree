@@ -74,9 +74,9 @@ type TestPayload struct {
 	Children []*TestPayload `gorm:"-"`
 }
 
-// TestLeaf is used for GetLeaves tests. It embeds Leave and has a many2many relation to TestPayload.
+// TestLeaf is used for GetLeaves tests. It embeds Leaf and has a many2many relation to TestPayload.
 type TestLeaf struct {
-	closuretree.Leave
+	closuretree.Leaf
 	Name  string
 	Nodes []*TestPayload `gorm:"many2many:test_leaf_nodes;"`
 }
@@ -92,7 +92,6 @@ const tenant2 = "t2"
 
 //nolint:gosec // int conversion is not critical here
 func getNodeDetails(item any) (bool, int, string) {
-
 	itemValue := reflect.ValueOf(item)
 	if itemValue.Kind() == reflect.Ptr {
 		itemValue = itemValue.Elem()
@@ -125,6 +124,7 @@ func getNodeDetails(item any) (bool, int, string) {
 	}
 	return false, 0, ""
 }
+
 func TestAddNodes(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -134,36 +134,41 @@ func TestAddNodes(t *testing.T) {
 			}
 
 			tcs := []struct {
-				name           string
-				topItem        any
-				topItemDetails NodeDetails
-				topItemExpect  NodeDetails
-
+				name             string
+				topItem          any
+				topItemDetails   NodeDetails
+				topItemExpect    NodeDetails
 				childItem        any
 				childItemDetails NodeDetails
 				childItemExpect  NodeDetails
 			}{
 				{
-					name:            "Pointer to struct with ID field",
-					topItem:         &SampleStruct{Name: "Sample"},
-					childItem:       &SampleStruct{Name: "Sample2"},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					name:             "Pointer to struct with ID field",
+					topItem:          &SampleStruct{Name: "Sample"},
+					childItem:        &SampleStruct{Name: "Sample2"},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
+					topItemExpect:    NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
+					childItemExpect:  NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
 				},
 				{
-					name:      "struct with ID field",
-					topItem:   SampleStruct{Name: "Sample"},
-					childItem: SampleStruct{Name: "Sample2"},
+					name:             "struct with ID field",
+					topItem:          SampleStruct{Name: "Sample"},
+					childItem:        SampleStruct{Name: "Sample2"},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
 					// values should not be populated because it's not a pointer
 					topItemExpect:   NodeDetails{Id: 0, Tenant: ""},
 					childItemExpect: NodeDetails{Id: 0, Tenant: ""},
 				},
 				{
-					name:            "Ensure embedded NodeId is ignored",
-					topItem:         &SampleStruct{Name: "Sample"},
-					childItem:       &SampleStruct{Name: "Sample2", Node: closuretree.Node{NodeId: 4}},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					name:             "Ensure embedded NodeId is ignored",
+					topItem:          &SampleStruct{Name: "Sample"},
+					childItem:        &SampleStruct{Name: "Sample2", Node: closuretree.Node{NodeId: 4}},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
+					topItemExpect:    NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
+					childItemExpect:  NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
 				},
 				{
 					name:             "asert tenant is set",
@@ -175,11 +180,13 @@ func TestAddNodes(t *testing.T) {
 					childItemExpect:  NodeDetails{Id: 2, Tenant: "ble"},
 				},
 				{
-					name:            "Ensure embedded Tenant is ignored",
-					topItem:         &SampleStruct{Name: "Sample"},
-					childItem:       &SampleStruct{Name: "Sample2", Node: closuretree.Node{Tenant: "bla"}},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					name:             "Ensure embedded Tenant is ignored",
+					topItem:          &SampleStruct{Name: "Sample"},
+					childItem:        &SampleStruct{Name: "Sample2", Node: closuretree.Node{Tenant: "bla"}},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
+					topItemExpect:    NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
+					childItemExpect:  NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
 				},
 				{
 					name:             "Avoid cross tenant Add",
@@ -191,19 +198,28 @@ func TestAddNodes(t *testing.T) {
 					childItemExpect:  NodeDetails{Err: closuretree.ErrParentNotFound.Error()},
 				},
 				{
-					name:            "Struct without ID field",
-					topItem:         &struct{ Name string }{Name: "NoID"},
-					topItemExpect:   NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
-					childItemExpect: NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
+					name:             "Struct without ID field",
+					topItem:          &struct{ Name string }{Name: "NoID"},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
+					topItemExpect:    NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
+					childItemExpect:  NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
 				},
 			}
 
 			for i, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					var ct *closuretree.Tree
-					var err error
-
-					ct, _ = closuretree.New(db.ConnDbName(fmt.Sprintf("addnodes%d", i)), tc.topItem)
+					ct, err := closuretree.New(db.ConnDbName(fmt.Sprintf("addnodes%d", i)), tc.topItem)
+					if err != nil {
+						if tc.topItemExpect.Err != "" {
+							if diff := cmp.Diff(err.Error(), tc.topItemExpect.Err); diff != "" {
+								t.Errorf("unexpected error (-want +got):\n%s", diff)
+							}
+						} else {
+							t.Fatalf("unexpected error from New: %v", err)
+						}
+						return
+					}
 
 					// add topItem as parent
 					err = ct.Add(context.Background(), tc.topItem, 0, tc.topItemDetails.Tenant)
@@ -622,12 +638,12 @@ func TestGetTreeDescendants(t *testing.T) {
 					},
 					wantIds: []*closuretree.TreeNode{
 						{
-							NodeId: 2, AncestorID: 1,
+							NodeId: 2, ParentID: 1,
 							Children: []*closuretree.TreeNode{
-								{NodeId: 6, AncestorID: 2},
+								{NodeId: 6, ParentID: 2},
 							},
 						},
-						{NodeId: 4, AncestorID: 1},
+						{NodeId: 4, ParentID: 1},
 					},
 					tenant: tenant1,
 				},
@@ -646,19 +662,18 @@ func TestGetTreeDescendants(t *testing.T) {
 								{Name: "Blue", Node: closuretree.Node{NodeId: 14, Tenant: tenant2}},
 							}},
 					},
-					//wantIds: []uint{8, 10, 12, 13, 14},
 					wantIds: []*closuretree.TreeNode{
 						{
-							NodeId: 8, AncestorID: 7,
+							NodeId: 8, ParentID: 7,
 							Children: []*closuretree.TreeNode{
-								{NodeId: 12, AncestorID: 8},
-								{NodeId: 13, AncestorID: 8},
+								{NodeId: 12, ParentID: 8},
+								{NodeId: 13, ParentID: 8},
 							},
 						},
 						{
-							NodeId: 10, AncestorID: 7,
+							NodeId: 10, ParentID: 7,
 							Children: []*closuretree.TreeNode{
-								{NodeId: 14, AncestorID: 10},
+								{NodeId: 14, ParentID: 10},
 							},
 						},
 					},
@@ -673,8 +688,8 @@ func TestGetTreeDescendants(t *testing.T) {
 						{Name: "Clothing", Node: closuretree.Node{NodeId: 3, Tenant: tenant1}},
 					},
 					wantIds: []*closuretree.TreeNode{
-						{NodeId: 1, AncestorID: 0},
-						{NodeId: 3, AncestorID: 0},
+						{NodeId: 1, ParentID: 0},
+						{NodeId: 3, ParentID: 0},
 					},
 					tenant: tenant1,
 				},
@@ -806,7 +821,7 @@ func TestMove(t *testing.T) {
 						{parent: 8, tenant: tenant2, want: []uint{12, 13}},
 						{parent: 8, tenant: tenant1, want: []uint{}},
 					},
-					wantErr: closuretree.ErrNodeNotFound.Error(),
+					wantErr: closuretree.ErrParentNotFound.Error(),
 					tenant:  tenant1,
 				},
 				{
@@ -899,7 +914,6 @@ func TestMove(t *testing.T) {
 						}
 					}
 					for _, checkId := range tc.wantIds {
-
 						// check only one level deep
 						got, err := ct.DescendantIds(context.Background(), checkId.parent, 1, checkId.tenant)
 						if err != nil {
@@ -973,7 +987,7 @@ func TestDelete(t *testing.T) {
 					wantIds: []idCheck{
 						{parent: 1, tenant: tenant1, want: []uint{2, 4, 6}},
 					},
-					wantErr: "node not found",
+					wantErr: closuretree.ErrNodeNotFound.Error(),
 				},
 			}
 
@@ -1150,21 +1164,21 @@ func TestGetLeaves(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			t.Run("invalid leave struct - no Leave embedded", func(t *testing.T) {
-				type NoLeave struct {
+			t.Run("invalid leaf struct - no Leaf embedded", func(t *testing.T) {
+				type NoLeaf struct {
 					ID   uint
 					Name string
 				}
-				var leaves []NoLeave
+				var leaves []NoLeaf
 				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
-				if !errors.Is(err, closuretree.ErrItemIsNotTreeLeave) {
-					t.Errorf("expected ErrItemIsNotTreeLeave, got %v", err)
+				if !errors.Is(err, closuretree.ErrItemIsNotTreeLeaf) {
+					t.Errorf("expected ErrItemIsNotTreeLeaf, got %v", err)
 				}
 			})
 
-			t.Run("invalid leave struct - missing many2many tag", func(t *testing.T) {
+			t.Run("invalid leaf struct - missing many2many tag", func(t *testing.T) {
 				type NoM2M struct {
-					closuretree.Leave
+					closuretree.Leaf
 					Name string
 				}
 				var leaves []NoM2M
@@ -1177,8 +1191,8 @@ func TestGetLeaves(t *testing.T) {
 			t.Run("happy path - returns leaf associated with descendant node", func(t *testing.T) {
 				// Create a leaf with tenant1
 				leaf := TestLeaf{
-					Leave: closuretree.Leave{Tenant: tenant1},
-					Name:  "leaf-mobile-phones",
+					Leaf: closuretree.Leaf{Tenant: tenant1},
+					Name: "leaf-mobile-phones",
 				}
 				if err := gdb.Create(&leaf).Error; err != nil {
 					t.Fatal(err)
