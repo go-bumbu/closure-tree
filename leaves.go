@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"gorm.io/gorm"
 	"reflect"
 	"strings"
+
+	"github.com/jinzhu/inflection"
+	"gorm.io/gorm"
 )
 
 // Leave is an embeddable ID to be used in closure tree, this is mandatory if you want to use leaves functionality
 type Leave struct {
-	LeaveId uint   `gorm:"AUTO_INCREMENT;PRIMARY_KEY;not null"`
+	LeaveId uint   `gorm:"autoIncrement;primaryKey;not null"`
 	Tenant  string `gorm:"index"`
 }
 
@@ -21,7 +23,7 @@ func (n *Leave) Id() uint {
 
 var ErrItemIsNotTreeLeave = errors.New("the item does not embed Leave")
 
-// isLeaveSlice uses reflection to verify if the passed item is a pointer to a slise that embedded Leave struct
+// isLeaveSlice uses reflection to verify if the passed item is a pointer to a slice that embedded Leave struct
 // returns an error for every condition checked, returns nil if the passed item is as expected
 func isLeaveSlice(item any) error {
 	if item == nil {
@@ -154,11 +156,7 @@ func (ct *Tree) GetLeaves(ctx context.Context, target any, parentID uint, maxDep
 const leavesJoinQuery = `INNER JOIN %s ON %s.%s = %s.%s_%s`
 const leavesWhereQuery = `%s.%s_%s IN ? AND %s.Tenant = ?`
 
-// if the input string ends on s, return it without the s ending
-// e.g. songs => song
+// singular returns the singular form of the input string using proper English inflection rules.
 func singular(in string) string {
-	if strings.HasSuffix(in, "s") {
-		return in[:len(in)-1]
-	}
-	return in
+	return inflection.Singular(in)
 }

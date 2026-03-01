@@ -8,7 +8,7 @@ import (
 // Node is an embeddable ID to be used in closure tree, this is mandatory.
 // ParentId is ignored during write operations, it is only populated during read.
 type Node struct {
-	NodeId   uint   `gorm:"AUTO_INCREMENT;PRIMARY_KEY;not null" json:"id"`
+	NodeId   uint   `gorm:"autoIncrement;primaryKey;not null" json:"id"`
 	ParentId uint   `json:"parentId" gorm:"column:parent_id;->;-:migration"` // field is Read-only, no migration
 	Tenant   string `gorm:"index" json:"tenant"`
 }
@@ -39,15 +39,14 @@ func hasNode(item any) bool {
 		return false
 	}
 
+	// Allow Node itself
+	if itemType == reflect.TypeOf(Node{}) {
+		return true
+	}
+
 	for i := 0; i < itemType.NumField(); i++ {
 		field := itemType.Field(i)
-		if field.Anonymous {
-			if field.Type == reflect.TypeOf(Node{}) {
-				return true
-			}
-		}
-
-		if field.Name == nodeIDField && field.Type == reflect.TypeOf(uint(0)) {
+		if field.Anonymous && field.Type == reflect.TypeOf(Node{}) {
 			return true
 		}
 	}

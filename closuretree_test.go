@@ -2,15 +2,17 @@ package closuretree_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	closuretree "github.com/go-bumbu/closure-tree"
-	"github.com/go-bumbu/testdbs"
-	"github.com/google/go-cmp/cmp"
 	"os"
 	"reflect"
 	"sort"
 	"sync"
 	"testing"
+
+	closuretree "github.com/go-bumbu/closure-tree"
+	"github.com/go-bumbu/testdbs"
+	"github.com/google/go-cmp/cmp"
 )
 
 // TestMain modifies how test are run,
@@ -70,6 +72,13 @@ type TestPayload struct {
 	closuretree.Node
 	Name     string
 	Children []*TestPayload `gorm:"-"`
+}
+
+// TestLeaf is used for GetLeaves tests. It embeds Leave and has a many2many relation to TestPayload.
+type TestLeaf struct {
+	closuretree.Leave
+	Name  string
+	Nodes []*TestPayload `gorm:"many2many:test_leaf_nodes;"`
 }
 
 type NodeDetails struct {
@@ -897,7 +906,12 @@ func TestMove(t *testing.T) {
 							t.Fatal(err)
 						}
 
-						if diff := cmp.Diff(checkId.want, got); diff != "" {
+						// databases may return items at the same depth in non-deterministic order
+						sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+						want := append([]uint{}, checkId.want...)
+						sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+
+						if diff := cmp.Diff(want, got); diff != "" {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
@@ -905,27 +919,6 @@ func TestMove(t *testing.T) {
 				})
 			}
 		})
-	}
-}
-
-// used for debugging, e.g.
-// items := []*TestPayload{}
-//
-// err = ct.TreeDescendants(context.Background(), 0, 0, checkId.tenant, &items)
-// if err != nil {
-// t.Fatal(err)
-// }
-// fmt.Println("================")
-// printTreeTest(items, "")
-// fmt.Println("================")
-var _ = printTreeTest
-
-func printTreeTest(nodes []*TestPayload, indent string) {
-	for _, n := range nodes {
-		fmt.Printf("%s%d=> %s\n", indent, n.NodeId, n.Name)
-		if len(n.Children) > 0 {
-			printTreeTest(n.Children, indent+"|- ")
-		}
 	}
 }
 
@@ -1029,50 +1022,50 @@ func TestIsDescendant(t *testing.T) {
 			populateTree(t, ct)
 
 			tcs := []struct {
-				name     string
-				nodeID   uint
-				parentID uint
-				tenant   string
-				want     bool
+				name         string
+				ancestorID   uint
+				descendantID uint
+				tenant       string
+				want         bool
 			}{
 				{
-					name:     "node is a descendant",
-					nodeID:   6,
-					parentID: 2,
-					tenant:   tenant1,
-					want:     true,
+					name:         "node is a descendant",
+					ancestorID:   2,
+					descendantID: 6,
+					tenant:       tenant1,
+					want:         true,
 				},
 				{
-					name:     "node is not a descendant",
-					nodeID:   3,
-					parentID: 5,
-					tenant:   tenant1,
-					want:     false,
+					name:         "node is not a descendant",
+					ancestorID:   5,
+					descendantID: 3,
+					tenant:       tenant1,
+					want:         false,
 				},
 				{
-					name:     "node is descendant in another tenant",
-					nodeID:   14,
-					parentID: 10,
-					tenant:   tenant2,
-					want:     true,
+					name:         "node is descendant in another tenant",
+					ancestorID:   10,
+					descendantID: 14,
+					tenant:       tenant2,
+					want:         true,
 				},
 				{
-					name:     "node is not descendant - cross tenant",
-					nodeID:   14,
-					parentID: 10,
-					tenant:   tenant1,
-					want:     false,
+					name:         "node is not descendant - cross tenant",
+					ancestorID:   10,
+					descendantID: 14,
+					tenant:       tenant1,
+					want:         false,
 				},
 			}
 
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					got, err := ct.IsDescendant(context.Background(), tc.parentID, tc.nodeID, tc.tenant)
+					got, err := ct.IsDescendant(context.Background(), tc.ancestorID, tc.descendantID, tc.tenant)
 					if err != nil {
 						t.Fatalf("unexpected error: %v", err)
 					}
 					if got != tc.want {
-						t.Errorf("IsDescendant(%d, %d) = %v; want %v", tc.parentID, tc.nodeID, got, tc.want)
+						t.Errorf("IsDescendant(%d, %d) = %v; want %v", tc.ancestorID, tc.descendantID, got, tc.want)
 					}
 				})
 			}
@@ -1136,6 +1129,169 @@ func TestIsChildOf(t *testing.T) {
 						t.Errorf("IsChildOf(%d, %d) = %v; want %v", tc.nodeID, tc.parentID, got, tc.wantChild)
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestGetLeaves(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName("getleaves")
+
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			// Migrate the leaf table (also creates the M2M join table)
+			if err := gdb.AutoMigrate(&TestLeaf{}); err != nil {
+				t.Fatal(err)
+			}
+
+			t.Run("invalid leave struct - no Leave embedded", func(t *testing.T) {
+				type NoLeave struct {
+					ID   uint
+					Name string
+				}
+				var leaves []NoLeave
+				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
+				if !errors.Is(err, closuretree.ErrItemIsNotTreeLeave) {
+					t.Errorf("expected ErrItemIsNotTreeLeave, got %v", err)
+				}
+			})
+
+			t.Run("invalid leave struct - missing many2many tag", func(t *testing.T) {
+				type NoM2M struct {
+					closuretree.Leave
+					Name string
+				}
+				var leaves []NoM2M
+				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
+				if err == nil {
+					t.Error("expected error for missing many2many tag, got nil")
+				}
+			})
+
+			t.Run("happy path - returns leaf associated with descendant node", func(t *testing.T) {
+				// Create a leaf with tenant1
+				leaf := TestLeaf{
+					Leave: closuretree.Leave{Tenant: tenant1},
+					Name:  "leaf-mobile-phones",
+				}
+				if err := gdb.Create(&leaf).Error; err != nil {
+					t.Fatal(err)
+				}
+
+				// Associate the leaf with node 2 (Mobile Phones, child of Electronics=1)
+				node2 := &TestPayload{}
+				node2.NodeId = 2
+				if err := gdb.Model(&leaf).Association("Nodes").Append(node2); err != nil {
+					t.Fatal(err)
+				}
+
+				// GetLeaves under node 1 (Electronics) should return our leaf
+				var leaves []TestLeaf
+				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(leaves) != 1 {
+					t.Errorf("expected 1 leaf, got %d", len(leaves))
+					return
+				}
+				if leaves[0].Name != "leaf-mobile-phones" {
+					t.Errorf("expected leaf name 'leaf-mobile-phones', got %q", leaves[0].Name)
+				}
+			})
+
+			t.Run("wrong tenant returns empty", func(t *testing.T) {
+				var leaves []TestLeaf
+				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant2)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(leaves) != 0 {
+					t.Errorf("expected 0 leaves for wrong tenant, got %d", len(leaves))
+				}
+			})
+
+			t.Run("non-existent parent returns empty", func(t *testing.T) {
+				var leaves []TestLeaf
+				err := ct.GetLeaves(context.Background(), &leaves, 9999, 0, tenant1)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(leaves) != 0 {
+					t.Errorf("expected 0 leaves for non-existent parent, got %d", len(leaves))
+				}
+			})
+		})
+	}
+}
+
+// TestMoveSubtreeIntegrity verifies that moving a subtree to root preserves
+// all descendant closure rows at every depth level.
+func TestMoveSubtreeIntegrity(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct, err := closuretree.New(db.ConnDbName("movesubtreeintegrity"), TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			// Move node 8 (Warm) to root. Its subtree includes 12 (Red) and 13 (Orange).
+			// Before: 7 -> 8 -> {12, 13}
+			// After:  8 -> {12, 13} at root level
+			err = ct.Move(context.Background(), 8, 0, tenant2)
+			if err != nil {
+				t.Fatalf("unexpected error moving node: %v", err)
+			}
+
+			// Node 8 should now be a root node
+			rootChildren, err := ct.DescendantIds(context.Background(), 0, 1, tenant2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(rootChildren, func(i, j int) bool { return rootChildren[i] < rootChildren[j] })
+			expectedRoots := []uint{7, 8, 9}
+			if diff := cmp.Diff(expectedRoots, rootChildren); diff != "" {
+				t.Errorf("root children after move (-want +got):\n%s", diff)
+			}
+
+			// Node 8's children (12 and 13) must still be reachable
+			warmChildren, err := ct.DescendantIds(context.Background(), 8, 1, tenant2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(warmChildren, func(i, j int) bool { return warmChildren[i] < warmChildren[j] })
+			expectedWarm := []uint{12, 13}
+			if diff := cmp.Diff(expectedWarm, warmChildren); diff != "" {
+				t.Errorf("children of node 8 after move (-want +got):\n%s", diff)
+			}
+
+			// All descendants of node 8 (full subtree) must be correct
+			allDesc, err := ct.DescendantIds(context.Background(), 8, 0, tenant2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(allDesc, func(i, j int) bool { return allDesc[i] < allDesc[j] })
+			expectedAll := []uint{12, 13}
+			if diff := cmp.Diff(expectedAll, allDesc); diff != "" {
+				t.Errorf("all descendants of node 8 after move (-want +got):\n%s", diff)
+			}
+
+			// Node 7 (Colors) should no longer have node 8 as a descendant
+			colorsDesc, err := ct.DescendantIds(context.Background(), 7, 0, tenant2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(colorsDesc, func(i, j int) bool { return colorsDesc[i] < colorsDesc[j] })
+			expectedColors := []uint{10, 14}
+			if diff := cmp.Diff(expectedColors, colorsDesc); diff != "" {
+				t.Errorf("descendants of node 7 after move (-want +got):\n%s", diff)
 			}
 		})
 	}

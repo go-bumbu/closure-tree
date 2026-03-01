@@ -5,17 +5,24 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"gorm.io/gorm"
+	"math"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+
+	"gorm.io/gorm"
 )
 
 const closureTblName = "closure_tree_rel"
+const ancestorIDMapKey = "ancestorId"
 
-var ErrItemIsNotTreeNode = errors.New("the item does not embed Node")
-var ErrParentNotFound = errors.New("wrong parent ID")
-var ErrNodeNotFound = errors.New("node not found")
+var (
+	ErrItemIsNotTreeNode = errors.New("the item does not embed Node")
+	ErrParentNotFound    = errors.New("wrong parent ID")
+	ErrNodeNotFound      = errors.New("node not found")
+	ErrInvalidMove       = errors.New("invalid move")
+)
 
 // Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items
 type Tree struct {
@@ -28,7 +35,23 @@ type Tree struct {
 
 // New returns a Tree for the given item on the specific gorm Database
 func New(db *gorm.DB, item any) (*Tree, error) {
+	ct, err := newTree(db, item)
+	if err != nil {
+		return nil, err
+	}
+	if err := ct.migrate(item); err != nil {
+		return nil, err
+	}
+	if isMySQLDialect(db) {
+		if err := checkMySQLVersion(db); err != nil {
+			return nil, err
+		}
+	}
+	return ct, nil
+}
 
+// newTree parses the schema and validates the item but does not run migrations.
+func newTree(db *gorm.DB, item any) (*Tree, error) {
 	stmt := &gorm.Statement{DB: db}
 	err := stmt.Parse(item)
 	if err != nil {
@@ -42,9 +65,9 @@ func New(db *gorm.DB, item any) (*Tree, error) {
 	for _, field := range stmt.Schema.Fields {
 		columnFieldMap[field.DBName] = field.Name
 	}
-	columnFieldMap["ancestor_id"] = "ancestorId"
+	columnFieldMap["ancestor_id"] = ancestorIDMapKey
 
-	ct := Tree{
+	ct := &Tree{
 		db:           db,
 		nodesTbl:     name,
 		col2FieldMap: columnFieldMap,
@@ -55,16 +78,39 @@ func New(db *gorm.DB, item any) (*Tree, error) {
 		return nil, ErrItemIsNotTreeNode
 	}
 
-	err = db.AutoMigrate(item)
-	if err != nil {
-		return nil, fmt.Errorf("unable to migreate node table: %v", err)
-	}
+	return ct, nil
+}
 
-	err = db.Table(ct.relationsTbl).AutoMigrate(closureTree{})
+func (ct *Tree) migrate(item any) error {
+	err := ct.db.AutoMigrate(item)
 	if err != nil {
-		return nil, fmt.Errorf("unable to migrate closure table: %v", err)
+		return fmt.Errorf("unable to migrate node table: %w", err)
 	}
-	return &ct, nil
+	err = ct.db.Table(ct.relationsTbl).AutoMigrate(closureTree{})
+	if err != nil {
+		return fmt.Errorf("unable to migrate closure table: %w", err)
+	}
+	return nil
+}
+
+func isMySQLDialect(db *gorm.DB) bool {
+	return db.Name() == "mysql"
+}
+
+func checkMySQLVersion(db *gorm.DB) error {
+	var version string
+	if err := db.Raw("SELECT VERSION()").Scan(&version).Error; err != nil {
+		return fmt.Errorf("unable to check MySQL version: %w", err)
+	}
+	parts := strings.SplitN(version, ".", 2)
+	if len(parts) < 1 {
+		return fmt.Errorf("unable to parse MySQL version: %s", version)
+	}
+	var major int
+	if _, err := fmt.Sscanf(parts[0], "%d", &major); err != nil || major < 8 {
+		return fmt.Errorf("MySQL 8.0+ required; got %s", version)
+	}
+	return nil
 }
 
 // GetNodeTableName returns the table name of the stored Nodes, used if you need to interact directly
@@ -81,10 +127,10 @@ func (ct *Tree) GetClosureTableName() string {
 
 // represents the table that store the relationships
 type closureTree struct {
-	AncestorID   uint   `gorm:"not null,primaryKey,uniqueIndex"`
-	DescendantID uint   `gorm:"not null,primaryKey,uniqueIndex"`
-	Tenant       string `gorm:"index"`
-	Depth        int
+	AncestorID   uint   `gorm:"not null;index:idx_anc_ten_dep,composite:1;uniqueIndex:idx_closure_uniq,composite:a"`
+	DescendantID uint   `gorm:"not null;index:idx_desc_ten,composite:1;uniqueIndex:idx_closure_uniq,composite:b"`
+	Tenant       string `gorm:"not null;index:idx_anc_ten_dep,composite:2;index:idx_desc_ten,composite:2;uniqueIndex:idx_closure_uniq,composite:c"`
+	Depth        int    `gorm:"not null;default:0;check:chk_depth,depth >= 0;index:idx_anc_ten_dep,composite:3"`
 }
 
 // DefaultTenant is used in the database as a stub if not tenant was passed
@@ -137,38 +183,35 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, tenant string)
 		}
 	}
 
-	// Check if the parent node exists and the tenant is the same
-	if parentID != 0 {
-		var parent Node
-		err := ct.db.WithContext(ctx).Table(ct.nodesTbl).
-			Where("node_id = ? AND tenant = ?", parentID, tenant).
-			First(&parent).Error
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrParentNotFound
-			}
-			return fmt.Errorf("unable to check parent node: %v", err)
-		}
-	}
-
 	err := ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Check if the parent node exists and the tenant is the same (inside tx to avoid TOCTOU)
+		if parentID != 0 {
+			var parent Node
+			err := tx.Table(ct.nodesTbl).
+				Where("node_id = ? AND tenant = ?", parentID, tenant).
+				First(&parent).Error
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrParentNotFound
+				}
+				return fmt.Errorf("unable to check parent node: %w", err)
+			}
+		}
+
 		// create the Node item
 		err := tx.Table(ct.nodesTbl).Create(reflectItem).Error
 		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("unable to add node: %v", err)
+			return fmt.Errorf("unable to add node: %w", err)
 		}
 
 		id, gotTennant, err := getNodeData(reflectItem)
 		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("unable to get Item ID: %v", err)
+			return fmt.Errorf("unable to get Item ID: %w", err)
 		}
 
 		// Add reflexive relationship
 		err = tx.Table(ct.relationsTbl).Create(&closureTree{AncestorID: id, DescendantID: id, Tenant: gotTennant, Depth: 0}).Error
 		if err != nil {
-			tx.Rollback()
 			return err
 		}
 
@@ -177,15 +220,13 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, tenant string)
 			sqlstr := fmt.Sprintf(addRootRelQuery, ct.relationsTbl)
 			ex := tx.Exec(sqlstr, id, gotTennant)
 			if ex.Error != nil {
-				tx.Rollback()
 				return ex.Error
 			}
 		} else {
 			// Copy all ancestors of the parent to include the new tag
 			sqlstr := fmt.Sprintf(addRelsQuery, ct.relationsTbl, ct.relationsTbl)
-			ex := tx.Exec(sqlstr, id, gotTennant, parentID)
+			ex := tx.Exec(sqlstr, id, gotTennant, parentID, gotTennant)
 			if ex.Error != nil {
-				tx.Rollback()
 				return ex.Error
 			}
 		}
@@ -218,12 +259,12 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, tenant string)
 	return nil
 }
 
-const addRelsQuery = `INSERT INTO %s (ancestor_id, descendant_id, Tenant, depth)
-				SELECT ancestor_id, ?, ?, depth + 1
-				FROM %s
-				WHERE descendant_id = ?;`
+const addRelsQuery = `INSERT INTO %s (ancestor_id, descendant_id, tenant, depth)
+			SELECT ancestor_id, ?, ?, depth + 1
+			FROM %s
+			WHERE descendant_id = ? AND tenant = ?;`
 
-const addRootRelQuery = `INSERT INTO %s (ancestor_id, descendant_id, Tenant, depth)	VALUES (0, ?,?,1);`
+const addRootRelQuery = `INSERT INTO %s (ancestor_id, descendant_id, tenant, depth) VALUES (0, ?, ?, 1);`
 
 // Update  will update the entry with given ID and owned to a specific tenant
 // Note: the passed item has to embed a Node struct, but any value added to the Node will be ignored
@@ -267,8 +308,7 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 		res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(reflectItem)
 
 		if res.Error != nil {
-			tx.Rollback()
-			return fmt.Errorf("unable to update node: %v", res.Error)
+			return fmt.Errorf("unable to update node: %w", res.Error)
 		}
 		if res.RowsAffected == 0 {
 			return ErrNodeNotFound
@@ -279,97 +319,66 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 	return err
 }
 
-var ErrInvalidMove = errors.New("invalid move")
-
 func (ct *Tree) Move(ctx context.Context, nodeId, newParentID uint, tenant string) error {
 	tenant = defaultTenant(tenant)
 	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 
-		// Prevent duplicate move to same parent
-		hasSameParent, err := ct.IsChildOf(ctx, nodeId, newParentID, tenant)
-		if err != nil {
+		// Prevent duplicate move to same parent (uses tx to avoid TOCTOU)
+		var sameParentCount int64
+		if err := tx.Table(ct.relationsTbl).
+			Where("ancestor_id = ? AND descendant_id = ? AND depth = 1 AND tenant = ?", newParentID, nodeId, tenant).
+			Count(&sameParentCount).Error; err != nil {
 			return err
 		}
-		if hasSameParent {
+		if sameParentCount > 0 {
 			return ErrInvalidMove
 		}
 
-		var exec1 *gorm.DB
-		// insert nodes on the new position
-		if newParentID == 0 {
-			// Special case: move to root
-			insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl)
-			exec1 = tx.Exec(insertSql, nodeId, tenant)
-		} else {
-			// Normal move
-			// make sure that move is allowed
-			isDesc, err := ct.IsDescendant(ctx, nodeId, newParentID, tenant)
-			if err != nil {
+		if newParentID != 0 {
+			// Normal move — make sure we're not moving a node under its own descendant (uses tx)
+			var descCount int64
+			if err := tx.Table(ct.relationsTbl).
+				Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", nodeId, newParentID, tenant).
+				Limit(1).Count(&descCount).Error; err != nil {
 				return err
 			}
-			if isDesc {
+			if descCount > 0 {
 				return ErrInvalidMove
 			}
-
-			insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
-			exec1 = tx.Exec(insertSql, nodeId, newParentID, tenant, tenant)
 		}
 
-		if exec1.Error != nil {
-			return exec1.Error
+		// STEP 1: Delete all connections coming from outside the subtree into the subtree.
+		// This must happen before the insert to avoid unique-constraint conflicts when
+		// an (ancestor_id, descendant_id, tenant) triple needs a new depth value.
+		delSql := fmt.Sprintf(moveDeleteExternalPaths,
+			ct.relationsTbl, // %s: CTE SELECT FROM
+			ct.relationsTbl, // %s: DELETE FROM
+		)
+		delExec := tx.Exec(delSql, nodeId, tenant, tenant)
+		if delExec.Error != nil {
+			return delExec.Error
 		}
-		// make sure we don't delete items if nothing was moved, e.g. if we try to move cross Tenant unsuccessful
-		if exec1.RowsAffected == 0 {
-			// note: for now we assume that if no row were affected we could not find either the node to move
-			// or the new parent, either because they don't exist or because they belong to another tenant
+		// If nothing was deleted the node doesn't exist (or belongs to another tenant)
+		if delExec.RowsAffected == 0 {
 			return ErrNodeNotFound
 		}
 
-		// carefully delete old closure relationships
-		var exec2 *gorm.DB
+		// STEP 2: Insert the new connections from the destination's ancestors to the subtree.
+		var insExec *gorm.DB
 		if newParentID == 0 {
-			// Special case: move to root
-			delSql := fmt.Sprintf(
-				moveQueryToRootDeleteOld, // your SQL with placeholders
-				ct.relationsTbl,          // %s: subtree CTE table name
-				ct.relationsTbl,          // %s: old_paths CTE table name
-				ct.relationsTbl,          // %s: new_paths alias p table name
-				ct.relationsTbl,          // %s: new_paths alias c table name
-				ct.relationsTbl,          // %s: DELETE FROM target table name
-			)
-			exec2 = tx.Exec(delSql,
-				nodeId,      // ?1: subtree -> ancestor_id = moved_node_id (e.g., 2)
-				tenant,      // ?2: subtree -> tenant string (e.g., "t1")
-				tenant,      // ?3: old_paths -> tenant string
-				nodeId,      // ?4: new_paths c.ancestor_id = moved_node_id
-				newParentID, // ?5: new_paths p.descendant_id = new_parent_node_id (e.g., 5)
-				tenant,      // ?6: new_paths p.tenant
-				tenant,      // ?7: new_paths c.tenant
-				nodeId,      // ?8: SELECT 0 AS ancestor_id, ? AS descendant_id, 1 AS depth
-			)
+			// Move to root: connect root sentinel (ancestor_id=0) to every subtree node
+			insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl)
+			insExec = tx.Exec(insertSql, nodeId, tenant)
 		} else {
-			// Normal move
-
-			delSql := fmt.Sprintf(
-				moveQueryDeleteOld, // your SQL with placeholders
-				ct.relationsTbl,    // %s: subtree CTE table name
-				ct.relationsTbl,    // %s: old_paths CTE table name
-				ct.relationsTbl,    // %s: new_paths alias p table name
-				ct.relationsTbl,    // %s: new_paths alias c table name
-				ct.relationsTbl,    // %s: DELETE FROM target table name
-			)
-
-			exec2 = tx.Exec(delSql,
-				nodeId,      // ?1: subtree -> ancestor_id = moved_node_id (e.g., 2)
-				tenant,      // ?2: subtree -> tenant string (e.g., "t1")
-				tenant,      // ?3: old_paths -> tenant string
-				nodeId,      // ?4: new_paths c.ancestor_id = moved_node_id
-				newParentID, // ?5: new_paths p.descendant_id = new_parent_node_id (e.g., 5)
-				tenant,      // ?6: new_paths p.tenant
-				tenant,      // ?7: new_paths c.tenant
-			)
+			// Normal move: copy ancestor paths from new parent to all subtree nodes
+			insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
+			insExec = tx.Exec(insertSql, nodeId, newParentID, tenant, tenant)
+			if insExec.Error == nil && insExec.RowsAffected == 0 {
+				// New parent not found in this tenant
+				return ErrNodeNotFound
+			}
 		}
-		return exec2.Error
+		return insExec.Error
 	})
 }
 
@@ -381,91 +390,36 @@ WHERE c.ancestor_id = ? AND c.tenant = ?;
 `
 
 const moveQueryInsertNew = `
-INSERT INTO %s (ancestor_id, descendant_id, depth, Tenant)
-SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1, p.Tenant
+INSERT INTO %s (ancestor_id, descendant_id, depth, tenant)
+SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1, p.tenant
 FROM %s p
 JOIN %s c ON c.ancestor_id = ?
-WHERE p.descendant_id = ? AND p.Tenant = ? AND c.Tenant = ?;
+WHERE p.descendant_id = ? AND p.tenant = ? AND c.tenant = ?;
 `
 
-// descendants contains the list of nodes moved
-// take this quey and replace closure_tree_rel_test_payloads by %s also replace the node ids 2, 5 and the tenant string with a placeholder ?, write a comment on every placeholder replacement stating what it is used for
-
-const moveQueryDeleteOld = `
+// moveDeleteExternalPaths removes all closure rows that come from ancestors OUTSIDE the
+// moved subtree to nodes INSIDE it. This clears the old parent-chain connections while
+// preserving all internal subtree links (self-links and intra-subtree edges).
+// Uses a CTE so MySQL 8.0+ can materialise the subtree before the DELETE, avoiding
+// Error 1093 ("can't specify target table in FROM clause").
+const moveDeleteExternalPaths = `
 WITH subtree AS (
-  SELECT descendant_id
-  FROM %s
-  WHERE ancestor_id = ? AND tenant = ? -- the node to be moved
-),
-old_paths AS (
-  SELECT *
-  FROM %s
-  WHERE descendant_id IN (SELECT descendant_id FROM subtree)
-    AND tenant = ?
-    AND ancestor_id != descendant_id  -- skip self-links
-    AND ancestor_id NOT IN (SELECT descendant_id FROM subtree) -- skip internal subtree links
-),
-new_paths AS (
-  SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1 AS depth
-  FROM %s p
-  JOIN %s c ON c.ancestor_id = ?   -- the node to be moved
-  WHERE p.descendant_id = ?     -- the new parent
-    AND p.tenant = ?   AND c.tenant = ?
+    SELECT descendant_id FROM %s WHERE ancestor_id = ? AND tenant = ?
 )
 DELETE FROM %s
-WHERE (ancestor_id, descendant_id, tenant, depth) IN (
-  SELECT o.ancestor_id, o.descendant_id, o.tenant, o.depth
-  FROM old_paths o
-  LEFT JOIN new_paths n
-    ON o.ancestor_id = n.ancestor_id AND o.descendant_id = n.descendant_id
-  WHERE n.descendant_id IS NULL OR o.depth != n.depth
-);
-`
-
-const moveQueryToRootDeleteOld = `
-WITH subtree AS (
-  SELECT descendant_id
-  FROM %s
-  WHERE ancestor_id = ? AND tenant = ?
-),
-old_paths AS (
-  SELECT *
-  FROM %s
-  WHERE descendant_id IN (SELECT descendant_id FROM subtree)
-	AND tenant = ?
-	AND ancestor_id != descendant_id
-	AND ancestor_id NOT IN (SELECT descendant_id FROM subtree)
-),
-new_paths AS (
-  SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1 AS depth
-  FROM %s p
-  JOIN %s c ON c.ancestor_id = ?
-  WHERE p.descendant_id = ?
-	AND p.tenant = ? AND c.tenant = ?
-  UNION ALL
-  SELECT 0 AS ancestor_id, ? AS descendant_id, 1 AS depth
-)
-DELETE FROM %s
-WHERE (ancestor_id, descendant_id, tenant, depth) IN (
-  SELECT o.ancestor_id, o.descendant_id, o.tenant, o.depth
-  FROM old_paths o
-  LEFT JOIN new_paths n
-	ON o.ancestor_id = n.ancestor_id AND o.descendant_id = n.descendant_id
-  WHERE n.descendant_id IS NULL OR o.depth != n.depth
-);
-`
+WHERE descendant_id IN (SELECT descendant_id FROM subtree)
+AND ancestor_id NOT IN (SELECT descendant_id FROM subtree)
+AND tenant = ?`
 
 func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) error {
+	tenant = defaultTenant(tenant)
 	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 
 		// delete the nodes
-		var err error
 		delNodesSql := fmt.Sprintf(deleteNodesRec, ct.nodesTbl, ct.relationsTbl, ct.nodesTbl)
 		exec1 := tx.Exec(delNodesSql, nodeId, tenant)
-		err = exec1.Error
-		if err != nil {
-			tx.Rollback()
-			return err
+		if exec1.Error != nil {
+			return exec1.Error
 		}
 
 		// make sure we don't delete relations if no node was deleted
@@ -477,32 +431,26 @@ func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) e
 
 		// Delete old closure relationships
 		delRelSql := fmt.Sprintf(deleteRelationsQuery, ct.relationsTbl, ct.relationsTbl)
-		exec2 := tx.Exec(delRelSql, nodeId)
-		err = exec2.Error
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-
-		return nil
+		exec2 := tx.Exec(delRelSql, nodeId, tenant, tenant)
+		return exec2.Error
 	})
 }
 
 const deleteNodesRec = `WITH nodes_to_delete AS (
     SELECT nodes.node_id
     FROM %s AS nodes
-    JOIN %s AS ct ON ct.descendant_id = nodes.node_id
-    WHERE ct.ancestor_id = ? AND nodes.Tenant = ?
+    JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
+    WHERE ct.ancestor_id = ? AND nodes.tenant = ?
 )
 DELETE FROM %s
 WHERE node_id IN (SELECT node_id FROM nodes_to_delete);`
 
-const deleteRelationsQuery = `WITH descendants AS 
-	(
-		SELECT descendant_id FROM %s WHERE ancestor_id = ? 
-	)
-	DELETE FROM %s
-	WHERE descendant_id IN (SELECT descendant_id FROM descendants);`
+const deleteRelationsQuery = `WITH descendants AS (
+	SELECT descendant_id FROM %s WHERE ancestor_id = ? AND tenant = ?
+)
+DELETE FROM %s
+WHERE descendant_id IN (SELECT descendant_id FROM descendants)
+  AND tenant = ?;`
 
 // GetNode loads a single item into the passed pointer
 func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item any) error {
@@ -530,23 +478,27 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 		}
 	} else {
 		// this error should never happen since the item has always an Id() method
-		return fmt.Errorf("unable to cast item to interface with method Id()s")
+		return fmt.Errorf("unable to cast item to interface with method Id()")
 	}
 	return nil
 }
 
 const getNodeQuery = `SELECT nodes.*, parent_rel.ancestor_id AS parent_id
 FROM %s AS nodes
-LEFT JOIN %s AS parent_rel ON parent_rel.descendant_id = nodes.node_id AND parent_rel.depth = 1
-WHERE nodes.node_id = ? AND nodes.tenant = ?`
+LEFT JOIN %s AS parent_rel
+  ON parent_rel.descendant_id = nodes.node_id
+  AND parent_rel.depth = 1
+  AND parent_rel.tenant = nodes.tenant
+WHERE nodes.node_id = ? AND nodes.tenant = ?
+LIMIT 1`
 
-// TODO write unit tests
-// IsDescendant returns true if targetID is a descendant of nodeID in the given tenant.
-func (ct *Tree) IsDescendant(ctx context.Context, nodeID, parentId uint, tenant string) (bool, error) {
+// IsDescendant returns true if descendantID is a descendant of ancestorID in the given tenant.
+func (ct *Tree) IsDescendant(ctx context.Context, ancestorID, descendantID uint, tenant string) (bool, error) {
+	tenant = defaultTenant(tenant)
 	var count int64
 	err := ct.db.WithContext(ctx).
 		Table(ct.relationsTbl).
-		Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", nodeID, parentId, tenant).
+		Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", ancestorID, descendantID, tenant).
 		Limit(1).
 		Count(&count).Error
 	if err != nil {
@@ -557,6 +509,7 @@ func (ct *Tree) IsDescendant(ctx context.Context, nodeID, parentId uint, tenant 
 
 // IsChildOf checks if nodeID already has newParentID as its parent in the closure table.
 func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant string) (bool, error) {
+	tenant = defaultTenant(tenant)
 	var count int64
 	err := ct.db.WithContext(ctx).
 		Table(ct.relationsTbl).
@@ -571,7 +524,7 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 
 // Descendants allows to load a part of the tree into a flat slice of node pointers
 // parent determines the root node id of to load.
-// maxDepth determines the depth of the relationship o load: 0 means all children, 1 only direct children and so on.
+// maxDepth determines the depth of the relationship to load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
 func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tenant string, items interface{}) (err error) {
 	if items == nil {
@@ -588,21 +541,7 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 	}
 
 	elemType := sliceVal.Type().Elem()
-
-	// Prepare temp struct type with overridden ParentId tag
-	var fields []reflect.StructField
-	for i := 0; i < elemType.NumField(); i++ {
-		field := elemType.Field(i)
-		if field.Name == "ParentId" {
-			field.Tag = `json:"parentId"`
-		}
-		fields = append(fields, field)
-	}
-	tempStructType := reflect.StructOf(fields)
-
-	if tempStructType.Kind() != reflect.Struct {
-		return errors.New("tempStructType is not a struct")
-	}
+	tenant = defaultTenant(tenant)
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
@@ -621,23 +560,11 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 	}()
 
 	for rows.Next() {
-		tempItem := reflect.New(tempStructType).Interface()
-		if err := ct.db.ScanRows(rows, tempItem); err != nil {
+		newItem := reflect.New(elemType).Interface()
+		if err := ct.db.ScanRows(rows, newItem); err != nil {
 			return fmt.Errorf("failed to scan row: %w", err)
 		}
-
-		tempVal := reflect.ValueOf(tempItem).Elem()
-		origItem := reflect.New(elemType).Elem()
-
-		for i := 0; i < elemType.NumField(); i++ {
-			origField := origItem.Field(i)
-			tempField := tempVal.Field(i)
-			if origField.CanSet() {
-				origField.Set(tempField)
-			}
-		}
-
-		sliceVal.Set(reflect.Append(sliceVal, origItem))
+		sliceVal.Set(reflect.Append(sliceVal, reflect.ValueOf(newItem).Elem()))
 	}
 
 	return nil
@@ -645,8 +572,11 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 
 const descendantsQuery = `SELECT nodes.*, parent_rel.ancestor_id AS parent_id
 FROM %s AS nodes
-JOIN %s AS ct ON ct.descendant_id = nodes.node_id
-LEFT JOIN %s AS parent_rel ON parent_rel.descendant_id = nodes.node_id AND parent_rel.depth = 1
+JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
+LEFT JOIN %s AS parent_rel
+  ON parent_rel.descendant_id = nodes.node_id
+  AND parent_rel.depth = 1
+  AND parent_rel.tenant = nodes.tenant
 WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.tenant = ?
 ORDER BY ct.depth;`
 
@@ -669,10 +599,12 @@ func (ct *Tree) DescendantIds(ctx context.Context, parent uint, maxDepth int, te
 const descendantsIDQuery = `SELECT nodes.node_id
 FROM %s AS nodes
 JOIN %s AS ct ON ct.descendant_id = nodes.node_id
-WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.Tenant = ?
+WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.tenant = ?
 ORDER BY ct.depth;`
 
-const absMaxDepth = 2147483647 // limited by the max value of postgres bigint
+// absMaxDepth is limited by the max value of a 32-bit signed integer (matches the Depth column type)
+const absMaxDepth = 2147483647
+
 // NOTE should you ever need this deep level of nesting in a production environment, please reach out to me directly
 // I'm really really really interested into knowing why and how!!! :)
 
@@ -688,7 +620,7 @@ const absMaxDepth = 2147483647 // limited by the max value of postgres bigint
 //
 // var items = []*Custom{}
 // parent determines the root node id of to load.
-// maxDepth determines the depth of the relationship o load: 0 means all children, 1 only direct children and so on.
+// maxDepth determines the depth of the relationship to load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
 func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any) (err error) {
 	if err := validateItems(items); err != nil {
@@ -703,13 +635,10 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
-	} else {
-		// this is needed because the query will list first level as depth =0, children are depth = 1
-		maxDepth = maxDepth - 1
 	}
 
 	sqlQuery := fmt.Sprintf(treeDescendantsQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl, ct.nodesTbl)
-	rows, err := ct.db.WithContext(ctx).Raw(sqlQuery, parent, tenant, tenant, maxDepth).Rows()
+	rows, err := ct.db.WithContext(ctx).Raw(sqlQuery, parent, tenant, tenant, tenant, tenant, maxDepth).Rows()
 	if err != nil {
 		return fmt.Errorf("failed to fetch tree descendants: %w", err)
 	}
@@ -786,6 +715,25 @@ func scanRowsToNodes(rows *sql.Rows, columns []string, col2FieldMap map[string]s
 	return nodes, ancestorMap, nil
 }
 
+// toInt64 safely converts database integer values to int64, handling different driver types.
+func toInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int32:
+		return int64(n), true
+	case uint64:
+		if n > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(n), true
+	case []byte:
+		p, err := strconv.ParseInt(string(n), 10, 64)
+		return p, err == nil
+	}
+	return 0, false
+}
+
 func mapRowToStruct(values []interface{}, columns []string, col2FieldMap map[string]string, elemType reflect.Type) (
 	reflect.Value, int64, int64, error,
 ) {
@@ -806,10 +754,18 @@ func mapRowToStruct(values []interface{}, columns []string, col2FieldMap map[str
 		}
 
 		if fieldName == nodeIDField {
-			nodeID = value.(int64)
+			n, ok := toInt64(value)
+			if !ok {
+				return reflect.Value{}, 0, 0, fmt.Errorf("cannot convert nodeID column value to int64: %T", value)
+			}
+			nodeID = n
 		}
-		if fieldName == "ancestorId" {
-			ancestorID = value.(int64)
+		if fieldName == ancestorIDMapKey {
+			n, ok := toInt64(value)
+			if !ok {
+				return reflect.Value{}, 0, 0, fmt.Errorf("cannot convert ancestorID column value to int64: %T", value)
+			}
+			ancestorID = n
 		}
 
 		fieldVal := newElem.Elem().FieldByName(fieldName)
@@ -833,7 +789,15 @@ func mapRowToStruct(values []interface{}, columns []string, col2FieldMap map[str
 func buildTreeHierarchy(nodes map[int64]reflect.Value, ancestorMap map[int64]int64) []reflect.Value {
 	var roots []reflect.Value
 
-	for nodeID, node := range nodes {
+	// Process in sorted key order to ensure deterministic children ordering
+	keys := make([]int64, 0, len(nodes))
+	for k := range nodes {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+
+	for _, nodeID := range keys {
+		node := nodes[nodeID]
 		ancestorID, hasAncestor := ancestorMap[nodeID]
 		if !hasAncestor {
 			roots = append(roots, node)
@@ -855,27 +819,26 @@ func buildTreeHierarchy(nodes map[int64]reflect.Value, ancestorMap map[int64]int
 }
 
 const treeDescendantsQuery = `WITH RECURSIVE Tree AS (
-	-- Base case: Start with the parent node
-	SELECT 
+	-- Base case: Start with direct children of the parent node
+	SELECT
 		nodes.*,
-   		ct.ancestor_id AS  ancestor_id,    
-		0 AS depth  
+		ct.ancestor_id AS ancestor_id,
+		1 AS depth
 	FROM %s AS nodes
-  	JOIN %s AS ct ON ct.descendant_id = nodes.node_id
-    WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.Tenant = ?
+	JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
+	WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.tenant = ? AND ct.tenant = ?
 
 	UNION ALL
 
-  -- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree,
-
-	SELECT 
+	-- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree
+	SELECT
 		nodes.*,
-		t.node_id AS ancestor_id, 
-    	t.depth + 1 AS depth
+		t.node_id AS ancestor_id,
+		t.depth + 1 AS depth
 	FROM Tree AS t
-  	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1  -- use only immediate children relationships
-  	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
-  	WHERE nodes.Tenant = ? AND t.depth < ?
+	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?
+	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
+	WHERE nodes.tenant = ? AND t.depth < ?
 	)
 	SELECT  * FROM Tree ORDER BY depth;`
 
@@ -886,13 +849,10 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
-	} else {
-		// this is needed because the query will list first level as depth =0, children are depth = 1
-		maxDepth = maxDepth - 1
 	}
 
 	sqlstr := fmt.Sprintf(treeDescendantsIDQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl, ct.nodesTbl)
-	rows, err := ct.db.WithContext(ctx).Raw(sqlstr, parent, tenant, tenant, maxDepth).Rows()
+	rows, err := ct.db.WithContext(ctx).Raw(sqlstr, parent, tenant, tenant, tenant, tenant, maxDepth).Rows()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch tree descendants: %w", err)
 	}
@@ -925,33 +885,32 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 }
 
 type TreeNode struct {
-	NodeId     uint `json:"id"`
-	AncestorID uint
+	NodeId     uint        `json:"id"`
+	AncestorID uint        `json:"ancestorId"`
 	Children   []*TreeNode `json:"children"`
 }
 
 const treeDescendantsIDQuery = `WITH RECURSIVE Tree AS (
-	-- Base case: Start with the parent node
-	SELECT 
+	-- Base case: Start with direct children of the parent node
+	SELECT
 		nodes.node_id,
-   		ct.ancestor_id AS  ancestor_id,    
-		0 AS depth  
+		ct.ancestor_id AS ancestor_id,
+		1 AS depth
 	FROM %s AS nodes
-  	JOIN %s AS ct ON ct.descendant_id = nodes.node_id
-    WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.Tenant = ?
+	JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
+	WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.tenant = ? AND ct.tenant = ?
 
 	UNION ALL
 
-  -- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree,
-
-	SELECT 
-		nodes.node_id, 
-		t.node_id AS ancestor_id, 
-    	t.depth + 1 AS depth
+	-- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree
+	SELECT
+		nodes.node_id,
+		t.node_id AS ancestor_id,
+		t.depth + 1 AS depth
 	FROM Tree AS t
-  	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1  -- use only immediate children relationships
-  	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
-  	WHERE nodes.Tenant = ? AND t.depth < ?
+	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?
+	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
+	WHERE nodes.tenant = ? AND t.depth < ?
 	)
 	SELECT  Tree.node_id, Tree.ancestor_id FROM Tree ORDER BY depth;`
 

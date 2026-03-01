@@ -70,7 +70,7 @@ func TestHasBranch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := hasNode(tt.input)
 			if result != tt.expected {
-				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, result, tt.expected)
+				t.Errorf("hasNode(%v) = %v; want %v", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -141,13 +141,13 @@ func TestGetNodeData(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			id, tenant, err := getNodeData(tt.input)
 			if (err != nil) != tt.hasError {
-				t.Errorf("HasLeave(%v) unexpected error state: %v", tt.input, err)
+				t.Errorf("getNodeData(%v) unexpected error state: %v", tt.input, err)
 			}
 			if tenant != tt.expected {
-				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, tenant, tt.expected)
+				t.Errorf("getNodeData(%v) tenant = %v; want %v", tt.input, tenant, tt.expected)
 			}
 			if id != tt.expectId {
-				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, tenant, tt.expected)
+				t.Errorf("getNodeData(%v) id = %v; want %v", tt.input, id, tt.expectId)
 			}
 		})
 	}
