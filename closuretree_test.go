@@ -7,7 +7,6 @@ import (
 	"os"
 	"reflect"
 	"sort"
-	"sync"
 	"testing"
 
 	closuretree "github.com/go-bumbu/closure-tree"
@@ -322,25 +321,19 @@ func TestPopulateTree(t *testing.T) {
 func TestTreeGetNode(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
+			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			if err != nil {
+				t.Fatal(err)
 			}
+			populateTree(t, ct)
+
 			tcs := []struct {
 				name        string
 				nodeID      uint
 				in          any
 				wantPayload TestPayload
 				tenant      string
-				wantErr     string
+				wantErr     error
 			}{
 				{
 					name:        "get root node for tenant 1",
@@ -364,52 +357,53 @@ func TestTreeGetNode(t *testing.T) {
 					tenant:      tenant2,
 				},
 				{
-					name:        "expect err because of wrong type",
-					nodeID:      7,
-					in:          &map[string]string{},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     closuretree.ErrItemIsNotTreeNode.Error(),
+					name:    "expect err because of wrong type",
+					nodeID:  7,
+					in:      &map[string]string{},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrItemIsNotTreeNode,
 				},
 				{
-					name:        "expect err because not passing pointer",
-					nodeID:      7,
-					in:          TestPayload{},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     "item needs to be a pointer to a struct",
+					name:    "expect err because not passing pointer",
+					nodeID:  7,
+					in:      TestPayload{},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrItemNotPointerToStruct,
 				},
 				{
-					name:        "empty result on wrong Tenant",
-					nodeID:      7,
-					in:          &TestPayload{},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     closuretree.ErrNodeNotFound.Error(),
+					name:    "empty result on wrong Tenant",
+					nodeID:  7,
+					in:      &TestPayload{},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrNodeNotFound,
+				},
+				{
+					name:    "empty tenant returns error",
+					nodeID:  1,
+					in:      &TestPayload{},
+					tenant:  "",
+					wantErr: closuretree.ErrEmptyTenant,
 				},
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					setup(t)
 					err := ct.GetNode(context.Background(), tc.nodeID, tc.tenant, tc.in)
 
-					if tc.wantErr != "" {
+					if tc.wantErr != nil {
 						if err == nil {
-							t.Fatalf("expected error: %s, but got none ", tc.wantErr)
+							t.Fatalf("expected error: %v, but got none", tc.wantErr)
 						}
-						if err.Error() != tc.wantErr {
-							t.Errorf("expected error: %s, but got %v ", tc.wantErr, err.Error())
+						if !errors.Is(err, tc.wantErr) {
+							t.Errorf("expected error: %v, but got %v", tc.wantErr, err)
 						}
 					} else {
 						if err != nil {
 							t.Fatalf("unexpected error: %v", err)
 						}
-
 						if diff := cmp.Diff(tc.in, &tc.wantPayload); diff != "" {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
-
 				})
 			}
 		})
@@ -419,25 +413,19 @@ func TestTreeGetNode(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
+			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			if err != nil {
+				t.Fatal(err)
 			}
+			populateTree(t, ct)
+
 			tcs := []struct {
 				name        string
 				nodeID      uint
 				in          any
 				wantPayload TestPayload
 				tenant      string
-				wantErr     string
+				wantErr     error
 			}{
 				{
 					name:        "get root node for tenant 1",
@@ -447,38 +435,41 @@ func TestUpdate(t *testing.T) {
 					tenant:      tenant1,
 				},
 				{
-					name:        "expect err because of wrong type",
-					nodeID:      7,
-					in:          &map[string]string{},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     closuretree.ErrItemIsNotTreeNode.Error(),
+					name:    "expect err because of wrong type",
+					nodeID:  7,
+					in:      &map[string]string{},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrItemIsNotTreeNode,
 				},
 				{
-					name:        "empty result on wrong Tenant",
-					nodeID:      7,
-					in:          TestPayload{Name: "Banana"},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     closuretree.ErrNodeNotFound.Error(),
+					name:    "empty result on wrong Tenant",
+					nodeID:  7,
+					in:      TestPayload{Name: "Banana"},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrNodeNotFound,
+				},
+				{
+					name:    "empty tenant returns error",
+					nodeID:  1,
+					in:      TestPayload{Name: "Banana"},
+					tenant:  "",
+					wantErr: closuretree.ErrEmptyTenant,
 				},
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					setup(t)
 					err := ct.Update(context.Background(), tc.nodeID, tc.in, tc.tenant)
-					if tc.wantErr != "" {
+					if tc.wantErr != nil {
 						if err == nil {
-							t.Fatalf("expected error: %s, but got none ", tc.wantErr)
+							t.Fatalf("expected error: %v, but got none", tc.wantErr)
 						}
-						if err.Error() != tc.wantErr {
-							t.Errorf("expected error: %s, but got %v ", tc.wantErr, err.Error())
+						if !errors.Is(err, tc.wantErr) {
+							t.Errorf("expected error: %v, but got %v", tc.wantErr, err)
 						}
 					} else {
 						if err != nil {
 							t.Fatalf("unexpected error: %v", err)
 						}
-
 						got := TestPayload{}
 						err = ct.GetNode(context.Background(), tc.nodeID, tc.tenant, &got)
 						if err != nil {
@@ -488,7 +479,6 @@ func TestUpdate(t *testing.T) {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
-
 				})
 			}
 		})
@@ -498,18 +488,12 @@ func TestUpdate(t *testing.T) {
 func TestGetDescendants(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
+			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			if err != nil {
+				t.Fatal(err)
 			}
+			populateTree(t, ct)
+
 			tcs := []struct {
 				name        string
 				parent      uint
@@ -577,7 +561,6 @@ func TestGetDescendants(t *testing.T) {
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					setup(t)
 					gotTags := []TestPayload{}
 					err := ct.Descendants(context.Background(), tc.parent, tc.depth, tc.tenant, &gotTags)
 					if err != nil {
@@ -604,18 +587,12 @@ func TestGetDescendants(t *testing.T) {
 func TestGetTreeDescendants(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
+			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			if err != nil {
+				t.Fatal(err)
 			}
+			populateTree(t, ct)
+
 			tcs := []struct {
 				name        string
 				parent      uint
@@ -704,7 +681,6 @@ func TestGetTreeDescendants(t *testing.T) {
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					setup(t)
 					gotPayload := []*TestPayload{}
 					err := ct.TreeDescendants(context.Background(), tc.parent, tc.depth, tc.tenant, &gotPayload)
 					if err != nil {

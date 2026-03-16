@@ -190,7 +190,7 @@ func ExampleTree_DescendantIds_treeWithM2MRelations() {
 	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
 	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
 
-	fantasy := Genre{Name: "Science Fiction"}
+	fantasy := Genre{Name: "Fantasy"}
 	_ = tree.Add(ctx, &fantasy, 0, tenant)
 
 	highFantasy := Genre{Name: "High Fantasy"}

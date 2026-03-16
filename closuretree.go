@@ -28,10 +28,11 @@ const closureTblName = "closure_tree_rel"
 const ancestorIDMapKey = "ancestorId"
 
 var (
-	ErrItemIsNotTreeNode = errors.New("the item does not embed Node")
-	ErrParentNotFound    = errors.New("wrong parent ID")
-	ErrNodeNotFound      = errors.New("node not found")
-	ErrInvalidMove       = errors.New("invalid move")
+	ErrItemIsNotTreeNode        = errors.New("the item does not embed Node")
+	ErrParentNotFound           = errors.New("wrong parent ID")
+	ErrNodeNotFound             = errors.New("node not found")
+	ErrInvalidMove              = errors.New("invalid move")
+	ErrItemNotPointerToStruct   = errors.New("item needs to be a pointer to a struct")
 )
 
 // Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items
@@ -501,7 +502,7 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 	t := reflect.TypeOf(item)
 
 	if t.Kind() != reflect.Ptr {
-		return fmt.Errorf("item needs to be a pointer to a struct")
+		return ErrItemNotPointerToStruct
 	}
 
 	sqlstr := fmt.Sprintf(getNodeQuery, ct.nodesTbl, ct.relationsTbl)
