@@ -298,7 +298,7 @@ func (ct *Tree) Move(ctx context.Context, nodeId, newParentID uint, tenant strin
 		// insert nodes on the new position
 		if newParentID == 0 {
 			// Special case: move to root
-			insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl)
+			insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
 			exec1 = tx.Exec(insertSql, nodeId, tenant)
 		} else {
 			// Normal move
@@ -311,7 +311,7 @@ func (ct *Tree) Move(ctx context.Context, nodeId, newParentID uint, tenant strin
 				return ErrInvalidMove
 			}
 
-			insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
+			insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
 			exec1 = tx.Exec(insertSql, nodeId, newParentID, tenant, tenant)
 		}
 
@@ -377,7 +377,14 @@ const moveQueryInsertNewToRoot = `
 INSERT INTO  %s (ancestor_id, descendant_id, depth, tenant)
 SELECT 0, c.descendant_id, c.depth + 1, c.tenant
 FROM  %s c
-WHERE c.ancestor_id = ? AND c.tenant = ?;
+WHERE c.ancestor_id = ? AND c.tenant = ?
+AND NOT EXISTS (
+    SELECT 1 FROM %s e
+    WHERE e.ancestor_id = 0
+    AND e.descendant_id = c.descendant_id
+    AND e.depth = c.depth + 1
+    AND e.tenant = c.tenant
+);
 `
 
 const moveQueryInsertNew = `
@@ -385,7 +392,14 @@ INSERT INTO %s (ancestor_id, descendant_id, depth, Tenant)
 SELECT p.ancestor_id, c.descendant_id, p.depth + c.depth + 1, p.Tenant
 FROM %s p
 JOIN %s c ON c.ancestor_id = ?
-WHERE p.descendant_id = ? AND p.Tenant = ? AND c.Tenant = ?;
+WHERE p.descendant_id = ? AND p.Tenant = ? AND c.Tenant = ?
+AND NOT EXISTS (
+    SELECT 1 FROM %s e
+    WHERE e.ancestor_id = p.ancestor_id
+    AND e.descendant_id = c.descendant_id
+    AND e.depth = p.depth + c.depth + 1
+    AND e.tenant = p.Tenant
+);
 `
 
 // descendants contains the list of nodes moved
