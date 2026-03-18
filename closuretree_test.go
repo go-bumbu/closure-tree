@@ -12,6 +12,7 @@ import (
 	closuretree "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
 	"github.com/google/go-cmp/cmp"
+	"gorm.io/gorm"
 )
 
 // TestMain modifies how test are run,
@@ -88,6 +89,18 @@ type NodeDetails struct {
 
 const tenant1 = "t1"
 const tenant2 = "t2"
+
+// dropTreeTables drops the node and closure tables for the given model,
+// ensuring a clean state when tests run with -count > 1.
+func dropTreeTables(gdb *gorm.DB, model any) {
+	stmt := &gorm.Statement{DB: gdb}
+	if err := stmt.Parse(model); err != nil {
+		return
+	}
+	tbl := stmt.Schema.Table
+	gdb.Exec("DROP TABLE IF EXISTS closure_tree_rel_" + tbl)
+	gdb.Exec("DROP TABLE IF EXISTS " + tbl)
+}
 
 //nolint:gosec // int conversion is not critical here
 func getNodeDetails(item any) (bool, int, string) {
@@ -208,7 +221,9 @@ func TestAddNodes(t *testing.T) {
 
 			for i, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					ct, err := closuretree.New(db.ConnDbName(fmt.Sprintf("addnodes%d", i)), tc.topItem)
+					gdb := db.ConnDbName(fmt.Sprintf("addnodes%d", i))
+					dropTreeTables(gdb, tc.topItem)
+					ct, err := closuretree.New(gdb, tc.topItem)
 					if err != nil {
 						if tc.topItemExpect.Err != "" {
 							if diff := cmp.Diff(err.Error(), tc.topItemExpect.Err); diff != "" {
@@ -309,7 +324,9 @@ func TestPopulateTree(t *testing.T) {
 			var ct *closuretree.Tree
 			var err error
 
-			ct, err = closuretree.New(db.ConnDbName("populatetree"), TestPayload{})
+			gdb := db.ConnDbName("populatetree")
+			dropTreeTables(gdb, TestPayload{})
+			ct, err = closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -321,7 +338,9 @@ func TestPopulateTree(t *testing.T) {
 func TestTreeGetNode(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -413,7 +432,9 @@ func TestTreeGetNode(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -488,7 +509,9 @@ func TestUpdate(t *testing.T) {
 func TestGetDescendants(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -587,7 +610,9 @@ func TestGetDescendants(t *testing.T) {
 func TestGetTreeDescendants(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -720,7 +745,9 @@ func TestMove(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			setup := func(t *testing.T, name string) *closuretree.Tree {
-				ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+				gdb := db.ConnDbName(t.Name())
+				dropTreeTables(gdb, TestPayload{})
+				ct, err := closuretree.New(gdb, TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -941,7 +968,9 @@ func printTreeTest(nodes []*TestPayload, indent string) {
 func TestMoveBetweenParents_NoDuplicates(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1021,7 +1050,9 @@ func TestDelete(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			setup := func(t *testing.T, name string) *closuretree.Tree {
-				ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+				gdb := db.ConnDbName(t.Name())
+				dropTreeTables(gdb, TestPayload{})
+				ct, err := closuretree.New(gdb, TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1110,7 +1141,9 @@ func TestDelete(t *testing.T) {
 func TestIsDescendant(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1171,7 +1204,9 @@ func TestIsDescendant(t *testing.T) {
 func TestIsChildOf(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1233,6 +1268,11 @@ func TestGetLeaves(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := db.ConnDbName("getleaves")
+
+			// Drop leaf-related tables before tree tables to respect FK order
+			gdb.Exec("DROP TABLE IF EXISTS test_leaf_nodes")
+			gdb.Exec("DROP TABLE IF EXISTS test_leaves")
+			dropTreeTables(gdb, TestPayload{})
 
 			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
@@ -1331,7 +1371,9 @@ func TestGetLeaves(t *testing.T) {
 func TestMoveSubtreeIntegrity(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName("movesubtreeintegrity"), TestPayload{})
+			gdb := db.ConnDbName("movesubtreeintegrity")
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}

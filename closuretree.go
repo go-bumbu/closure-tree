@@ -28,11 +28,11 @@ const closureTblName = "closure_tree_rel"
 const ancestorIDMapKey = "ancestorId"
 
 var (
-	ErrItemIsNotTreeNode        = errors.New("the item does not embed Node")
-	ErrParentNotFound           = errors.New("wrong parent ID")
-	ErrNodeNotFound             = errors.New("node not found")
-	ErrInvalidMove              = errors.New("invalid move")
-	ErrItemNotPointerToStruct   = errors.New("item needs to be a pointer to a struct")
+	ErrItemIsNotTreeNode      = errors.New("the item does not embed Node")
+	ErrParentNotFound         = errors.New("wrong parent ID")
+	ErrNodeNotFound           = errors.New("node not found")
+	ErrInvalidMove            = errors.New("invalid move")
+	ErrItemNotPointerToStruct = errors.New("item needs to be a pointer to a struct")
 )
 
 // Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items
@@ -611,6 +611,9 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 		}
 		sliceVal.Set(reflect.Append(sliceVal, reflect.ValueOf(newItem).Elem()))
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("row iteration error: %w", err)
+	}
 
 	return nil
 }
@@ -761,12 +764,18 @@ func scanRowsToNodes(rows *sql.Rows, columns []string, col2FieldMap map[string]s
 		nodes[nodeID] = node
 		ancestorMap[nodeID] = ancestorID
 	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("row iteration error: %w", err)
+	}
 
 	return nodes, ancestorMap, nil
 }
 
 // toInt64 safely converts database integer values to int64, handling different driver types.
 func toInt64(v any) (int64, bool) {
+	if v == nil {
+		return 0, true
+	}
 	switch n := v.(type) {
 	case int64:
 		return n, true
@@ -823,6 +832,9 @@ func mapRowToStruct(values []interface{}, columns []string, col2FieldMap map[str
 			continue
 		}
 
+		if value == nil {
+			continue
+		}
 		val := reflect.ValueOf(value)
 		if val.Type().AssignableTo(fieldVal.Type()) {
 			fieldVal.Set(val)
@@ -923,6 +935,9 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 			return nil, fmt.Errorf("failed to fetch tree descendants: %w", err)
 		}
 		nodeMap[node.NodeId] = &node
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration error: %w", err)
 	}
 
 	// Now, iterate over the node map and compose the tree

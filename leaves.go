@@ -164,7 +164,7 @@ func (ct *Tree) GetLeaves(ctx context.Context, target any, parentID uint, maxDep
 }
 
 const leavesJoinQuery = `INNER JOIN %s ON %s.%s = %s.%s_%s`
-const leavesWhereQuery = `%s.%s_%s IN ? AND %s.Tenant = ?`
+const leavesWhereQuery = `%s.%s_%s IN ? AND %s.tenant = ?`
 
 // singular returns the singular form of the input string using proper English inflection rules.
 func singular(in string) string {
