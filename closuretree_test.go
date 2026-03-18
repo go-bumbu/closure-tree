@@ -912,6 +912,111 @@ func TestMove(t *testing.T) {
 	}
 }
 
+// used for debugging, e.g.
+// items := []*TestPayload{}
+//
+// err = ct.TreeDescendants(context.Background(), 0, 0, checkId.tenant, &items)
+// if err != nil {
+// t.Fatal(err)
+// }
+// fmt.Println("================")
+// printTreeTest(items, "")
+// fmt.Println("================")
+var _ = printTreeTest
+
+func printTreeTest(nodes []*TestPayload, indent string) {
+	for _, n := range nodes {
+		fmt.Printf("%s%d=> %s\n", indent, n.NodeId, n.Name)
+		if len(n.Children) > 0 {
+			printTreeTest(n.Children, indent+"|- ")
+		}
+	}
+}
+
+// TestMoveBetweenParents_NoDuplicates verifies that moving a child node from one
+// parent to another sibling parent does not produce duplicate entries in Descendants.
+// This reproduces a bug where the Move INSERT creates a closure row identical to an
+// existing one (same ancestor_id, descendant_id, depth) when old and new parents share
+// the same depth from root. The duplicate causes Descendants to return the node twice.
+func TestMoveBetweenParents_NoDuplicates(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := context.Background()
+
+			// Build a simple tree:
+			//   ParentA (root)
+			//     └── Child
+			//   ParentB (root)
+			parentA := &TestPayload{Name: "ParentA"}
+			err = ct.Add(ctx, parentA, 0, tenant1)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			child := &TestPayload{Name: "Child"}
+			err = ct.Add(ctx, child, parentA.Id(), tenant1)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			parentB := &TestPayload{Name: "ParentB"}
+			err = ct.Add(ctx, parentB, 0, tenant1)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Verify initial state: 3 descendants from root
+			var before []TestPayload
+			err = ct.Descendants(ctx, 0, 0, tenant1, &before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(before) != 3 {
+				t.Fatalf("expected 3 descendants before move, got %d", len(before))
+			}
+
+			// Move Child from ParentA to ParentB
+			err = ct.Move(ctx, child.Id(), parentB.Id(), tenant1)
+			if err != nil {
+				t.Fatalf("Move failed: %v", err)
+			}
+
+			// Verify: still exactly 3 descendants (no duplicates)
+			var after []TestPayload
+			err = ct.Descendants(ctx, 0, 0, tenant1, &after)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if len(after) != 3 {
+				t.Errorf("expected 3 descendants after move, got %d", len(after))
+				for _, item := range after {
+					t.Logf("  id=%d name=%s parentId=%d", item.Id(), item.Name, item.Parent())
+				}
+			}
+
+			// Verify Child is now under ParentB
+			want := []TestPayload{
+				{Name: "ParentA", Node: closuretree.Node{NodeId: parentA.Id(), Tenant: tenant1}},
+				{Name: "Child", Node: closuretree.Node{NodeId: child.Id(), ParentId: parentB.Id(), Tenant: tenant1}},
+				{Name: "ParentB", Node: closuretree.Node{NodeId: parentB.Id(), Tenant: tenant1}},
+			}
+
+			sort.Slice(after, func(i, j int) bool { return after[i].Id() < after[j].Id() })
+			sort.Slice(want, func(i, j int) bool { return want[i].Id() < want[j].Id() })
+
+			if diff := cmp.Diff(after, want); diff != "" {
+				t.Errorf("unexpected result (-got +want):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestDelete(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
