@@ -171,9 +171,11 @@ func TestToInt64(t *testing.T) {
 		{"uint64 overflow", uint64(math.MaxInt64 + 1), 0, false},
 		{"uint overflow", uint(math.MaxUint), 0, false},
 		{"float64", float64(3), 3, true},
+		{"string", "789", 789, true},
+		{"string invalid", "abc", 0, false},
 		{"[]byte", []byte("456"), 456, true},
 		{"[]byte invalid", []byte("abc"), 0, false},
-		{"unsupported type", "string", 0, false},
+		{"unsupported type", struct{}{}, 0, false},
 	}
 
 	for _, tt := range tests {

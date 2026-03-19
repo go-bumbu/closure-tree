@@ -634,12 +634,12 @@ func TestGetTreeDescendants(t *testing.T) {
 					parent: 1,
 					depth:  0,
 					wantPayload: []*TestPayload{
-						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1},
+						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, ParentId: 1, Tenant: tenant1},
 							Children: []*TestPayload{
-								{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, Tenant: tenant1}},
+								{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, ParentId: 2, Tenant: tenant1}},
 							},
 						},
-						{Name: "Laptops", Node: closuretree.Node{NodeId: 4, Tenant: tenant1}},
+						{Name: "Laptops", Node: closuretree.Node{NodeId: 4, ParentId: 1, Tenant: tenant1}},
 					},
 					wantIds: []*closuretree.TreeNode{
 						{
@@ -657,14 +657,14 @@ func TestGetTreeDescendants(t *testing.T) {
 					parent: 7,
 					depth:  0,
 					wantPayload: []*TestPayload{
-						{Name: "Warm", Node: closuretree.Node{NodeId: 8, Tenant: tenant2},
+						{Name: "Warm", Node: closuretree.Node{NodeId: 8, ParentId: 7, Tenant: tenant2},
 							Children: []*TestPayload{
-								{Name: "Red", Node: closuretree.Node{NodeId: 12, Tenant: tenant2}},
-								{Name: "Orange", Node: closuretree.Node{NodeId: 13, Tenant: tenant2}},
+								{Name: "Red", Node: closuretree.Node{NodeId: 12, ParentId: 8, Tenant: tenant2}},
+								{Name: "Orange", Node: closuretree.Node{NodeId: 13, ParentId: 8, Tenant: tenant2}},
 							}},
-						{Name: "Cold", Node: closuretree.Node{NodeId: 10, Tenant: tenant2},
+						{Name: "Cold", Node: closuretree.Node{NodeId: 10, ParentId: 7, Tenant: tenant2},
 							Children: []*TestPayload{
-								{Name: "Blue", Node: closuretree.Node{NodeId: 14, Tenant: tenant2}},
+								{Name: "Blue", Node: closuretree.Node{NodeId: 14, ParentId: 10, Tenant: tenant2}},
 							}},
 					},
 					wantIds: []*closuretree.TreeNode{

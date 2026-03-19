@@ -794,6 +794,9 @@ func toInt64(v any) (int64, bool) {
 		return int64(n), true
 	case float64:
 		return int64(n), true
+	case string:
+		p, err := strconv.ParseInt(n, 10, 64)
+		return p, err == nil
 	case []byte:
 		p, err := strconv.ParseInt(string(n), 10, 64)
 		return p, err == nil
@@ -833,6 +836,11 @@ func mapRowToStruct(values []interface{}, columns []string, col2FieldMap map[str
 				return reflect.Value{}, 0, 0, fmt.Errorf("cannot convert ancestorID column value to int64: %T", value)
 			}
 			ancestorID = n
+			// Also populate ParentId on the struct so TreeDescendants is
+			// consistent with GetNode and Descendants.
+			if pf := newElem.Elem().FieldByName("ParentId"); pf.IsValid() && pf.CanSet() && n >= 0 {
+				pf.SetUint(uint64(n))
+			}
 		}
 
 		fieldVal := newElem.Elem().FieldByName(fieldName)
