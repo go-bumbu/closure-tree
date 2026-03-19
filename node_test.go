@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"math"
 	"testing"
 )
 
@@ -148,6 +149,41 @@ func TestGetNodeData(t *testing.T) {
 			}
 			if id != tt.expectId {
 				t.Errorf("getNodeData(%v) id = %v; want %v", tt.input, id, tt.expectId)
+			}
+		})
+	}
+}
+
+func TestToInt64(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  any
+		want   int64
+		wantOK bool
+	}{
+		{"nil", nil, 0, true},
+		{"int64", int64(42), 42, true},
+		{"int", int(99), 99, true},
+		{"int32", int32(7), 7, true},
+		{"uint32", uint32(123), 123, true},
+		{"uint", uint(55), 55, true},
+		{"uint64", uint64(100), 100, true},
+		{"uint64 overflow", uint64(math.MaxInt64 + 1), 0, false},
+		{"uint overflow", uint(math.MaxUint), 0, false},
+		{"float64", float64(3), 3, true},
+		{"[]byte", []byte("456"), 456, true},
+		{"[]byte invalid", []byte("abc"), 0, false},
+		{"unsupported type", "string", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := toInt64(tt.input)
+			if ok != tt.wantOK {
+				t.Errorf("toInt64(%v) ok = %v; want %v", tt.input, ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Errorf("toInt64(%v) = %v; want %v", tt.input, got, tt.want)
 			}
 		})
 	}

@@ -98,6 +98,9 @@ func dropTreeTables(gdb *gorm.DB, model any) {
 		return
 	}
 	tbl := stmt.Schema.Table
+	if tbl == "" {
+		return
+	}
 	gdb.Exec("DROP TABLE IF EXISTS closure_tree_rel_" + tbl)
 	gdb.Exec("DROP TABLE IF EXISTS " + tbl)
 }
@@ -1184,6 +1187,13 @@ func TestIsDescendant(t *testing.T) {
 					tenant:       tenant1,
 					want:         false,
 				},
+				{
+					name:         "node is not its own descendant",
+					ancestorID:   2,
+					descendantID: 2,
+					tenant:       tenant1,
+					want:         false,
+				},
 			}
 
 			for _, tc := range tcs {
@@ -1429,6 +1439,121 @@ func TestMoveSubtreeIntegrity(t *testing.T) {
 			expectedColors := []uint{10, 14}
 			if diff := cmp.Diff(expectedColors, colorsDesc); diff != "" {
 				t.Errorf("descendants of node 7 after move (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// MultiLevelPayload tests that multi-level embedding works for Add and Update.
+type BasePayload struct {
+	closuretree.Node
+	Description string
+}
+
+type MultiLevelPayload struct {
+	BasePayload
+	Name     string
+	Children []*MultiLevelPayload `gorm:"-"`
+}
+
+func TestAddMultiLevelEmbed(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, MultiLevelPayload{})
+			ct, err := closuretree.New(gdb, MultiLevelPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			item := &MultiLevelPayload{
+				BasePayload: BasePayload{Description: "base desc"},
+				Name:        "top",
+			}
+			err = ct.Add(context.Background(), item, 0, closuretree.DefaultTenant)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// NodeId and Tenant should be written back through the multi-level embedding
+			if item.NodeId == 0 {
+				t.Error("expected NodeId to be set on multi-level embedded struct, got 0")
+			}
+			if item.Tenant != closuretree.DefaultTenant {
+				t.Errorf("expected Tenant %q, got %q", closuretree.DefaultTenant, item.Tenant)
+			}
+		})
+	}
+}
+
+func TestUpdateMultiLevelEmbed(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, MultiLevelPayload{})
+			ct, err := closuretree.New(gdb, MultiLevelPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			item := &MultiLevelPayload{
+				BasePayload: BasePayload{Description: "original"},
+				Name:        "original name",
+			}
+			err = ct.Add(context.Background(), item, 0, closuretree.DefaultTenant)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Update both the top-level and nested embedded field
+			err = ct.Update(context.Background(), item.NodeId, MultiLevelPayload{
+				BasePayload: BasePayload{Description: "updated"},
+				Name:        "updated name",
+			}, closuretree.DefaultTenant)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := &MultiLevelPayload{}
+			err = ct.GetNode(context.Background(), item.NodeId, closuretree.DefaultTenant, got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Description != "updated" {
+				t.Errorf("expected Description %q, got %q", "updated", got.Description)
+			}
+			if got.Name != "updated name" {
+				t.Errorf("expected Name %q, got %q", "updated name", got.Name)
+			}
+		})
+	}
+}
+
+func TestTreeDescendantsIdsDeterministic(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			// Call TreeDescendantsIds multiple times and verify order is stable
+			var first []*closuretree.TreeNode
+			for i := 0; i < 10; i++ {
+				got, err := ct.TreeDescendantsIds(context.Background(), 7, 0, tenant2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i == 0 {
+					first = got
+				} else {
+					if diff := cmp.Diff(first, got); diff != "" {
+						t.Errorf("iteration %d produced different order (-first +current):\n%s", i, diff)
+					}
+				}
 			}
 		})
 	}

@@ -254,20 +254,15 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, tenant string)
 
 	// if topItem is a pointer copy the ID back into it
 	if itemIsPointer {
-		itemValue := reflect.ValueOf(item).Elem()
-		reflectItemValue := reflect.ValueOf(reflectItem).Elem()
+		srcT := reflect.TypeOf(reflectItem).Elem()
+		srcV := reflect.ValueOf(reflectItem).Elem()
+		dstT := reflect.TypeOf(item).Elem()
+		dstV := reflect.ValueOf(item).Elem()
 
-		idField := reflectItemValue.FieldByName(nodeIDField)
-		if idField.IsValid() && idField.CanSet() {
-			itemValue.FieldByName(nodeIDField).Set(idField)
-		} else {
-			return fmt.Errorf("field: %s is not accessible or settable", nodeIDField)
-		}
-		tenantFieldVal := reflectItemValue.FieldByName(tenantIdField)
-		if tenantFieldVal.IsValid() && tenantFieldVal.CanSet() {
-			itemValue.FieldByName(tenantIdField).SetString(tenant)
-		} else {
-			return fmt.Errorf("field: %s is not accessible or settable", tenantIdField)
+		if srcNode, ok := findNodeValue(srcT, srcV); ok {
+			if dstNode, ok := findNodeValue(dstT, dstV); ok && dstNode.CanSet() {
+				dstNode.Set(srcNode)
+			}
 		}
 	}
 
@@ -316,15 +311,17 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 	updateStmt := &gorm.Statement{DB: ct.db}
 	_ = updateStmt.Parse(reflectItem)
 	updateMap := make(map[string]any)
-	v2 := reflect.ValueOf(reflectItem).Elem()
-	t2 := v2.Type()
-	for i := 0; i < v2.NumField(); i++ {
-		ft := t2.Field(i)
-		if ft.Anonymous && ft.Type == reflect.TypeOf(Node{}) {
+	for _, f := range updateStmt.Schema.Fields {
+		if f.DBName == "" || !f.Updatable {
 			continue
 		}
-		if f := updateStmt.Schema.LookUpField(ft.Name); f != nil && f.DBName != "" {
-			updateMap[f.DBName] = v2.Field(i).Interface()
+		// Skip Node fields (node_id, tenant)
+		if f.OwnerSchema != nil && f.OwnerSchema.ModelType == reflect.TypeOf(Node{}) {
+			continue
+		}
+		fieldVal := reflect.ValueOf(reflectItem).Elem().FieldByName(f.Name)
+		if fieldVal.IsValid() {
+			updateMap[f.DBName] = fieldVal.Interface()
 		}
 	}
 
@@ -535,7 +532,7 @@ func (ct *Tree) IsDescendant(ctx context.Context, ancestorID, descendantID uint,
 	var count int64
 	err = ct.db.WithContext(ctx).
 		Table(ct.relationsTbl).
-		Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", ancestorID, descendantID, tenant).
+		Where("ancestor_id = ? AND descendant_id = ? AND depth > 0 AND tenant = ?", ancestorID, descendantID, tenant).
 		Limit(1).
 		Count(&count).Error
 	if err != nil {
@@ -779,12 +776,23 @@ func toInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int64:
 		return n, true
+	case int:
+		return int64(n), true
 	case int32:
+		return int64(n), true
+	case uint:
+		if uint64(n) > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(n), true //nolint:gosec // overflow guarded by check above
+	case uint32:
 		return int64(n), true
 	case uint64:
 		if n > math.MaxInt64 {
 			return 0, false
 		}
+		return int64(n), true
+	case float64:
 		return int64(n), true
 	case []byte:
 		p, err := strconv.ParseInt(string(n), 10, 64)
@@ -940,9 +948,17 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 		return nil, fmt.Errorf("row iteration error: %w", err)
 	}
 
+	// Sort keys for deterministic ordering (consistent with buildTreeHierarchy)
+	keys := make([]uint, 0, len(nodeMap))
+	for k := range nodeMap {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+
 	// Now, iterate over the node map and compose the tree
 	var trees []*TreeNode
-	for _, node := range nodeMap {
+	for _, id := range keys {
+		node := nodeMap[id]
 		if par, exists := nodeMap[node.ParentID]; exists {
 			par.Children = append(par.Children, node)
 		} else {
