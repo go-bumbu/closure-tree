@@ -2,15 +2,17 @@ package closuretree_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	closuretree "github.com/go-bumbu/closure-tree"
-	"github.com/go-bumbu/testdbs"
-	"github.com/google/go-cmp/cmp"
 	"os"
 	"reflect"
 	"sort"
-	"sync"
 	"testing"
+
+	closuretree "github.com/go-bumbu/closure-tree"
+	"github.com/go-bumbu/testdbs"
+	"github.com/google/go-cmp/cmp"
+	"gorm.io/gorm"
 )
 
 // TestMain modifies how test are run,
@@ -72,6 +74,13 @@ type TestPayload struct {
 	Children []*TestPayload `gorm:"-"`
 }
 
+// TestLeaf is used for GetLeaves tests. It embeds Leaf and has a many2many relation to TestPayload.
+type TestLeaf struct {
+	closuretree.Leaf
+	Name  string
+	Nodes []*TestPayload `gorm:"many2many:test_leaf_nodes;"`
+}
+
 type NodeDetails struct {
 	Id     int
 	Tenant string
@@ -81,9 +90,23 @@ type NodeDetails struct {
 const tenant1 = "t1"
 const tenant2 = "t2"
 
+// dropTreeTables drops the node and closure tables for the given model,
+// ensuring a clean state when tests run with -count > 1.
+func dropTreeTables(gdb *gorm.DB, model any) {
+	stmt := &gorm.Statement{DB: gdb}
+	if err := stmt.Parse(model); err != nil {
+		return
+	}
+	tbl := stmt.Schema.Table
+	if tbl == "" {
+		return
+	}
+	gdb.Exec("DROP TABLE IF EXISTS closure_tree_rel_" + tbl)
+	gdb.Exec("DROP TABLE IF EXISTS " + tbl)
+}
+
 //nolint:gosec // int conversion is not critical here
 func getNodeDetails(item any) (bool, int, string) {
-
 	itemValue := reflect.ValueOf(item)
 	if itemValue.Kind() == reflect.Ptr {
 		itemValue = itemValue.Elem()
@@ -116,6 +139,7 @@ func getNodeDetails(item any) (bool, int, string) {
 	}
 	return false, 0, ""
 }
+
 func TestAddNodes(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -125,36 +149,41 @@ func TestAddNodes(t *testing.T) {
 			}
 
 			tcs := []struct {
-				name           string
-				topItem        any
-				topItemDetails NodeDetails
-				topItemExpect  NodeDetails
-
+				name             string
+				topItem          any
+				topItemDetails   NodeDetails
+				topItemExpect    NodeDetails
 				childItem        any
 				childItemDetails NodeDetails
 				childItemExpect  NodeDetails
 			}{
 				{
-					name:            "Pointer to struct with ID field",
-					topItem:         &SampleStruct{Name: "Sample"},
-					childItem:       &SampleStruct{Name: "Sample2"},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					name:             "Pointer to struct with ID field",
+					topItem:          &SampleStruct{Name: "Sample"},
+					childItem:        &SampleStruct{Name: "Sample2"},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
+					topItemExpect:    NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
+					childItemExpect:  NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
 				},
 				{
-					name:      "struct with ID field",
-					topItem:   SampleStruct{Name: "Sample"},
-					childItem: SampleStruct{Name: "Sample2"},
+					name:             "struct with ID field",
+					topItem:          SampleStruct{Name: "Sample"},
+					childItem:        SampleStruct{Name: "Sample2"},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
 					// values should not be populated because it's not a pointer
 					topItemExpect:   NodeDetails{Id: 0, Tenant: ""},
 					childItemExpect: NodeDetails{Id: 0, Tenant: ""},
 				},
 				{
-					name:            "Ensure embedded NodeId is ignored",
-					topItem:         &SampleStruct{Name: "Sample"},
-					childItem:       &SampleStruct{Name: "Sample2", Node: closuretree.Node{NodeId: 4}},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					name:             "Ensure embedded NodeId is ignored",
+					topItem:          &SampleStruct{Name: "Sample"},
+					childItem:        &SampleStruct{Name: "Sample2", Node: closuretree.Node{NodeId: 4}},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
+					topItemExpect:    NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
+					childItemExpect:  NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
 				},
 				{
 					name:             "asert tenant is set",
@@ -166,11 +195,13 @@ func TestAddNodes(t *testing.T) {
 					childItemExpect:  NodeDetails{Id: 2, Tenant: "ble"},
 				},
 				{
-					name:            "Ensure embedded Tenant is ignored",
-					topItem:         &SampleStruct{Name: "Sample"},
-					childItem:       &SampleStruct{Name: "Sample2", Node: closuretree.Node{Tenant: "bla"}},
-					topItemExpect:   NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
-					childItemExpect: NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
+					name:             "Ensure embedded Tenant is ignored",
+					topItem:          &SampleStruct{Name: "Sample"},
+					childItem:        &SampleStruct{Name: "Sample2", Node: closuretree.Node{Tenant: "bla"}},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
+					topItemExpect:    NodeDetails{Id: 1, Tenant: closuretree.DefaultTenant},
+					childItemExpect:  NodeDetails{Id: 2, Tenant: closuretree.DefaultTenant},
 				},
 				{
 					name:             "Avoid cross tenant Add",
@@ -182,19 +213,30 @@ func TestAddNodes(t *testing.T) {
 					childItemExpect:  NodeDetails{Err: closuretree.ErrParentNotFound.Error()},
 				},
 				{
-					name:            "Struct without ID field",
-					topItem:         &struct{ Name string }{Name: "NoID"},
-					topItemExpect:   NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
-					childItemExpect: NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
+					name:             "Struct without ID field",
+					topItem:          &struct{ Name string }{Name: "NoID"},
+					topItemDetails:   NodeDetails{Tenant: closuretree.DefaultTenant},
+					childItemDetails: NodeDetails{Tenant: closuretree.DefaultTenant},
+					topItemExpect:    NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
+					childItemExpect:  NodeDetails{Err: closuretree.ErrItemIsNotTreeNode.Error()},
 				},
 			}
 
 			for i, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					var ct *closuretree.Tree
-					var err error
-
-					ct, _ = closuretree.New(db.ConnDbName(fmt.Sprintf("addnodes%d", i)), tc.topItem)
+					gdb := db.ConnDbName(fmt.Sprintf("addnodes%d", i))
+					dropTreeTables(gdb, tc.topItem)
+					ct, err := closuretree.New(gdb, tc.topItem)
+					if err != nil {
+						if tc.topItemExpect.Err != "" {
+							if diff := cmp.Diff(err.Error(), tc.topItemExpect.Err); diff != "" {
+								t.Errorf("unexpected error (-want +got):\n%s", diff)
+							}
+						} else {
+							t.Fatalf("unexpected error from New: %v", err)
+						}
+						return
+					}
 
 					// add topItem as parent
 					err = ct.Add(context.Background(), tc.topItem, 0, tc.topItemDetails.Tenant)
@@ -285,7 +327,9 @@ func TestPopulateTree(t *testing.T) {
 			var ct *closuretree.Tree
 			var err error
 
-			ct, err = closuretree.New(db.ConnDbName("populatetree"), TestPayload{})
+			gdb := db.ConnDbName("populatetree")
+			dropTreeTables(gdb, TestPayload{})
+			ct, err = closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -297,25 +341,21 @@ func TestPopulateTree(t *testing.T) {
 func TestTreeGetNode(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
 			}
+			populateTree(t, ct)
+
 			tcs := []struct {
 				name        string
 				nodeID      uint
 				in          any
 				wantPayload TestPayload
 				tenant      string
-				wantErr     string
+				wantErr     error
 			}{
 				{
 					name:        "get root node for tenant 1",
@@ -339,52 +379,53 @@ func TestTreeGetNode(t *testing.T) {
 					tenant:      tenant2,
 				},
 				{
-					name:        "expect err because of wrong type",
-					nodeID:      7,
-					in:          &map[string]string{},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     closuretree.ErrItemIsNotTreeNode.Error(),
+					name:    "expect err because of wrong type",
+					nodeID:  7,
+					in:      &map[string]string{},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrItemIsNotTreeNode,
 				},
 				{
-					name:        "expect err because not passing pointer",
-					nodeID:      7,
-					in:          TestPayload{},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     "item needs to be a pointer to a struct",
+					name:    "expect err because not passing pointer",
+					nodeID:  7,
+					in:      TestPayload{},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrItemNotPointerToStruct,
 				},
 				{
-					name:        "empty result on wrong Tenant",
-					nodeID:      7,
-					in:          &TestPayload{},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     closuretree.ErrNodeNotFound.Error(),
+					name:    "empty result on wrong Tenant",
+					nodeID:  7,
+					in:      &TestPayload{},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrNodeNotFound,
+				},
+				{
+					name:    "empty tenant returns error",
+					nodeID:  1,
+					in:      &TestPayload{},
+					tenant:  "",
+					wantErr: closuretree.ErrEmptyTenant,
 				},
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					setup(t)
 					err := ct.GetNode(context.Background(), tc.nodeID, tc.tenant, tc.in)
 
-					if tc.wantErr != "" {
+					if tc.wantErr != nil {
 						if err == nil {
-							t.Fatalf("expected error: %s, but got none ", tc.wantErr)
+							t.Fatalf("expected error: %v, but got none", tc.wantErr)
 						}
-						if err.Error() != tc.wantErr {
-							t.Errorf("expected error: %s, but got %v ", tc.wantErr, err.Error())
+						if !errors.Is(err, tc.wantErr) {
+							t.Errorf("expected error: %v, but got %v", tc.wantErr, err)
 						}
 					} else {
 						if err != nil {
 							t.Fatalf("unexpected error: %v", err)
 						}
-
 						if diff := cmp.Diff(tc.in, &tc.wantPayload); diff != "" {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
-
 				})
 			}
 		})
@@ -394,25 +435,21 @@ func TestTreeGetNode(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
 			}
+			populateTree(t, ct)
+
 			tcs := []struct {
 				name        string
 				nodeID      uint
 				in          any
 				wantPayload TestPayload
 				tenant      string
-				wantErr     string
+				wantErr     error
 			}{
 				{
 					name:        "get root node for tenant 1",
@@ -422,38 +459,41 @@ func TestUpdate(t *testing.T) {
 					tenant:      tenant1,
 				},
 				{
-					name:        "expect err because of wrong type",
-					nodeID:      7,
-					in:          &map[string]string{},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     closuretree.ErrItemIsNotTreeNode.Error(),
+					name:    "expect err because of wrong type",
+					nodeID:  7,
+					in:      &map[string]string{},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrItemIsNotTreeNode,
 				},
 				{
-					name:        "empty result on wrong Tenant",
-					nodeID:      7,
-					in:          TestPayload{Name: "Banana"},
-					wantPayload: TestPayload{},
-					tenant:      tenant1,
-					wantErr:     closuretree.ErrNodeNotFound.Error(),
+					name:    "empty result on wrong Tenant",
+					nodeID:  7,
+					in:      TestPayload{Name: "Banana"},
+					tenant:  tenant1,
+					wantErr: closuretree.ErrNodeNotFound,
+				},
+				{
+					name:    "empty tenant returns error",
+					nodeID:  1,
+					in:      TestPayload{Name: "Banana"},
+					tenant:  "",
+					wantErr: closuretree.ErrEmptyTenant,
 				},
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					setup(t)
 					err := ct.Update(context.Background(), tc.nodeID, tc.in, tc.tenant)
-					if tc.wantErr != "" {
+					if tc.wantErr != nil {
 						if err == nil {
-							t.Fatalf("expected error: %s, but got none ", tc.wantErr)
+							t.Fatalf("expected error: %v, but got none", tc.wantErr)
 						}
-						if err.Error() != tc.wantErr {
-							t.Errorf("expected error: %s, but got %v ", tc.wantErr, err.Error())
+						if !errors.Is(err, tc.wantErr) {
+							t.Errorf("expected error: %v, but got %v", tc.wantErr, err)
 						}
 					} else {
 						if err != nil {
 							t.Fatalf("unexpected error: %v", err)
 						}
-
 						got := TestPayload{}
 						err = ct.GetNode(context.Background(), tc.nodeID, tc.tenant, &got)
 						if err != nil {
@@ -463,7 +503,6 @@ func TestUpdate(t *testing.T) {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
-
 				})
 			}
 		})
@@ -473,18 +512,14 @@ func TestUpdate(t *testing.T) {
 func TestGetDescendants(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
 			}
+			populateTree(t, ct)
+
 			tcs := []struct {
 				name        string
 				parent      uint
@@ -552,7 +587,6 @@ func TestGetDescendants(t *testing.T) {
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					setup(t)
 					gotTags := []TestPayload{}
 					err := ct.Descendants(context.Background(), tc.parent, tc.depth, tc.tenant, &gotTags)
 					if err != nil {
@@ -579,18 +613,14 @@ func TestGetDescendants(t *testing.T) {
 func TestGetTreeDescendants(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			var setupOnce sync.Once
-			var ct *closuretree.Tree
-			setup := func(t *testing.T) {
-				var err error
-				setupOnce.Do(func() {
-					ct, err = closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					populateTree(t, ct)
-				})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
 			}
+			populateTree(t, ct)
+
 			tcs := []struct {
 				name        string
 				parent      uint
@@ -604,21 +634,21 @@ func TestGetTreeDescendants(t *testing.T) {
 					parent: 1,
 					depth:  0,
 					wantPayload: []*TestPayload{
-						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1},
+						{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, ParentId: 1, Tenant: tenant1},
 							Children: []*TestPayload{
-								{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, Tenant: tenant1}},
+								{Name: "Touch Screen", Node: closuretree.Node{NodeId: 6, ParentId: 2, Tenant: tenant1}},
 							},
 						},
-						{Name: "Laptops", Node: closuretree.Node{NodeId: 4, Tenant: tenant1}},
+						{Name: "Laptops", Node: closuretree.Node{NodeId: 4, ParentId: 1, Tenant: tenant1}},
 					},
 					wantIds: []*closuretree.TreeNode{
 						{
-							NodeId: 2, AncestorID: 1,
+							NodeId: 2, ParentID: 1,
 							Children: []*closuretree.TreeNode{
-								{NodeId: 6, AncestorID: 2},
+								{NodeId: 6, ParentID: 2},
 							},
 						},
-						{NodeId: 4, AncestorID: 1},
+						{NodeId: 4, ParentID: 1},
 					},
 					tenant: tenant1,
 				},
@@ -627,29 +657,28 @@ func TestGetTreeDescendants(t *testing.T) {
 					parent: 7,
 					depth:  0,
 					wantPayload: []*TestPayload{
-						{Name: "Warm", Node: closuretree.Node{NodeId: 8, Tenant: tenant2},
+						{Name: "Warm", Node: closuretree.Node{NodeId: 8, ParentId: 7, Tenant: tenant2},
 							Children: []*TestPayload{
-								{Name: "Red", Node: closuretree.Node{NodeId: 12, Tenant: tenant2}},
-								{Name: "Orange", Node: closuretree.Node{NodeId: 13, Tenant: tenant2}},
+								{Name: "Red", Node: closuretree.Node{NodeId: 12, ParentId: 8, Tenant: tenant2}},
+								{Name: "Orange", Node: closuretree.Node{NodeId: 13, ParentId: 8, Tenant: tenant2}},
 							}},
-						{Name: "Cold", Node: closuretree.Node{NodeId: 10, Tenant: tenant2},
+						{Name: "Cold", Node: closuretree.Node{NodeId: 10, ParentId: 7, Tenant: tenant2},
 							Children: []*TestPayload{
-								{Name: "Blue", Node: closuretree.Node{NodeId: 14, Tenant: tenant2}},
+								{Name: "Blue", Node: closuretree.Node{NodeId: 14, ParentId: 10, Tenant: tenant2}},
 							}},
 					},
-					//wantIds: []uint{8, 10, 12, 13, 14},
 					wantIds: []*closuretree.TreeNode{
 						{
-							NodeId: 8, AncestorID: 7,
+							NodeId: 8, ParentID: 7,
 							Children: []*closuretree.TreeNode{
-								{NodeId: 12, AncestorID: 8},
-								{NodeId: 13, AncestorID: 8},
+								{NodeId: 12, ParentID: 8},
+								{NodeId: 13, ParentID: 8},
 							},
 						},
 						{
-							NodeId: 10, AncestorID: 7,
+							NodeId: 10, ParentID: 7,
 							Children: []*closuretree.TreeNode{
-								{NodeId: 14, AncestorID: 10},
+								{NodeId: 14, ParentID: 10},
 							},
 						},
 					},
@@ -664,8 +693,8 @@ func TestGetTreeDescendants(t *testing.T) {
 						{Name: "Clothing", Node: closuretree.Node{NodeId: 3, Tenant: tenant1}},
 					},
 					wantIds: []*closuretree.TreeNode{
-						{NodeId: 1, AncestorID: 0},
-						{NodeId: 3, AncestorID: 0},
+						{NodeId: 1, ParentID: 0},
+						{NodeId: 3, ParentID: 0},
 					},
 					tenant: tenant1,
 				},
@@ -680,7 +709,6 @@ func TestGetTreeDescendants(t *testing.T) {
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					setup(t)
 					gotPayload := []*TestPayload{}
 					err := ct.TreeDescendants(context.Background(), tc.parent, tc.depth, tc.tenant, &gotPayload)
 					if err != nil {
@@ -720,7 +748,9 @@ func TestMove(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			setup := func(t *testing.T, name string) *closuretree.Tree {
-				ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+				gdb := db.ConnDbName(t.Name())
+				dropTreeTables(gdb, TestPayload{})
+				ct, err := closuretree.New(gdb, TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -797,7 +827,7 @@ func TestMove(t *testing.T) {
 						{parent: 8, tenant: tenant2, want: []uint{12, 13}},
 						{parent: 8, tenant: tenant1, want: []uint{}},
 					},
-					wantErr: closuretree.ErrNodeNotFound.Error(),
+					wantErr: closuretree.ErrParentNotFound.Error(),
 					tenant:  tenant1,
 				},
 				{
@@ -890,14 +920,18 @@ func TestMove(t *testing.T) {
 						}
 					}
 					for _, checkId := range tc.wantIds {
-
 						// check only one level deep
 						got, err := ct.DescendantIds(context.Background(), checkId.parent, 1, checkId.tenant)
 						if err != nil {
 							t.Fatal(err)
 						}
 
-						if diff := cmp.Diff(checkId.want, got); diff != "" {
+						// databases may return items at the same depth in non-deterministic order
+						sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+						want := append([]uint{}, checkId.want...)
+						sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+
+						if diff := cmp.Diff(want, got); diff != "" {
 							t.Errorf("unexpected result (-want +got):\n%s", diff)
 						}
 					}
@@ -937,7 +971,9 @@ func printTreeTest(nodes []*TestPayload, indent string) {
 func TestMoveBetweenParents_NoDuplicates(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1017,7 +1053,9 @@ func TestDelete(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			setup := func(t *testing.T, name string) *closuretree.Tree {
-				ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+				gdb := db.ConnDbName(t.Name())
+				dropTreeTables(gdb, TestPayload{})
+				ct, err := closuretree.New(gdb, TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1064,7 +1102,7 @@ func TestDelete(t *testing.T) {
 					wantIds: []idCheck{
 						{parent: 1, tenant: tenant1, want: []uint{2, 4, 6}},
 					},
-					wantErr: "node not found",
+					wantErr: closuretree.ErrNodeNotFound.Error(),
 				},
 			}
 
@@ -1106,57 +1144,66 @@ func TestDelete(t *testing.T) {
 func TestIsDescendant(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			populateTree(t, ct)
 
 			tcs := []struct {
-				name     string
-				nodeID   uint
-				parentID uint
-				tenant   string
-				want     bool
+				name         string
+				ancestorID   uint
+				descendantID uint
+				tenant       string
+				want         bool
 			}{
 				{
-					name:     "node is a descendant",
-					nodeID:   6,
-					parentID: 2,
-					tenant:   tenant1,
-					want:     true,
+					name:         "node is a descendant",
+					ancestorID:   2,
+					descendantID: 6,
+					tenant:       tenant1,
+					want:         true,
 				},
 				{
-					name:     "node is not a descendant",
-					nodeID:   3,
-					parentID: 5,
-					tenant:   tenant1,
-					want:     false,
+					name:         "node is not a descendant",
+					ancestorID:   5,
+					descendantID: 3,
+					tenant:       tenant1,
+					want:         false,
 				},
 				{
-					name:     "node is descendant in another tenant",
-					nodeID:   14,
-					parentID: 10,
-					tenant:   tenant2,
-					want:     true,
+					name:         "node is descendant in another tenant",
+					ancestorID:   10,
+					descendantID: 14,
+					tenant:       tenant2,
+					want:         true,
 				},
 				{
-					name:     "node is not descendant - cross tenant",
-					nodeID:   14,
-					parentID: 10,
-					tenant:   tenant1,
-					want:     false,
+					name:         "node is not descendant - cross tenant",
+					ancestorID:   10,
+					descendantID: 14,
+					tenant:       tenant1,
+					want:         false,
+				},
+				{
+					name:         "node is not its own descendant",
+					ancestorID:   2,
+					descendantID: 2,
+					tenant:       tenant1,
+					want:         false,
 				},
 			}
 
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					got, err := ct.IsDescendant(context.Background(), tc.parentID, tc.nodeID, tc.tenant)
+					got, err := ct.IsDescendant(context.Background(), tc.ancestorID, tc.descendantID, tc.tenant)
 					if err != nil {
 						t.Fatalf("unexpected error: %v", err)
 					}
 					if got != tc.want {
-						t.Errorf("IsDescendant(%d, %d) = %v; want %v", tc.parentID, tc.nodeID, got, tc.want)
+						t.Errorf("IsDescendant(%d, %d) = %v; want %v", tc.ancestorID, tc.descendantID, got, tc.want)
 					}
 				})
 			}
@@ -1167,7 +1214,9 @@ func TestIsDescendant(t *testing.T) {
 func TestIsChildOf(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			ct, err := closuretree.New(db.ConnDbName(t.Name()), TestPayload{})
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1220,6 +1269,291 @@ func TestIsChildOf(t *testing.T) {
 						t.Errorf("IsChildOf(%d, %d) = %v; want %v", tc.nodeID, tc.parentID, got, tc.wantChild)
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestGetLeaves(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName("getleaves")
+
+			// Drop leaf-related tables before tree tables to respect FK order
+			gdb.Exec("DROP TABLE IF EXISTS test_leaf_nodes")
+			gdb.Exec("DROP TABLE IF EXISTS test_leaves")
+			dropTreeTables(gdb, TestPayload{})
+
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			// Migrate the leaf table (also creates the M2M join table)
+			if err := gdb.AutoMigrate(&TestLeaf{}); err != nil {
+				t.Fatal(err)
+			}
+
+			t.Run("invalid leaf struct - no Leaf embedded", func(t *testing.T) {
+				type NoLeaf struct {
+					ID   uint
+					Name string
+				}
+				var leaves []NoLeaf
+				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
+				if !errors.Is(err, closuretree.ErrItemIsNotTreeLeaf) {
+					t.Errorf("expected ErrItemIsNotTreeLeaf, got %v", err)
+				}
+			})
+
+			t.Run("invalid leaf struct - missing many2many tag", func(t *testing.T) {
+				type NoM2M struct {
+					closuretree.Leaf
+					Name string
+				}
+				var leaves []NoM2M
+				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
+				if err == nil {
+					t.Error("expected error for missing many2many tag, got nil")
+				}
+			})
+
+			t.Run("happy path - returns leaf associated with descendant node", func(t *testing.T) {
+				// Create a leaf with tenant1
+				leaf := TestLeaf{
+					Leaf: closuretree.Leaf{Tenant: tenant1},
+					Name: "leaf-mobile-phones",
+				}
+				if err := gdb.Create(&leaf).Error; err != nil {
+					t.Fatal(err)
+				}
+
+				// Associate the leaf with node 2 (Mobile Phones, child of Electronics=1)
+				node2 := &TestPayload{}
+				node2.NodeId = 2
+				if err := gdb.Model(&leaf).Association("Nodes").Append(node2); err != nil {
+					t.Fatal(err)
+				}
+
+				// GetLeaves under node 1 (Electronics) should return our leaf
+				var leaves []TestLeaf
+				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(leaves) != 1 {
+					t.Errorf("expected 1 leaf, got %d", len(leaves))
+					return
+				}
+				if leaves[0].Name != "leaf-mobile-phones" {
+					t.Errorf("expected leaf name 'leaf-mobile-phones', got %q", leaves[0].Name)
+				}
+			})
+
+			t.Run("wrong tenant returns empty", func(t *testing.T) {
+				var leaves []TestLeaf
+				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant2)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(leaves) != 0 {
+					t.Errorf("expected 0 leaves for wrong tenant, got %d", len(leaves))
+				}
+			})
+
+			t.Run("non-existent parent returns empty", func(t *testing.T) {
+				var leaves []TestLeaf
+				err := ct.GetLeaves(context.Background(), &leaves, 9999, 0, tenant1)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(leaves) != 0 {
+					t.Errorf("expected 0 leaves for non-existent parent, got %d", len(leaves))
+				}
+			})
+		})
+	}
+}
+
+// TestMoveSubtreeIntegrity verifies that moving a subtree to root preserves
+// all descendant closure rows at every depth level.
+func TestMoveSubtreeIntegrity(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName("movesubtreeintegrity")
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			// Move node 8 (Warm) to root. Its subtree includes 12 (Red) and 13 (Orange).
+			// Before: 7 -> 8 -> {12, 13}
+			// After:  8 -> {12, 13} at root level
+			err = ct.Move(context.Background(), 8, 0, tenant2)
+			if err != nil {
+				t.Fatalf("unexpected error moving node: %v", err)
+			}
+
+			// Node 8 should now be a root node
+			rootChildren, err := ct.DescendantIds(context.Background(), 0, 1, tenant2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(rootChildren, func(i, j int) bool { return rootChildren[i] < rootChildren[j] })
+			expectedRoots := []uint{7, 8, 9}
+			if diff := cmp.Diff(expectedRoots, rootChildren); diff != "" {
+				t.Errorf("root children after move (-want +got):\n%s", diff)
+			}
+
+			// Node 8's children (12 and 13) must still be reachable
+			warmChildren, err := ct.DescendantIds(context.Background(), 8, 1, tenant2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(warmChildren, func(i, j int) bool { return warmChildren[i] < warmChildren[j] })
+			expectedWarm := []uint{12, 13}
+			if diff := cmp.Diff(expectedWarm, warmChildren); diff != "" {
+				t.Errorf("children of node 8 after move (-want +got):\n%s", diff)
+			}
+
+			// All descendants of node 8 (full subtree) must be correct
+			allDesc, err := ct.DescendantIds(context.Background(), 8, 0, tenant2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(allDesc, func(i, j int) bool { return allDesc[i] < allDesc[j] })
+			expectedAll := []uint{12, 13}
+			if diff := cmp.Diff(expectedAll, allDesc); diff != "" {
+				t.Errorf("all descendants of node 8 after move (-want +got):\n%s", diff)
+			}
+
+			// Node 7 (Colors) should no longer have node 8 as a descendant
+			colorsDesc, err := ct.DescendantIds(context.Background(), 7, 0, tenant2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(colorsDesc, func(i, j int) bool { return colorsDesc[i] < colorsDesc[j] })
+			expectedColors := []uint{10, 14}
+			if diff := cmp.Diff(expectedColors, colorsDesc); diff != "" {
+				t.Errorf("descendants of node 7 after move (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// MultiLevelPayload tests that multi-level embedding works for Add and Update.
+type BasePayload struct {
+	closuretree.Node
+	Description string
+}
+
+type MultiLevelPayload struct {
+	BasePayload
+	Name     string
+	Children []*MultiLevelPayload `gorm:"-"`
+}
+
+func TestAddMultiLevelEmbed(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, MultiLevelPayload{})
+			ct, err := closuretree.New(gdb, MultiLevelPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			item := &MultiLevelPayload{
+				BasePayload: BasePayload{Description: "base desc"},
+				Name:        "top",
+			}
+			err = ct.Add(context.Background(), item, 0, closuretree.DefaultTenant)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// NodeId and Tenant should be written back through the multi-level embedding
+			if item.NodeId == 0 {
+				t.Error("expected NodeId to be set on multi-level embedded struct, got 0")
+			}
+			if item.Tenant != closuretree.DefaultTenant {
+				t.Errorf("expected Tenant %q, got %q", closuretree.DefaultTenant, item.Tenant)
+			}
+		})
+	}
+}
+
+func TestUpdateMultiLevelEmbed(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, MultiLevelPayload{})
+			ct, err := closuretree.New(gdb, MultiLevelPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			item := &MultiLevelPayload{
+				BasePayload: BasePayload{Description: "original"},
+				Name:        "original name",
+			}
+			err = ct.Add(context.Background(), item, 0, closuretree.DefaultTenant)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Update both the top-level and nested embedded field
+			err = ct.Update(context.Background(), item.NodeId, MultiLevelPayload{
+				BasePayload: BasePayload{Description: "updated"},
+				Name:        "updated name",
+			}, closuretree.DefaultTenant)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := &MultiLevelPayload{}
+			err = ct.GetNode(context.Background(), item.NodeId, closuretree.DefaultTenant, got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Description != "updated" {
+				t.Errorf("expected Description %q, got %q", "updated", got.Description)
+			}
+			if got.Name != "updated name" {
+				t.Errorf("expected Name %q, got %q", "updated name", got.Name)
+			}
+		})
+	}
+}
+
+func TestTreeDescendantsIdsDeterministic(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName(t.Name())
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			// Call TreeDescendantsIds multiple times and verify order is stable
+			var first []*closuretree.TreeNode
+			for i := 0; i < 10; i++ {
+				got, err := ct.TreeDescendantsIds(context.Background(), 7, 0, tenant2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i == 0 {
+					first = got
+				} else {
+					if diff := cmp.Diff(first, got); diff != "" {
+						t.Errorf("iteration %d produced different order (-first +current):\n%s", i, diff)
+					}
+				}
 			}
 		})
 	}

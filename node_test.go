@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"math"
 	"testing"
 )
 
@@ -70,7 +71,7 @@ func TestHasBranch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := hasNode(tt.input)
 			if result != tt.expected {
-				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, result, tt.expected)
+				t.Errorf("hasNode(%v) = %v; want %v", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -141,13 +142,50 @@ func TestGetNodeData(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			id, tenant, err := getNodeData(tt.input)
 			if (err != nil) != tt.hasError {
-				t.Errorf("HasLeave(%v) unexpected error state: %v", tt.input, err)
+				t.Errorf("getNodeData(%v) unexpected error state: %v", tt.input, err)
 			}
 			if tenant != tt.expected {
-				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, tenant, tt.expected)
+				t.Errorf("getNodeData(%v) tenant = %v; want %v", tt.input, tenant, tt.expected)
 			}
 			if id != tt.expectId {
-				t.Errorf("HasLeave(%v) = %v; want %v", tt.input, tenant, tt.expected)
+				t.Errorf("getNodeData(%v) id = %v; want %v", tt.input, id, tt.expectId)
+			}
+		})
+	}
+}
+
+func TestToInt64(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  any
+		want   int64
+		wantOK bool
+	}{
+		{"nil", nil, 0, true},
+		{"int64", int64(42), 42, true},
+		{"int", int(99), 99, true},
+		{"int32", int32(7), 7, true},
+		{"uint32", uint32(123), 123, true},
+		{"uint", uint(55), 55, true},
+		{"uint64", uint64(100), 100, true},
+		{"uint64 overflow", uint64(math.MaxInt64 + 1), 0, false},
+		{"uint overflow", uint(math.MaxUint), 0, false},
+		{"float64", float64(3), 3, true},
+		{"string", "789", 789, true},
+		{"string invalid", "abc", 0, false},
+		{"[]byte", []byte("456"), 456, true},
+		{"[]byte invalid", []byte("abc"), 0, false},
+		{"unsupported type", struct{}{}, 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := toInt64(tt.input)
+			if ok != tt.wantOK {
+				t.Errorf("toInt64(%v) ok = %v; want %v", tt.input, ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Errorf("toInt64(%v) = %v; want %v", tt.input, got, tt.want)
 			}
 		})
 	}

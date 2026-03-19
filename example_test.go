@@ -190,7 +190,7 @@ func ExampleTree_DescendantIds_treeWithM2MRelations() {
 	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
 	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
 
-	fantasy := Genre{Name: "Science Fiction"}
+	fantasy := Genre{Name: "Fantasy"}
 	_ = tree.Add(ctx, &fantasy, 0, tenant)
 
 	highFantasy := Genre{Name: "High Fantasy"}
@@ -259,7 +259,7 @@ func ExampleTree_DescendantIds_treeWithM2MRelations() {
 }
 
 type Song struct {
-	ct.Leave
+	ct.Leaf
 	Name   string
 	Genres []Genre `gorm:"many2many:songs_genres;"`
 }
@@ -305,7 +305,7 @@ func ExampleTree_GetLeaves() {
 	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
 	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
 
-	fantasy := Genre{Name: "Science Fiction"}
+	fantasy := Genre{Name: "Fantasy"}
 	_ = tree.Add(ctx, &fantasy, 0, tenant)
 
 	highFantasy := Genre{Name: "High Fantasy"}
@@ -323,13 +323,13 @@ func ExampleTree_GetLeaves() {
 
 	// insert some Books
 	songs := []Song{
-		{Leave: ct.Leave{Tenant: tenant}, Name: "The Echoes of Eternity", Genres: []Genre{{Node: ct.Node{NodeId: 3}}, {Node: ct.Node{NodeId: 10}}}},
-		{Leave: ct.Leave{Tenant: "another Tenant"}, Name: "Another tenants book", Genres: []Genre{{Node: ct.Node{NodeId: 3}}, {Node: ct.Node{NodeId: 10}}}},
-		{Leave: ct.Leave{Tenant: tenant}, Name: "Chronicles of the Shadowlands", Genres: []Genre{{Node: ct.Node{NodeId: 6}}}},
-		{Leave: ct.Leave{Tenant: tenant}, Name: "Nebula’s Whisper", Genres: []Genre{{Node: ct.Node{NodeId: 4}}}},
-		{Leave: ct.Leave{Tenant: tenant}, Name: "The Clockwork Alchemist", Genres: []Genre{{Node: ct.Node{NodeId: 4}}, {Node: ct.Node{NodeId: 8}}}},
-		{Leave: ct.Leave{Tenant: tenant}, Name: "Through the Veil of Time", Genres: []Genre{{Node: ct.Node{NodeId: 13}}, {Node: ct.Node{NodeId: 14}}}},
-		{Leave: ct.Leave{Tenant: tenant}, Name: "Tides of an Emerald Sky", Genres: []Genre{{Node: ct.Node{NodeId: 14}}}},
+		{Leaf: ct.Leaf{Tenant: tenant}, Name: "The Echoes of Eternity", Genres: []Genre{{Node: ct.Node{NodeId: 3}}, {Node: ct.Node{NodeId: 10}}}},
+		{Leaf: ct.Leaf{Tenant: "another Tenant"}, Name: "Another tenants book", Genres: []Genre{{Node: ct.Node{NodeId: 3}}, {Node: ct.Node{NodeId: 10}}}},
+		{Leaf: ct.Leaf{Tenant: tenant}, Name: "Chronicles of the Shadowlands", Genres: []Genre{{Node: ct.Node{NodeId: 6}}}},
+		{Leaf: ct.Leaf{Tenant: tenant}, Name: "Nebula’s Whisper", Genres: []Genre{{Node: ct.Node{NodeId: 4}}}},
+		{Leaf: ct.Leaf{Tenant: tenant}, Name: "The Clockwork Alchemist", Genres: []Genre{{Node: ct.Node{NodeId: 4}}, {Node: ct.Node{NodeId: 8}}}},
+		{Leaf: ct.Leaf{Tenant: tenant}, Name: "Through the Veil of Time", Genres: []Genre{{Node: ct.Node{NodeId: 13}}, {Node: ct.Node{NodeId: 14}}}},
+		{Leaf: ct.Leaf{Tenant: tenant}, Name: "Tides of an Emerald Sky", Genres: []Genre{{Node: ct.Node{NodeId: 14}}}},
 	}
 	db.Create(songs) // pass a slice to insert multiple row
 
