@@ -447,6 +447,7 @@ func TestUpdate(t *testing.T) {
 				name        string
 				nodeID      uint
 				in          any
+				newParentID *uint
 				wantPayload TestPayload
 				tenant      string
 				wantErr     error
@@ -482,7 +483,7 @@ func TestUpdate(t *testing.T) {
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					err := ct.Update(context.Background(), tc.nodeID, tc.in, tc.tenant)
+					err := ct.Update(context.Background(), tc.nodeID, tc.in, tc.newParentID, tc.tenant)
 					if tc.wantErr != nil {
 						if err == nil {
 							t.Fatalf("expected error: %v, but got none", tc.wantErr)
@@ -505,6 +506,147 @@ func TestUpdate(t *testing.T) {
 					}
 				})
 			}
+		})
+	}
+}
+
+// assertNodeNameIs verifies that the node with the given id has the expected name.
+func assertNodeNameIs(t *testing.T, ct *closuretree.Tree, id uint, tenant, want string) {
+	t.Helper()
+	got := TestPayload{}
+	if err := ct.GetNode(context.Background(), id, tenant, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != want {
+		t.Errorf("expected name %q, got %q", want, got.Name)
+	}
+}
+
+// assertIsDirectChild verifies that childID is a direct child of parentID.
+func assertIsDirectChild(t *testing.T, ct *closuretree.Tree, parentID, childID uint, tenant string) {
+	t.Helper()
+	children, err := ct.DescendantIds(context.Background(), parentID, 1, tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range children {
+		if id == childID {
+			return
+		}
+	}
+	t.Errorf("expected node %d to be a direct child of %d, got children: %v", childID, parentID, children)
+}
+
+func TestUpdateAndMove(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			setup := func(t *testing.T) *closuretree.Tree {
+				t.Helper()
+				gdb := db.ConnDbName(t.Name())
+				dropTreeTables(gdb, TestPayload{})
+				ct, err := closuretree.New(gdb, TestPayload{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				populateTree(t, ct)
+				return ct
+			}
+
+			t.Run("both nil returns ErrNoOp", func(t *testing.T) {
+				ct := setup(t)
+				err := ct.Update(context.Background(), 1, nil, nil, tenant1)
+				if !errors.Is(err, closuretree.ErrNoOp) {
+					t.Errorf("expected ErrNoOp, got %v", err)
+				}
+			})
+
+			// id zero guard must fire before the no-op guard
+			t.Run("id zero with both nil returns ErrNodeNotFound not ErrNoOp", func(t *testing.T) {
+				ct := setup(t)
+				err := ct.Update(context.Background(), 0, nil, nil, tenant1)
+				if !errors.Is(err, closuretree.ErrNodeNotFound) {
+					t.Errorf("expected ErrNodeNotFound, got %v", err)
+				}
+			})
+
+			t.Run("id zero returns ErrNodeNotFound", func(t *testing.T) {
+				ct := setup(t)
+				dest := uint(4)
+				err := ct.Update(context.Background(), 0, TestPayload{Name: "x"}, &dest, tenant1)
+				if !errors.Is(err, closuretree.ErrNodeNotFound) {
+					t.Errorf("expected ErrNodeNotFound, got %v", err)
+				}
+			})
+
+			t.Run("move only without field update", func(t *testing.T) {
+				ct := setup(t)
+				// Move node 2 (Mobile Phones) under node 3 (Clothing), no field changes
+				dest := uint(3)
+				if err := ct.Update(context.Background(), 2, nil, &dest, tenant1); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				assertIsDirectChild(t, ct, 3, 2, tenant1)
+			})
+
+			t.Run("update fields and move atomically", func(t *testing.T) {
+				ct := setup(t)
+				// Move node 2 (Mobile Phones, child of 1) under node 3 (Clothing), also rename it
+				dest := uint(3)
+				if err := ct.Update(context.Background(), 2, TestPayload{Name: "Updated Phones"}, &dest, tenant1); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				assertNodeNameIs(t, ct, 2, tenant1, "Updated Phones")
+				assertIsDirectChild(t, ct, 3, 2, tenant1)
+			})
+
+			t.Run("node not found with both item and newParentID", func(t *testing.T) {
+				ct := setup(t)
+				ctx := context.Background()
+				dest := uint(3)
+				err := ct.Update(ctx, 999, TestPayload{Name: "Ghost"}, &dest, tenant1)
+				if !errors.Is(err, closuretree.ErrNodeNotFound) {
+					t.Errorf("expected ErrNodeNotFound, got %v", err)
+				}
+			})
+
+			t.Run("move fails with cycle field update rolled back", func(t *testing.T) {
+				ct := setup(t)
+				// 6 is a descendant of 2, so moving 2 under 6 is a cycle
+				dest := uint(6)
+				if err := ct.Update(context.Background(), 2, TestPayload{Name: "Should Not Persist"}, &dest, tenant1); !errors.Is(err, closuretree.ErrInvalidMove) {
+					t.Fatalf("expected ErrInvalidMove, got %v", err)
+				}
+				assertNodeNameIs(t, ct, 2, tenant1, "Mobile Phones")
+			})
+
+			t.Run("same parent with field update rolled back", func(t *testing.T) {
+				ct := setup(t)
+				// 1 is already the parent of 2
+				dest := uint(1)
+				if err := ct.Update(context.Background(), 2, TestPayload{Name: "Should Not Persist"}, &dest, tenant1); !errors.Is(err, closuretree.ErrInvalidMove) {
+					t.Fatalf("expected ErrInvalidMove, got %v", err)
+				}
+				assertNodeNameIs(t, ct, 2, tenant1, "Mobile Phones")
+			})
+
+			t.Run("invalid parent field update rolled back", func(t *testing.T) {
+				ct := setup(t)
+				dest := uint(999) // non-existent parent
+				if err := ct.Update(context.Background(), 2, TestPayload{Name: "Should Not Persist"}, &dest, tenant1); !errors.Is(err, closuretree.ErrParentNotFound) {
+					t.Fatalf("expected ErrParentNotFound, got %v", err)
+				}
+				assertNodeNameIs(t, ct, 2, tenant1, "Mobile Phones")
+			})
+
+			t.Run("same parent at root with field update rolled back", func(t *testing.T) {
+				ct := setup(t)
+				// Node 1 (Electronics) is already a root node; parent is 0
+				zero := uint(0)
+				if err := ct.Update(context.Background(), 1, TestPayload{Name: "Should Not Persist"}, &zero, tenant1); !errors.Is(err, closuretree.ErrInvalidMove) {
+					t.Fatalf("expected ErrInvalidMove, got %v", err)
+				}
+				assertNodeNameIs(t, ct, 1, tenant1, "Electronics")
+			})
 		})
 	}
 }
@@ -769,7 +911,7 @@ func TestMove(t *testing.T) {
 				dest    uint
 				tenant  string
 				wantIds []idCheck // for every key in the map check the resulting slice
-				wantErr string
+				wantErr error
 			}{
 				{
 					name:   "move a parent node on Tenant 1",
@@ -827,7 +969,7 @@ func TestMove(t *testing.T) {
 						{parent: 8, tenant: tenant2, want: []uint{12, 13}},
 						{parent: 8, tenant: tenant1, want: []uint{}},
 					},
-					wantErr: closuretree.ErrParentNotFound.Error(),
+					wantErr: closuretree.ErrParentNotFound,
 					tenant:  tenant1,
 				},
 				{
@@ -835,7 +977,7 @@ func TestMove(t *testing.T) {
 					origin:  2,
 					dest:    6, // 6 is a descendant of 2
 					tenant:  tenant1,
-					wantErr: closuretree.ErrInvalidMove.Error(),
+					wantErr: closuretree.ErrInvalidMove,
 				},
 				{
 					name:   "move leaf node to a different branch",
@@ -863,14 +1005,14 @@ func TestMove(t *testing.T) {
 					origin:  2,
 					dest:    1, // already the parent
 					tenant:  tenant1,
-					wantErr: closuretree.ErrInvalidMove.Error(),
+					wantErr: closuretree.ErrInvalidMove,
 				},
 				{
 					name:    "expect err when move node to same parent, root node edition",
 					origin:  3,
 					dest:    0, // already the parent
 					tenant:  tenant1,
-					wantErr: closuretree.ErrInvalidMove.Error(),
+					wantErr: closuretree.ErrInvalidMove,
 				},
 				{
 					name:   "move single node subtree (no children)",
@@ -906,17 +1048,18 @@ func TestMove(t *testing.T) {
 			for i, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
 					ct := setup(t, fmt.Sprintf("IT_move_%d", i))
-					err := ct.Move(context.Background(), tc.origin, tc.dest, tc.tenant)
-					if tc.wantErr != "" {
+					dest := tc.dest
+					err := ct.Update(context.Background(), tc.origin, nil, &dest, tc.tenant)
+					if tc.wantErr != nil {
 						if err == nil {
-							t.Fatalf("expected error \"%s\" but got no error at all", tc.wantErr)
+							t.Fatalf("expected error %v but got no error", tc.wantErr)
 						}
-						if err.Error() != tc.wantErr {
-							t.Errorf("unexpected error \"%s\" , want: \"%s\" ", err.Error(), tc.wantErr)
+						if !errors.Is(err, tc.wantErr) {
+							t.Errorf("expected error %v, got %v", tc.wantErr, err)
 						}
 					} else {
 						if err != nil {
-							t.Errorf("unexpected error \"%s\" ", err.Error())
+							t.Errorf("unexpected error: %v", err)
 						}
 					}
 					for _, checkId := range tc.wantIds {
@@ -1013,7 +1156,8 @@ func TestMoveBetweenParents_NoDuplicates(t *testing.T) {
 			}
 
 			// Move Child from ParentA to ParentB
-			err = ct.Move(ctx, child.Id(), parentB.Id(), tenant1)
+			parentBId := parentB.Id()
+			err = ct.Update(ctx, child.Id(), nil, &parentBId, tenant1)
 			if err != nil {
 				t.Fatalf("Move failed: %v", err)
 			}
@@ -1392,7 +1536,8 @@ func TestMoveSubtreeIntegrity(t *testing.T) {
 			// Move node 8 (Warm) to root. Its subtree includes 12 (Red) and 13 (Orange).
 			// Before: 7 -> 8 -> {12, 13}
 			// After:  8 -> {12, 13} at root level
-			err = ct.Move(context.Background(), 8, 0, tenant2)
+			zero := uint(0)
+			err = ct.Update(context.Background(), 8, nil, &zero, tenant2)
 			if err != nil {
 				t.Fatalf("unexpected error moving node: %v", err)
 			}
@@ -1509,7 +1654,7 @@ func TestUpdateMultiLevelEmbed(t *testing.T) {
 			err = ct.Update(context.Background(), item.NodeId, MultiLevelPayload{
 				BasePayload: BasePayload{Description: "updated"},
 				Name:        "updated name",
-			}, closuretree.DefaultTenant)
+			}, nil, closuretree.DefaultTenant)
 			if err != nil {
 				t.Fatal(err)
 			}

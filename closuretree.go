@@ -33,6 +33,7 @@ var (
 	ErrNodeNotFound           = errors.New("node not found")
 	ErrInvalidMove            = errors.New("invalid move")
 	ErrItemNotPointerToStruct = errors.New("item needs to be a pointer to a struct")
+	ErrNoOp                   = errors.New("update called with no item and no new parent")
 )
 
 // Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items
@@ -276,18 +277,54 @@ const addRelsQuery = `INSERT INTO %s (ancestor_id, descendant_id, tenant, depth)
 
 const addRootRelQuery = `INSERT INTO %s (ancestor_id, descendant_id, tenant, depth) VALUES (0, ?, ?, 1);`
 
-// Update  will update the entry with given ID and owned to a specific tenant
-// Note: the passed item has to embed a Node struct, but any value added to the Node will be ignored
-func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) error {
-	if !hasNode(item) {
-		return ErrItemIsNotTreeNode
-	}
+// Update modifies a node's fields and/or moves it to a new parent, atomically.
+//
+// Pass a non-nil item to update fields (must embed Node; Node fields are ignored).
+// Pass a non-nil newParentID to move the node: &0 moves to root, &someID moves under someID.
+// Passing both nil returns ErrNoOp.
+func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint, tenant string) error {
 	var err error
 	tenant, err = validateTenant(tenant)
 	if err != nil {
 		return err
 	}
+	if id == 0 {
+		return ErrNodeNotFound
+	}
+	if item == nil && newParentID == nil {
+		return ErrNoOp
+	}
+	if item != nil && !hasNode(item) {
+		return ErrItemIsNotTreeNode
+	}
 
+	var updateMap map[string]any
+	if item != nil {
+		updateMap, err = ct.buildUpdateMap(item, id, tenant)
+		if err != nil {
+			return err
+		}
+	}
+
+	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if item != nil {
+			res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(updateMap)
+			if res.Error != nil {
+				return fmt.Errorf("unable to update node: %w", res.Error)
+			}
+			if res.RowsAffected == 0 {
+				return ErrNodeNotFound
+			}
+		}
+		if newParentID != nil {
+			return ct.moveInTx(tx, id, *newParentID, tenant)
+		}
+		return nil
+	})
+}
+
+// buildUpdateMap builds the column→value map for an Update call using reflection.
+func (ct *Tree) buildUpdateMap(item any, id uint, tenant string) (map[string]any, error) {
 	t := reflect.TypeOf(item)
 	itemIsPointer := false
 	if t.Kind() == reflect.Ptr {
@@ -300,22 +337,20 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 	} else {
 		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item))
 	}
-
-	// modify the embedded Node struct
 	v := reflect.ValueOf(reflectItem).Elem()
 	if nodeField, ok := findNodeValue(t, v); ok && nodeField.CanSet() {
 		nodeField.Set(reflect.ValueOf(Node{NodeId: id, Tenant: tenant}))
 	}
 
-	// Build a map of non-Node fields to update (preserves zero values)
 	updateStmt := &gorm.Statement{DB: ct.db}
-	_ = updateStmt.Parse(reflectItem)
+	if err := updateStmt.Parse(reflectItem); err != nil {
+		return nil, fmt.Errorf("unable to parse item schema: %w", err)
+	}
 	updateMap := make(map[string]any)
 	for _, f := range updateStmt.Schema.Fields {
 		if f.DBName == "" || !f.Updatable {
 			continue
 		}
-		// Skip Node fields (node_id, tenant)
 		if f.OwnerSchema != nil && f.OwnerSchema.ModelType == reflect.TypeOf(Node{}) {
 			continue
 		}
@@ -324,87 +359,69 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, tenant string) er
 			updateMap[f.DBName] = fieldVal.Interface()
 		}
 	}
-
-	err = ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(updateMap)
-
-		if res.Error != nil {
-			return fmt.Errorf("unable to update node: %w", res.Error)
-		}
-		if res.RowsAffected == 0 {
-			return ErrNodeNotFound
-		}
-
-		return nil
-	})
-	return err
+	return updateMap, nil
 }
 
-func (ct *Tree) Move(ctx context.Context, nodeId, newParentID uint, tenant string) error {
-	var err error
-	tenant, err = validateTenant(tenant)
-	if err != nil {
+// moveInTx performs the closure-table move of node id to parent newPID within tx.
+func (ct *Tree) moveInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
+	// Same-parent guard (uses tx to avoid TOCTOU)
+	var sameParentCount int64
+	if err := tx.Table(ct.relationsTbl).
+		Where("ancestor_id = ? AND descendant_id = ? AND depth = 1 AND tenant = ?", newPID, id, tenant).
+		Count(&sameParentCount).Error; err != nil {
 		return err
 	}
-	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	if sameParentCount > 0 {
+		return ErrInvalidMove
+	}
 
-		// Prevent duplicate move to same parent (uses tx to avoid TOCTOU)
-		var sameParentCount int64
+	if newPID != 0 {
+		// Cycle guard: ensure new parent is not a descendant of id (uses tx)
+		var descCount int64
 		if err := tx.Table(ct.relationsTbl).
-			Where("ancestor_id = ? AND descendant_id = ? AND depth = 1 AND tenant = ?", newParentID, nodeId, tenant).
-			Count(&sameParentCount).Error; err != nil {
+			Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", id, newPID, tenant).
+			Limit(1).Count(&descCount).Error; err != nil {
 			return err
 		}
-		if sameParentCount > 0 {
+		if descCount > 0 {
 			return ErrInvalidMove
 		}
+	}
 
-		if newParentID != 0 {
-			// Normal move — make sure we're not moving a node under its own descendant (uses tx)
-			var descCount int64
-			if err := tx.Table(ct.relationsTbl).
-				Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", nodeId, newParentID, tenant).
-				Limit(1).Count(&descCount).Error; err != nil {
-				return err
-			}
-			if descCount > 0 {
-				return ErrInvalidMove
-			}
-		}
+	// STEP 1: Delete all connections from outside the subtree into the subtree.
+	// Must happen before insert to avoid unique-constraint conflicts on depth changes.
+	delSql := fmt.Sprintf(moveDeleteExternalPaths, ct.relationsTbl, ct.relationsTbl)
+	delExec := tx.Exec(delSql, id, tenant, tenant)
+	if delExec.Error != nil {
+		return delExec.Error
+	}
+	// Note: in the combined path (item != nil), this check is redundant because the
+	// field update above already verified the node exists. It is kept intentionally to
+	// preserve the move invariant and avoid coupling the two code paths.
+	if delExec.RowsAffected == 0 {
+		return ErrNodeNotFound
+	}
 
-		// STEP 1: Delete all connections coming from outside the subtree into the subtree.
-		// This must happen before the insert to avoid unique-constraint conflicts when
-		// an (ancestor_id, descendant_id, tenant) triple needs a new depth value.
-		delSql := fmt.Sprintf(moveDeleteExternalPaths,
-			ct.relationsTbl, // %s: CTE SELECT FROM
-			ct.relationsTbl, // %s: DELETE FROM
-		)
-		delExec := tx.Exec(delSql, nodeId, tenant, tenant)
-		if delExec.Error != nil {
-			return delExec.Error
-		}
-		// If nothing was deleted the node doesn't exist (or belongs to another tenant)
-		if delExec.RowsAffected == 0 {
+	// STEP 2: Insert new connections from destination's ancestors to the subtree.
+	return ct.insertNewPathsInTx(tx, id, newPID, tenant)
+}
+
+// insertNewPathsInTx inserts closure rows connecting the moved subtree to its new ancestors.
+func (ct *Tree) insertNewPathsInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
+	if newPID == 0 {
+		insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl)
+		insExec := tx.Exec(insertSql, id, tenant)
+		if insExec.Error == nil && insExec.RowsAffected == 0 {
 			return ErrNodeNotFound
 		}
-
-		// STEP 2: Insert the new connections from the destination's ancestors to the subtree.
-		var insExec *gorm.DB
-		if newParentID == 0 {
-			// Move to root: connect root sentinel (ancestor_id=0) to every subtree node
-			insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl)
-			insExec = tx.Exec(insertSql, nodeId, tenant)
-		} else {
-			// Normal move: copy ancestor paths from new parent to all subtree nodes
-			insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
-			insExec = tx.Exec(insertSql, nodeId, newParentID, tenant, tenant)
-			if insExec.Error == nil && insExec.RowsAffected == 0 {
-				// New parent not found in this tenant
-				return ErrParentNotFound
-			}
-		}
 		return insExec.Error
-	})
+	}
+	insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
+	insExec := tx.Exec(insertSql, id, newPID, tenant, tenant)
+	if insExec.Error == nil && insExec.RowsAffected == 0 {
+		return ErrParentNotFound
+	}
+	return insExec.Error
 }
 
 const moveQueryInsertNewToRoot = `

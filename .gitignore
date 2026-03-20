@@ -15,3 +15,5 @@
 *.sqlite
 cover.html
 cover.out
+/docs/
+.directory
