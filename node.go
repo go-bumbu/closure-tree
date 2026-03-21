@@ -8,9 +8,10 @@ import (
 // Node is an embeddable ID to be used in closure tree, this is mandatory.
 // ParentId is ignored during write operations, it is only populated during read.
 type Node struct {
-	NodeId   uint   `gorm:"autoIncrement;primaryKey;not null;index:idx_node_tenant,composite:2" json:"id"`
-	ParentId uint   `json:"parentId" gorm:"column:parent_id;->;-:migration"` // field is Read-only, no migration
-	Tenant   string `gorm:"not null;index:idx_node_tenant,composite:1" json:"tenant"`
+	NodeId    uint    `gorm:"autoIncrement;primaryKey;not null;index:idx_node_tenant,composite:2" json:"id"`
+	ParentId  uint    `json:"parentId" gorm:"column:parent_id;->;-:migration"` // field is Read-only, no migration
+	Tenant    string  `gorm:"not null;index:idx_node_tenant,composite:1" json:"tenant"`
+	SortOrder float64 `gorm:"not null;default:0" json:"sortOrder"`
 }
 
 func (n *Node) Id() uint {
