@@ -39,17 +39,17 @@ func ExampleTree_Descendants() {
 
 	colorTag := Tag{Name: "colors"}
 	// since we pass colorTag as pointer, the NodeId is going to be updated
-	_ = tree.Add(ctx, &colorTag, 0, tenant)
+	_ = tree.Add(ctx, &colorTag, 0, 0, tenant)
 
-	_ = tree.Add(ctx, Tag{Name: "warm", Node: ct.Node{}}, colorTag.Id(), tenant)
-	_ = tree.Add(ctx, Tag{Name: "orange", Node: ct.Node{}}, colorTag.Id(), tenant)
+	_ = tree.Add(ctx, Tag{Name: "warm", Node: ct.Node{}}, colorTag.Id(), 0, tenant)
+	_ = tree.Add(ctx, Tag{Name: "orange", Node: ct.Node{}}, colorTag.Id(), 0, tenant)
 	// you can specify an unique ID for the branch
-	_ = tree.Add(ctx, Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
+	_ = tree.Add(ctx, Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), 0, tenant)
 
 	sizes := Tag{Name: "sizes"}
-	_ = tree.Add(ctx, &sizes, 0, tenant)
-	_ = tree.Add(ctx, Tag{Name: "small"}, sizes.NodeId, tenant)
-	_ = tree.Add(ctx, Tag{Name: "medium"}, sizes.NodeId, tenant)
+	_ = tree.Add(ctx, &sizes, 0, 0, tenant)
+	_ = tree.Add(ctx, Tag{Name: "small"}, sizes.NodeId, 0, tenant)
+	_ = tree.Add(ctx, Tag{Name: "medium"}, sizes.NodeId, 0, tenant)
 
 	// Get the descendants of color
 	descendants := []Tag{}
@@ -67,10 +67,10 @@ func ExampleTree_Descendants() {
 	fmt.Printf("all ids: %s\n", strings.Join(descendantsIdsStr, ","))
 
 	// Output:
-	// 2=> warm
-	// 3=> orange
 	// 4=> cold
-	// all ids: 1,5,2,3,4,6,7
+	// 3=> orange
+	// 2=> warm
+	// all ids: 5,1,4,3,7,2,6
 }
 
 type NestedTag struct {
@@ -100,18 +100,18 @@ func ExampleTree_TreeDescendants() {
 
 	colorTag := Tag{Name: "colors"}
 	// since we pass colorTag as pointer, the NodeId is going to be updated
-	_ = tree.Add(ctx, &colorTag, 0, tenant)
+	_ = tree.Add(ctx, &colorTag, 0, 0, tenant)
 
 	warmTag := Tag{Name: "warm", Node: ct.Node{}}
-	_ = tree.Add(ctx, &warmTag, colorTag.Id(), tenant)
-	_ = tree.Add(ctx, Tag{Name: "orange", Node: ct.Node{}}, warmTag.Id(), tenant)
+	_ = tree.Add(ctx, &warmTag, colorTag.Id(), 0, tenant)
+	_ = tree.Add(ctx, Tag{Name: "orange", Node: ct.Node{}}, warmTag.Id(), 0, tenant)
 	// you can specify a unique ID for the branch
-	_ = tree.Add(ctx, Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), tenant)
+	_ = tree.Add(ctx, Tag{Name: "cold", Node: ct.Node{}}, colorTag.Id(), 0, tenant)
 
 	sizes := Tag{Name: "sizes"}
-	_ = tree.Add(ctx, &sizes, 0, tenant)
-	_ = tree.Add(ctx, Tag{Name: "small"}, sizes.NodeId, tenant)
-	_ = tree.Add(ctx, Tag{Name: "medium"}, sizes.NodeId, tenant)
+	_ = tree.Add(ctx, &sizes, 0, 0, tenant)
+	_ = tree.Add(ctx, Tag{Name: "small"}, sizes.NodeId, 0, tenant)
+	_ = tree.Add(ctx, Tag{Name: "medium"}, sizes.NodeId, 0, tenant)
 
 	// Get the Nested tree structure for the Tags
 	descendants := []*NestedTag{}
@@ -123,9 +123,9 @@ func ExampleTree_TreeDescendants() {
 	printTree(descendants, "")
 
 	// Output:
+	// 4=> cold
 	// 2=> warm
 	// |- 3=> orange
-	// 4=> cold
 
 }
 
@@ -177,31 +177,31 @@ func ExampleTree_DescendantIds_treeWithM2MRelations() {
 	ctx := context.Background()
 
 	scifi := Genre{Name: "Science Fiction"}
-	err = tree.Add(ctx, &scifi, 0, tenant)
+	err = tree.Add(ctx, &scifi, 0, 0, tenant)
 	handleErr(err)
 
 	spaceOpera := Genre{Name: "Space Opera"}
-	_ = tree.Add(ctx, &spaceOpera, scifi.NodeId, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Galactic Empires"}, spaceOpera.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Interstellar Wars"}, spaceOpera.Id(), tenant)
+	_ = tree.Add(ctx, &spaceOpera, scifi.NodeId, 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Galactic Empires"}, spaceOpera.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Interstellar Wars"}, spaceOpera.Id(), 0, tenant)
 
 	hardScifi := Genre{Name: "Hard Sci-Fi"}
-	_ = tree.Add(ctx, &hardScifi, scifi.NodeId, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
+	_ = tree.Add(ctx, &hardScifi, scifi.NodeId, 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), 0, tenant)
 
 	fantasy := Genre{Name: "Fantasy"}
-	_ = tree.Add(ctx, &fantasy, 0, tenant)
+	_ = tree.Add(ctx, &fantasy, 0, 0, tenant)
 
 	highFantasy := Genre{Name: "High Fantasy"}
-	_ = tree.Add(ctx, &highFantasy, fantasy.NodeId, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Epic Quests"}, highFantasy.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Mythical Creatures"}, highFantasy.Id(), tenant)
+	_ = tree.Add(ctx, &highFantasy, fantasy.NodeId, 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Epic Quests"}, highFantasy.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Mythical Creatures"}, highFantasy.Id(), 0, tenant)
 
 	urbanFantasy := Genre{Name: "Urban Fantasy"}
-	_ = tree.Add(ctx, &urbanFantasy, fantasy.NodeId, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Magic in the Modern World"}, urbanFantasy.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Supernatural Detectives"}, urbanFantasy.Id(), tenant)
+	_ = tree.Add(ctx, &urbanFantasy, fantasy.NodeId, 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Magic in the Modern World"}, urbanFantasy.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Supernatural Detectives"}, urbanFantasy.Id(), 0, tenant)
 
 	// Create the Books table
 	_ = db.AutoMigrate(Book{})
@@ -292,31 +292,31 @@ func ExampleTree_GetLeaves() {
 	ctx := context.Background()
 
 	scifi := Genre{Name: "Science Fiction"}
-	err = tree.Add(ctx, &scifi, 0, tenant)
+	err = tree.Add(ctx, &scifi, 0, 0, tenant)
 	handleErr(err)
 
 	spaceOpera := Genre{Name: "Space Opera"}
-	_ = tree.Add(ctx, &spaceOpera, scifi.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Galactic Empires"}, spaceOpera.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Interstellar Wars"}, spaceOpera.Id(), tenant)
+	_ = tree.Add(ctx, &spaceOpera, scifi.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Galactic Empires"}, spaceOpera.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Interstellar Wars"}, spaceOpera.Id(), 0, tenant)
 
 	hardScifi := Genre{Name: "Hard Sci-Fi"}
-	_ = tree.Add(ctx, &hardScifi, scifi.NodeId, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), tenant)
+	_ = tree.Add(ctx, &hardScifi, scifi.NodeId, 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, hardScifi.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, hardScifi.Id(), 0, tenant)
 
 	fantasy := Genre{Name: "Fantasy"}
-	_ = tree.Add(ctx, &fantasy, 0, tenant)
+	_ = tree.Add(ctx, &fantasy, 0, 0, tenant)
 
 	highFantasy := Genre{Name: "High Fantasy"}
-	_ = tree.Add(ctx, &highFantasy, fantasy.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Epic Quests"}, highFantasy.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Mythical Creatures"}, highFantasy.Id(), tenant)
+	_ = tree.Add(ctx, &highFantasy, fantasy.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Epic Quests"}, highFantasy.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Mythical Creatures"}, highFantasy.Id(), 0, tenant)
 
 	urbanFantasy := Genre{Name: "Urban Fantasy"}
-	_ = tree.Add(ctx, &urbanFantasy, fantasy.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Magic in the Modern World"}, urbanFantasy.Id(), tenant)
-	_ = tree.Add(ctx, Genre{Name: "Supernatural Detectives"}, urbanFantasy.Id(), tenant)
+	_ = tree.Add(ctx, &urbanFantasy, fantasy.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Magic in the Modern World"}, urbanFantasy.Id(), 0, tenant)
+	_ = tree.Add(ctx, Genre{Name: "Supernatural Detectives"}, urbanFantasy.Id(), 0, tenant)
 
 	// Create the Books table
 	_ = db.AutoMigrate(Song{})
@@ -365,6 +365,47 @@ func ExampleTree_GetLeaves() {
 	//- Through the Veil of Time
 	//- Tides of an Emerald Sky
 
+}
+
+func ExampleTree_Add_sortOrder() {
+	db := getGormDb("tagTree.sortorder.example")
+	tree, _ := ct.New(db, Tag{})
+
+	tenant := "sampleTenant"
+	ctx := context.Background()
+
+	// Build an initial list: apple, banana, cherry (appended in order)
+	apple := &Tag{Name: "apple"}
+	_ = tree.Add(ctx, apple, 0, 0, tenant) // afterNodeID=0: place first (no siblings yet)
+
+	banana := &Tag{Name: "banana"}
+	_ = tree.Add(ctx, banana, 0, apple.NodeId, tenant) // place after apple
+
+	cherry := &Tag{Name: "cherry"}
+	_ = tree.Add(ctx, cherry, 0, banana.NodeId, tenant) // place after banana
+
+	// Insert "avocado" between apple and banana
+	avocado := &Tag{Name: "avocado"}
+	_ = tree.Add(ctx, avocado, 0, apple.NodeId, tenant)
+
+	// Move cherry to the front
+	zero := uint(0)
+	_ = tree.Update(ctx, cherry.NodeId, nil, nil, &zero, tenant)
+
+	// Renormalize to restore clean 10/20/30/… spacing
+	_ = tree.Renormalize(ctx, 0, tenant)
+
+	var items []Tag
+	_ = tree.Descendants(ctx, 0, 1, tenant, &items)
+	for _, item := range items {
+		fmt.Println(item.Name)
+	}
+
+	// Output:
+	// cherry
+	// apple
+	// avocado
+	// banana
 }
 
 func handleErr(err error) {

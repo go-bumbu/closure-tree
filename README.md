@@ -6,6 +6,7 @@ Features:
 * store any basic struct information in a tree structure (Uses GORM under the hood)
 * multi-user/tenant: allows to perform all the operations on a specific user or tenant
 * retrieve all the nested descendants of a node
+* control display order of siblings via float64 fractional indexing (`sort_order`)
 
 
 ## DBs
@@ -42,23 +43,26 @@ this should only be done at application start up.
 
 To populate the tree we do as follows:
 ```GO
+ctx := context.Background()
+
 colorTag := Tag{Name: "colors"}
-err := tree.Add(&colorTag, 0, "user1") // add a node to the root
+err := tree.Add(ctx, &colorTag, 0, 0, "user1") // add a node to the root (afterNodeID=0 → place first)
 // handle error
 
 warmColor := Tag{Name: "warm"}
-err = tree.Add(&warmColor, colorTag.Id(), "user1") // add a node bellow "colors"
+err = tree.Add(ctx, &warmColor, colorTag.Id(), 0, "user1") // add a node below "colors"
 // handle error
-	
+
 ```
-Note that the Id field is populated if you pase a node pointer, this allows to use it to reference new children, 
-also, id 0 is the root node.
+Note that the `Id()` method returns the node ID once the struct has been passed as a pointer to `Add`.
+Id `0` is the root node. The `afterNodeID` parameter controls sort order among siblings — pass `0` to
+place the node first, or pass a sibling's ID to insert immediately after it.
 
 Once populated we can query the tree (get all descendants)
 
 ```GO
 parentId := uint(0)
-descendantsIds, err:= tree.DescendantIds(parentId, 0, "user1")
+descendantsIds, err := tree.DescendantIds(ctx, parentId, 0, "user1")
 // handle error
 ```
 This will return a flat list of all children to the passed parent id, in this case 0 is all.
@@ -102,7 +106,7 @@ type Book struct {
 }
 
 // get all the ids of a specific type
-tags, _ := tree.DescendantIds(2, 0, tenant)
+tags, _ := tree.DescendantIds(ctx, 2, 0, tenant)
 
 // use Gorm pn your leaves 
 var gotBooks []Book
@@ -114,6 +118,40 @@ db.Model(&Book{}).InnerJoins("INNER JOIN books_tags ON books.id = books_tags.boo
 ```
 
 
+### Sort order
+
+Each node carries a `SortOrder float64` field (stored as `REAL`/`DOUBLE` in the database). The library
+manages this value automatically — callers never set it directly.
+
+**Placing nodes:** both `Add` and `Update` accept an `afterNodeID` parameter:
+
+| `afterNodeID` | Behaviour |
+|---|---|
+| `0` | Place first among siblings |
+| `someID` | Place immediately after that sibling |
+
+**Maintenance:** float64 bisection has finite precision. After many insertions between the same two nodes
+the gap eventually exhausts. Use the renormalize API to reset spacing:
+
+```GO
+// Check a specific parent
+needs, err := tree.NeedsRenormalize(ctx, parentID, "user1", ct.DefaultHalvingsBuffer)
+
+// Check any parent across the whole tenant
+needs, err := tree.NeedsRenormalizeAny(ctx, "user1", ct.DefaultHalvingsBuffer)
+
+// Fix a specific parent
+err = tree.Renormalize(ctx, parentID, "user1")
+
+// Fix all parents that need it; returns the count of groups renormalized
+n, err := tree.RenormalizeAll(ctx, "user1", ct.DefaultHalvingsBuffer)
+```
+
+`DefaultHalvingsBuffer = 15` means the check fires when ≤15 bisections remain before a
+collision — roughly 36 insertions before true exhaustion at the tightest gap. Call
+`NeedsRenormalizeAny` periodically (e.g. after each write batch) and `RenormalizeAll`
+when it returns `true`.
+
 ---
 
 For detailed usage check out the examples in [example_test.go]
@@ -122,19 +160,35 @@ For detailed usage check out the examples in [example_test.go]
 
 this is a quick overview of the exposed methods, check the actual signature/doc for details.
 
-* `New(db *gorm.DB, item any) (*Tree, error)` Return a new tree instance
-* `GetNodeTableName` Return the table name of the nodes you store
-* `GetClosureTableName` Return the table name of the closure tree relationship
-* `Add` Adds a new node to the tree under the specified parent.
-* `Update` Updates a node with specified ID and payload
-* `Move` Move a node from pne parent to another one.
-* `DeleteRecurse` Deletes all of the children for a given ID.
-* `GetNode` Load a single item.
-* `Descendants` Loads a pointer of a slice a flat list of all nested children of specific parent
-* `DescendantIds` Return a flat list of nesterd children of specific parent.
-* `TreeDescendants` Loads a part of the tree into a nested slice of pointers with Children field
-* `TreeDescendantsIds` Return a nested struct that contains all nesterd children of specific parent.
-* `func SortTree(nodes []*TreeNode)` Helper function to sort a TreeNode by ID
+**Tree management**
+* `New(db *gorm.DB, item any) (*Tree, error)` — Return a new tree instance (runs AutoMigrate)
+* `GetNodeTableName() string` — Return the table name of the nodes you store
+* `GetClosureTableName() string` — Return the table name of the closure tree relationship
+
+**Write operations**
+* `Add(ctx, item, parentID, afterNodeID, tenant)` — Add a new node; `afterNodeID=0` places it first among siblings
+* `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect
+* `DeleteRecurse(ctx, nodeId, tenant)` — Delete a node and all its descendants
+
+**Read operations**
+* `GetNode(ctx, nodeID, tenant, item)` — Load a single node into `item`
+* `IsDescendant(ctx, ancestorID, descendantID, tenant) (bool, error)` — Check ancestry
+* `IsChildOf(ctx, nodeID, parentID, tenant) (bool, error)` — Check direct parent relationship
+* `Descendants(ctx, parent, maxDepth, tenant, items)` — Flat list of all nested children (ordered by `sort_order ASC, node_id ASC`)
+* `DescendantIds(ctx, parent, maxDepth, tenant) ([]uint, error)` — Same, IDs only
+* `TreeDescendants(ctx, parent, maxDepth, tenant, items)` — Nested tree via `Children []*T` field
+* `TreeDescendantsIds(ctx, parent, maxDepth, tenant) ([]*TreeNode, error)` — Nested `TreeNode` structs
+* `GetLeaves(items, parentId, maxDepth, tenant)` — Many-to-many leaves via GORM `many2many:` tag
+
+**Sort-order maintenance**
+* `Renormalize(ctx, parentID, tenant)` — Rewrite children of `parentID` with evenly spaced `sort_order` values (10, 20, 30, …)
+* `NeedsRenormalize(ctx, parentID, tenant, halvingsBuffer) (bool, error)` — O(1) check; returns `true` when ≤`halvingsBuffer` bisections remain
+* `NeedsRenormalizeAny(ctx, tenant, halvingsBuffer) (bool, error)` — Same check across all parents in a tenant
+* `RenormalizeAll(ctx, tenant, halvingsBuffer) (int, error)` — Renormalize every group that needs it; returns count renormalized
+* `const DefaultHalvingsBuffer = 15` — Recommended threshold for the above methods
+
+**Utility**
+* `SortTree(nodes []*TreeNode)` — Sort a `[]*TreeNode` slice recursively by `(sort_order ASC, node_id ASC)`
 
 ## Development
 
@@ -161,4 +215,3 @@ now the sqlite files will be placed in ./ and can be inspected
 ## TODO
 * improve example_test.go
 * example of getting items between 2 trees, e.g. tag or tag b AND stars >= 5
-* add sort column and functions to change the sort order
