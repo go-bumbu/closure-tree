@@ -118,6 +118,37 @@ db.Model(&Book{}).InnerJoins("INNER JOIN books_tags ON books.id = books_tags.boo
 ```
 
 
+### Get-or-create for derived data
+
+When a tree is built from *derived* data — domain/subdomain hierarchies, filesystem-like paths,
+imported categories — the same node is seen repeatedly and must attach to the existing node
+instead of minting a duplicate. `GetOrAdd` is an idempotent get-or-create for a direct child; it
+uses query-by-example to find an existing match and chains cleanly to build a path:
+
+```GO
+// Build a derived path a -> b -> c; re-deriving a shared prefix reuses existing nodes.
+parent := uint(0)
+for _, name := range []string{"a", "b", "c"} {
+    node := &Tag{Name: name}
+    created, err := tree.GetOrAdd(ctx, node, parent, "user1", Tag{Name: name})
+    // handle error; `created` reports whether a new node was inserted
+    parent = node.NodeId // the id becomes the parent of the next level down
+}
+```
+
+`match` is compared by its non-zero exported fields only (the embedded `Node` is ignored), scoped
+to the tenant; `parentID = 0` operates on the root level. Use `FindChild` for the lookup alone:
+
+```GO
+var out Tag
+found, err := tree.FindChild(ctx, parentID, "user1", Tag{Name: "b"}, &out)
+```
+
+`GetOrAdd` wraps the find and the add in a single transaction, so a node is never left half
+created. It does **not** fully serialize two callers creating the *same brand-new* child
+concurrently (there is no row to lock until it exists), so either serialize such imports (e.g. a
+single worker) or deduplicate afterwards. Re-adding an already-existing child is race-free.
+
 ### Sort order
 
 Each node carries a `SortOrder float64` field (stored as `REAL`/`DOUBLE` in the database). The library
@@ -167,11 +198,13 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 
 **Write operations**
 * `Add(ctx, item, parentID, afterNodeID, tenant)` — Add a new node; `afterNodeID=0` places it first among siblings
+* `GetOrAdd(ctx, item, parentID, tenant, match) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect
 * `DeleteRecurse(ctx, nodeId, tenant)` — Delete a node and all its descendants
 
 **Read operations**
 * `GetNode(ctx, nodeID, tenant, item)` — Load a single node into `item`
+* `FindChild(ctx, parentID, tenant, match, out) (found bool, err error)` — Find a direct child by query-by-example (the non-zero fields of `match`), tenant-scoped; populates `out` like `GetNode`
 * `IsDescendant(ctx, ancestorID, descendantID, tenant) (bool, error)` — Check ancestry
 * `IsChildOf(ctx, nodeID, parentID, tenant) (bool, error)` — Check direct parent relationship
 * `Descendants(ctx, parent, maxDepth, tenant, items)` — Flat list of all nested children (ordered by `sort_order ASC, node_id ASC`)
