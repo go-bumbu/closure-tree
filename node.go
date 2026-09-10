@@ -32,7 +32,7 @@ func hasNode(item any) bool {
 	}
 
 	itemType := reflect.TypeOf(item)
-	if itemType.Kind() == reflect.Ptr {
+	if itemType.Kind() == reflect.Pointer {
 		itemType = itemType.Elem()
 	}
 
@@ -104,7 +104,7 @@ func dereference(item interface{}) (reflect.Type, reflect.Value) {
 	t := reflect.TypeOf(item)
 	v := reflect.ValueOf(item)
 
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 		v = v.Elem()
 	}

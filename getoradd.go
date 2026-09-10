@@ -31,7 +31,7 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 	if err != nil {
 		return false, err
 	}
-	if reflect.TypeOf(out).Kind() != reflect.Ptr {
+	if reflect.TypeOf(out).Kind() != reflect.Pointer {
 		return false, ErrItemNotPointerToStruct
 	}
 
@@ -117,7 +117,7 @@ func (ct *Tree) buildMatchConditions(match any) (string, []any, error) {
 	}
 
 	v := reflect.ValueOf(match)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 

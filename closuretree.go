@@ -303,7 +303,7 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, afterNodeID ui
 // reports whether item was passed as a pointer; t is the (dereferenced) struct type.
 func stripNodeCopy(item any) (reflectItem any, t reflect.Type, itemIsPointer bool) {
 	t = reflect.TypeOf(item)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 		itemIsPointer = true
 	}
@@ -674,7 +674,7 @@ func (ct *Tree) NeedsRenormalizeAny(ctx context.Context, tenant string, halvings
 func (ct *Tree) buildUpdateMap(item any, id uint, tenant string) (map[string]any, error) {
 	t := reflect.TypeOf(item)
 	itemIsPointer := false
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 		itemIsPointer = true
 	}
@@ -886,7 +886,7 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 	}
 	t := reflect.TypeOf(item)
 
-	if t.Kind() != reflect.Ptr {
+	if t.Kind() != reflect.Pointer {
 		return ErrItemNotPointerToStruct
 	}
 
@@ -958,7 +958,7 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 	}
 
 	itemsVal := reflect.ValueOf(items)
-	if itemsVal.Kind() != reflect.Ptr {
+	if itemsVal.Kind() != reflect.Pointer {
 		return errors.New("items must be a pointer to a slice")
 	}
 	sliceVal := itemsVal.Elem()
@@ -1112,7 +1112,7 @@ func validateItems(items any) error {
 		return errors.New("items cannot be nil")
 	}
 	itemsVal := reflect.ValueOf(items)
-	if itemsVal.Kind() != reflect.Ptr {
+	if itemsVal.Kind() != reflect.Pointer {
 		return errors.New("items must be a pointer to a slice")
 	}
 	sliceVal := itemsVal.Elem()
@@ -1120,7 +1120,7 @@ func validateItems(items any) error {
 		return errors.New("items must point to a slice")
 	}
 	elemType := sliceVal.Type().Elem()
-	if elemType.Kind() != reflect.Ptr || elemType.Elem().Kind() != reflect.Struct {
+	if elemType.Kind() != reflect.Pointer || elemType.Elem().Kind() != reflect.Struct {
 		return errors.New("slice element type must be a pointer to a struct")
 	}
 	return nil
@@ -1172,7 +1172,7 @@ func toInt64(v any) (int64, bool) {
 		if uint64(n) > math.MaxInt64 {
 			return 0, false
 		}
-		return int64(n), true //nolint:gosec // overflow guarded by check above
+		return int64(n), true
 	case uint32:
 		return int64(n), true
 	case uint64:
