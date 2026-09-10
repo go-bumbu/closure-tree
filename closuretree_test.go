@@ -140,7 +140,7 @@ func TestMetaTableCreated(t *testing.T) {
 //nolint:gosec // int conversion is not critical here
 func getNodeDetails(item any) (bool, int, string) {
 	itemValue := reflect.ValueOf(item)
-	if itemValue.Kind() == reflect.Ptr {
+	if itemValue.Kind() == reflect.Pointer {
 		itemValue = itemValue.Elem()
 	}
 	if itemValue.Kind() != reflect.Struct {

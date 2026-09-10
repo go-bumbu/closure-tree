@@ -33,6 +33,7 @@ var (
 	ErrNodeNotFound           = errors.New("node not found")
 	ErrInvalidMove            = errors.New("invalid move")
 	ErrItemNotPointerToStruct = errors.New("item needs to be a pointer to a struct")
+	ErrEmptyMatch             = errors.New("match has no non-zero fields to match on")
 	ErrNoOp                   = errors.New("update called with no item, no new parent, and no new sort order")
 	ErrInvalidAfterNode       = errors.New("afterNodeID is not a sibling of the target parent")
 	ErrAfterNodeIsSelf        = errors.New("afterNodeID cannot be the node itself")
@@ -270,8 +271,6 @@ func validateTenant(in string) (string, error) {
 
 // Add will add a new entry into the node Database under a specific parent and owned to a specific tenant
 // Note: the passed item has to embed a Node struct, but any value added to the Node will be ignored
-//
-//nolint:gocyclo // excluding from linter since implementation was done before we enabled the linter
 func (ct *Tree) Add(ctx context.Context, item any, parentID uint, afterNodeID uint, tenant string) error {
 	if !hasNode(item) {
 		return ErrItemIsNotTreeNode
@@ -282,108 +281,127 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, afterNodeID ui
 		return err
 	}
 
-	t := reflect.TypeOf(item)
-	itemIsPointer := false
-	if t.Kind() == reflect.Ptr {
+	reflectItem, t, itemIsPointer := stripNodeCopy(item)
+
+	err = ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return ct.addInTx(tx, reflectItem, t, parentID, afterNodeID, tenant)
+	})
+	if err != nil {
+		return err
+	}
+
+	// if the item is a pointer copy the Node (including the new NodeId) back into it
+	if itemIsPointer {
+		copyNodeBack(item, reflectItem, t)
+	}
+
+	return nil
+}
+
+// stripNodeCopy returns a fresh, addressable copy of item (dereferenced if a pointer) so
+// that any value the caller set on the embedded Node is ignored on write. itemIsPointer
+// reports whether item was passed as a pointer; t is the (dereferenced) struct type.
+func stripNodeCopy(item any) (reflectItem any, t reflect.Type, itemIsPointer bool) {
+	t = reflect.TypeOf(item)
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 		itemIsPointer = true
 	}
-	reflectItem := reflect.New(t).Interface()
+	reflectItem = reflect.New(t).Interface()
 	if itemIsPointer {
 		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item).Elem())
 	} else {
 		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item))
 	}
+	return reflectItem, t, itemIsPointer
+}
 
-	err = ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Check if the parent node exists and the tenant is the same (inside tx to avoid TOCTOU)
-		if parentID != 0 {
-			var parent Node
-			err := tx.Table(ct.nodesTbl).
-				Where("node_id = ? AND tenant = ?", parentID, tenant).
-				First(&parent).Error
-			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return ErrParentNotFound
-				}
-				return fmt.Errorf("unable to check parent node: %w", err)
+// copyNodeBack copies the embedded Node field (including NodeId, Tenant and SortOrder) from
+// src into dst. Both must point to structs of the same type t that embed Node. Caller payload
+// fields on dst are left untouched.
+func copyNodeBack(dst, src any, t reflect.Type) {
+	srcV := reflect.ValueOf(src).Elem()
+	dstV := reflect.ValueOf(dst).Elem()
+	if srcNode, ok := findNodeValue(t, srcV); ok {
+		if dstNode, ok := findNodeValue(t, dstV); ok && dstNode.CanSet() {
+			dstNode.Set(srcNode)
+		}
+	}
+}
+
+// addInTx runs the node-creation body of Add inside an existing transaction: it validates
+// the parent and afterNodeID, computes the sort order, creates the node row and its closure
+// relationships. reflectItem must be a fresh (Node-stripped) copy of the caller's item and t
+// its type; on success reflectItem holds the newly assigned NodeId. tenant must already be
+// validated. Must be called inside a transaction.
+func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, afterNodeID uint, tenant string) error {
+	// Check if the parent node exists and the tenant is the same (inside tx to avoid TOCTOU)
+	if parentID != 0 {
+		var parent Node
+		err := tx.Table(ct.nodesTbl).
+			Where("node_id = ? AND tenant = ?", parentID, tenant).
+			First(&parent).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrParentNotFound
 			}
+			return fmt.Errorf("unable to check parent node: %w", err)
 		}
+	}
 
-		// Validate afterNodeID is a sibling of parentID (if non-zero)
-		if afterNodeID != 0 {
-			if err := ct.validateAfterNode(tx, parentID, afterNodeID, tenant); err != nil {
-				return err
-			}
-		}
-		// Compute the sort order for the new node
-		sortOrder, halvings, err := ct.computeSortOrder(tx, parentID, afterNodeID, tenant)
-		if err != nil {
-			return fmt.Errorf("unable to compute sort order: %w", err)
-		}
-		if err := ct.upsertMetaHalvings(tx, parentID, tenant, halvings); err != nil {
-			return fmt.Errorf("unable to update sort order metadata: %w", err)
-		}
-
-		// Set Node fields (including SortOrder) on the item before Create
-		v := reflect.ValueOf(reflectItem).Elem()
-		if nodeField, ok := findNodeValue(t, v); ok && nodeField.CanSet() {
-			nodeField.Set(reflect.ValueOf(Node{NodeId: 0, Tenant: tenant, SortOrder: sortOrder}))
-		}
-
-		// create the Node item
-		err = tx.Table(ct.nodesTbl).Create(reflectItem).Error
-		if err != nil {
-			return fmt.Errorf("unable to add node: %w", err)
-		}
-
-		id, gotTennant, err := getNodeData(reflectItem)
-		if err != nil {
-			return fmt.Errorf("unable to get Item ID: %w", err)
-		}
-
-		// Add reflexive relationship
-		err = tx.Table(ct.relationsTbl).Create(&closureTree{AncestorID: id, DescendantID: id, Tenant: gotTennant, Depth: 0}).Error
-		if err != nil {
+	// Validate afterNodeID is a sibling of parentID (if non-zero)
+	if afterNodeID != 0 {
+		if err := ct.validateAfterNode(tx, parentID, afterNodeID, tenant); err != nil {
 			return err
 		}
+	}
+	// Compute the sort order for the new node
+	sortOrder, halvings, err := ct.computeSortOrder(tx, parentID, afterNodeID, tenant)
+	if err != nil {
+		return fmt.Errorf("unable to compute sort order: %w", err)
+	}
+	if err := ct.upsertMetaHalvings(tx, parentID, tenant, halvings); err != nil {
+		return fmt.Errorf("unable to update sort order metadata: %w", err)
+	}
 
-		if parentID == 0 {
-			// Create a root note relationship
-			sqlstr := fmt.Sprintf(addRootRelQuery, ct.relationsTbl)
-			ex := tx.Exec(sqlstr, id, gotTennant)
-			if ex.Error != nil {
-				return ex.Error
-			}
-		} else {
-			// Copy all ancestors of the parent to include the new tag
-			sqlstr := fmt.Sprintf(addRelsQuery, ct.relationsTbl, ct.relationsTbl)
-			ex := tx.Exec(sqlstr, id, gotTennant, parentID, gotTennant)
-			if ex.Error != nil {
-				return ex.Error
-			}
-		}
-		return nil
-	})
+	// Set Node fields (including SortOrder) on the item before Create
+	v := reflect.ValueOf(reflectItem).Elem()
+	if nodeField, ok := findNodeValue(t, v); ok && nodeField.CanSet() {
+		nodeField.Set(reflect.ValueOf(Node{NodeId: 0, Tenant: tenant, SortOrder: sortOrder}))
+	}
 
+	// create the Node item
+	err = tx.Table(ct.nodesTbl).Create(reflectItem).Error
+	if err != nil {
+		return fmt.Errorf("unable to add node: %w", err)
+	}
+
+	id, gotTennant, err := getNodeData(reflectItem)
+	if err != nil {
+		return fmt.Errorf("unable to get Item ID: %w", err)
+	}
+
+	// Add reflexive relationship
+	err = tx.Table(ct.relationsTbl).Create(&closureTree{AncestorID: id, DescendantID: id, Tenant: gotTennant, Depth: 0}).Error
 	if err != nil {
 		return err
 	}
 
-	// if topItem is a pointer copy the ID back into it
-	if itemIsPointer {
-		srcT := reflect.TypeOf(reflectItem).Elem()
-		srcV := reflect.ValueOf(reflectItem).Elem()
-		dstT := reflect.TypeOf(item).Elem()
-		dstV := reflect.ValueOf(item).Elem()
-
-		if srcNode, ok := findNodeValue(srcT, srcV); ok {
-			if dstNode, ok := findNodeValue(dstT, dstV); ok && dstNode.CanSet() {
-				dstNode.Set(srcNode)
-			}
+	if parentID == 0 {
+		// Create a root note relationship
+		sqlstr := fmt.Sprintf(addRootRelQuery, ct.relationsTbl)
+		ex := tx.Exec(sqlstr, id, gotTennant)
+		if ex.Error != nil {
+			return ex.Error
+		}
+	} else {
+		// Copy all ancestors of the parent to include the new tag
+		sqlstr := fmt.Sprintf(addRelsQuery, ct.relationsTbl, ct.relationsTbl)
+		ex := tx.Exec(sqlstr, id, gotTennant, parentID, gotTennant)
+		if ex.Error != nil {
+			return ex.Error
 		}
 	}
-
 	return nil
 }
 
@@ -654,18 +672,7 @@ func (ct *Tree) NeedsRenormalizeAny(ctx context.Context, tenant string, halvings
 
 // buildUpdateMap builds the column→value map for an Update call using reflection.
 func (ct *Tree) buildUpdateMap(item any, id uint, tenant string) (map[string]any, error) {
-	t := reflect.TypeOf(item)
-	itemIsPointer := false
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-		itemIsPointer = true
-	}
-	reflectItem := reflect.New(t).Interface()
-	if itemIsPointer {
-		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item).Elem())
-	} else {
-		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item))
-	}
+	reflectItem, t, _ := stripNodeCopy(item)
 	v := reflect.ValueOf(reflectItem).Elem()
 	if nodeField, ok := findNodeValue(t, v); ok && nodeField.CanSet() {
 		nodeField.Set(reflect.ValueOf(Node{NodeId: id, Tenant: tenant}))
@@ -868,7 +875,7 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 	}
 	t := reflect.TypeOf(item)
 
-	if t.Kind() != reflect.Ptr {
+	if t.Kind() != reflect.Pointer {
 		return ErrItemNotPointerToStruct
 	}
 
@@ -940,7 +947,7 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 	}
 
 	itemsVal := reflect.ValueOf(items)
-	if itemsVal.Kind() != reflect.Ptr {
+	if itemsVal.Kind() != reflect.Pointer {
 		return errors.New("items must be a pointer to a slice")
 	}
 	sliceVal := itemsVal.Elem()
@@ -1094,7 +1101,7 @@ func validateItems(items any) error {
 		return errors.New("items cannot be nil")
 	}
 	itemsVal := reflect.ValueOf(items)
-	if itemsVal.Kind() != reflect.Ptr {
+	if itemsVal.Kind() != reflect.Pointer {
 		return errors.New("items must be a pointer to a slice")
 	}
 	sliceVal := itemsVal.Elem()
@@ -1102,7 +1109,7 @@ func validateItems(items any) error {
 		return errors.New("items must point to a slice")
 	}
 	elemType := sliceVal.Type().Elem()
-	if elemType.Kind() != reflect.Ptr || elemType.Elem().Kind() != reflect.Struct {
+	if elemType.Kind() != reflect.Pointer || elemType.Elem().Kind() != reflect.Struct {
 		return errors.New("slice element type must be a pointer to a struct")
 	}
 	return nil
@@ -1154,7 +1161,7 @@ func toInt64(v any) (int64, bool) {
 		if uint64(n) > math.MaxInt64 {
 			return 0, false
 		}
-		return int64(n), true //nolint:gosec // overflow guarded by check above
+		return int64(n), true
 	case uint32:
 		return int64(n), true
 	case uint64:

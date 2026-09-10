@@ -408,6 +408,40 @@ func ExampleTree_Add_sortOrder() {
 	// banana
 }
 
+// ExampleTree_GetOrAdd shows idempotent get-or-create for a tree built from derived data.
+// Re-deriving a path that shares a prefix reuses the existing nodes instead of duplicating them.
+func ExampleTree_GetOrAdd() {
+	db := getGormDb("getOrAdd.example")
+	tree, _ := ct.New(db, Tag{})
+
+	tenant := "sampleTenant"
+	ctx := context.Background()
+
+	// addPath walks a derived path from the root, attaching to existing nodes when they are
+	// already there. The returned NodeId is chained as the parent of the next level down.
+	addPath := func(names ...string) {
+		parent := uint(0)
+		for _, name := range names {
+			node := &Tag{Name: name}
+			created, _ := tree.GetOrAdd(ctx, node, parent, tenant, Tag{Name: name})
+			fmt.Printf("%s: id=%d created=%t\n", name, node.NodeId, created)
+			parent = node.NodeId
+		}
+	}
+
+	addPath("a", "b", "c")
+	// "a" and "b" already exist and are reused (created=false); only "d" is new.
+	addPath("a", "b", "d")
+
+	// Output:
+	// a: id=1 created=true
+	// b: id=2 created=true
+	// c: id=3 created=true
+	// a: id=1 created=false
+	// b: id=2 created=false
+	// d: id=4 created=true
+}
+
 func handleErr(err error) {
 	if err != nil {
 		fmt.Printf("[ERROR] %s\n", err.Error())

@@ -33,7 +33,7 @@ func isLeaveSlice(item any) error {
 	itemType := reflect.TypeOf(item)
 
 	// Ensure item is a pointer
-	if itemType.Kind() != reflect.Ptr {
+	if itemType.Kind() != reflect.Pointer {
 		return fmt.Errorf("item is not a pointer")
 	}
 

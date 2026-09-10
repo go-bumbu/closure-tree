@@ -1,6 +1,6 @@
 module github.com/go-bumbu/closure-tree
 
-go 1.23.4
+go 1.25.4
 
 require (
 	github.com/glebarez/sqlite v1.11.0

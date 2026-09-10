@@ -27,27 +27,32 @@ benchmark: ## run go benchmarks
 	@go test -run=^$$ -bench=. ./...
 
 .PHONY: verify
-verify: lint test-full license-check benchmark coverage ## run all tests
+verify: ## run all checks; runs every check and fails if any fail
+	@fail=0; \
+	for target in lint test-full license-check benchmark coverage; do \
+		echo "==================== make $$target ===================="; \
+		$(MAKE) --no-print-directory $$target || fail=1; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+		echo "❌ verify failed (see above)"; \
+		exit 1; \
+	fi; \
+	echo "✅ verify passed"
 
 # Default coverage threshold is 80
 COVERAGE_THRESHOLD ?= 80
 
 .PHONY: coverage
-coverage: ## check code coverage numbers
-	@go test -coverprofile=coverage.out -covermode=atomic ./ > /dev/null; \
-	if [ -f coverage.out ]; then \
-		coverage=$$(go tool cover -func=coverage.out | grep total: | awk '{print $$3}' | sed 's/%//'); \
-		if [ $$(echo "$$coverage < $(COVERAGE_THRESHOLD)" | bc -l) -eq 1 ]; then \
-			echo "❌ Test coverage is below $(COVERAGE_THRESHOLD)%! Actual: $$coverage%"; \
-			exit 1; \
-		else \
-			echo "✅ Test coverage is $$coverage%"; \
-		fi; \
-		rm -f coverage.out; \
-	else \
-		echo "⚠️ No test coverage data found"; \
-		exit 1; \
-	fi
+coverage: ## check code coverage per package
+	@out=$$(go test -cover -covermode=atomic ./...) || { echo "$$out"; exit 1; }; \
+	echo "$$out" | awk -v threshold=$(COVERAGE_THRESHOLD) ' \
+		/\[no test files\]/ { printf "⚠️  %-70s no test files\n", $$2; next } \
+		/coverage:/ { \
+			for (i = 1; i <= NF; i++) if ($$i == "coverage:") { cov = $$(i+1); sub(/%/, "", cov); break }; \
+			if (cov + 0 < threshold) { printf "❌ %-70s %s%% (below %s%%)\n", $$2, cov, threshold; fail = 1 } \
+			else { printf "✅ %-70s %s%%\n", $$2, cov } \
+		} \
+		END { exit fail }'
 
 cover-report: ## generate a coverage report
 	go test -covermode=count -coverpkg=./... -coverprofile cover.out  ./...
