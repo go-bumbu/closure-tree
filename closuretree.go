@@ -672,18 +672,7 @@ func (ct *Tree) NeedsRenormalizeAny(ctx context.Context, tenant string, halvings
 
 // buildUpdateMap builds the column→value map for an Update call using reflection.
 func (ct *Tree) buildUpdateMap(item any, id uint, tenant string) (map[string]any, error) {
-	t := reflect.TypeOf(item)
-	itemIsPointer := false
-	if t.Kind() == reflect.Pointer {
-		t = t.Elem()
-		itemIsPointer = true
-	}
-	reflectItem := reflect.New(t).Interface()
-	if itemIsPointer {
-		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item).Elem())
-	} else {
-		reflect.ValueOf(reflectItem).Elem().Set(reflect.ValueOf(item))
-	}
+	reflectItem, t, _ := stripNodeCopy(item)
 	v := reflect.ValueOf(reflectItem).Elem()
 	if nodeField, ok := findNodeValue(t, v); ok && nodeField.CanSet() {
 		nodeField.Set(reflect.ValueOf(Node{NodeId: id, Tenant: tenant}))

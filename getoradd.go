@@ -94,8 +94,11 @@ func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant st
 
 	if itemIsPointer {
 		if created {
-			// created path: preserve the caller's payload, set the new Node (matches Add)
+			// created path: preserve the caller's payload, set the new Node (matches Add).
+			// addInTx leaves the read-only ParentId at 0, so set it explicitly to keep both
+			// paths consistent with the found path (which hydrates ParentId from the row).
 			copyNodeBack(item, reflectItem, t)
+			setNodeParentID(item, t, parentID)
 		} else {
 			// found path: fully hydrate item from the loaded row (matches GetNode)
 			reflect.ValueOf(item).Elem().Set(reflect.ValueOf(reflectItem).Elem())
@@ -105,22 +108,33 @@ func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant st
 	return created, nil
 }
 
+// setNodeParentID sets the embedded Node's read-only ParentId field on dst (a pointer to a
+// struct of type t) to parentID, so GetOrAdd's created path reports the same ParentId the found
+// path hydrates from the row.
+func setNodeParentID(dst any, t reflect.Type, parentID uint) {
+	nodeVal, ok := findNodeValue(t, reflect.ValueOf(dst).Elem())
+	if !ok {
+		return
+	}
+	if pf := nodeVal.FieldByName("ParentId"); pf.IsValid() && pf.CanSet() {
+		pf.SetUint(uint64(parentID))
+	}
+}
+
 // buildMatchConditions builds the WHERE fragment and bind args for a query-by-example match.
 // It uses only the non-zero exported fields of match that are NOT owned by the embedded Node
-// (so NodeId, Tenant, SortOrder and the read-only ParentId are always ignored). Column names
-// come from the parsed GORM schema, never from user input; the values are returned as bind
-// args. Returns ErrEmptyMatch when no usable non-zero field is present.
+// (so NodeId, Tenant, SortOrder and the read-only ParentId are always ignored). Field values are
+// read via GORM's schema accessor, so fields contributed by a gorm-embedded sub-struct are
+// matched too; column identifiers are dialect-quoted, so a field mapping to a reserved-word
+// column still produces valid SQL. Values are returned as bind args. Returns ErrEmptyMatch when
+// no usable non-zero field is present.
 func (ct *Tree) buildMatchConditions(match any) (string, []any, error) {
 	stmt := &gorm.Statement{DB: ct.db}
 	if err := stmt.Parse(match); err != nil {
 		return "", nil, fmt.Errorf("unable to parse match schema: %w", err)
 	}
 
-	v := reflect.ValueOf(match)
-	if v.Kind() == reflect.Pointer {
-		v = v.Elem()
-	}
-
+	rv := reflect.Indirect(reflect.ValueOf(match))
 	nodeType := reflect.TypeOf(Node{})
 	var conds []string
 	var args []any
@@ -131,12 +145,14 @@ func (ct *Tree) buildMatchConditions(match any) (string, []any, error) {
 		if f.OwnerSchema != nil && f.OwnerSchema.ModelType == nodeType {
 			continue
 		}
-		fieldVal := v.FieldByName(f.Name)
-		if !fieldVal.IsValid() || fieldVal.IsZero() {
+		val, isZero := f.ValueOf(context.Background(), rv)
+		if isZero {
 			continue
 		}
-		conds = append(conds, fmt.Sprintf("nodes.%s = ?", f.DBName))
-		args = append(args, fieldVal.Interface())
+		var b strings.Builder
+		ct.db.QuoteTo(&b, "nodes."+f.DBName)
+		conds = append(conds, b.String()+" = ?")
+		args = append(args, val)
 	}
 	if len(conds) == 0 {
 		return "", nil, ErrEmptyMatch

@@ -592,6 +592,53 @@ func TestGetOrAddConcurrent(t *testing.T) {
 	}
 }
 
+// TestGetOrAddParentIdBothPaths asserts item.ParentId is populated consistently to parentID on
+// both the created and the found path (not left 0 on the created path).
+func TestGetOrAddParentIdBothPaths(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+
+			root := &TestPayload{Name: "root"}
+			if err := ct.Add(ctx, root, 0, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			// created path: ParentId must be set to the parent
+			child := &TestPayload{Name: "child"}
+			created, err := ct.GetOrAdd(ctx, child, root.NodeId, tenant1, TestPayload{Name: "child"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !created {
+				t.Fatalf("want created=true")
+			}
+			if child.ParentId != root.NodeId {
+				t.Errorf("created path: ParentId = %d, want %d", child.ParentId, root.NodeId)
+			}
+
+			// found path: ParentId must match too
+			child2 := &TestPayload{Name: "child"}
+			created, err = ct.GetOrAdd(ctx, child2, root.NodeId, tenant1, TestPayload{Name: "child"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if created {
+				t.Fatalf("want created=false")
+			}
+			if child2.ParentId != root.NodeId {
+				t.Errorf("found path: ParentId = %d, want %d", child2.ParentId, root.NodeId)
+			}
+		})
+	}
+}
+
 func mustAdd(t *testing.T, ct *closuretree.Tree, item any, parentID uint, tenant string) {
 	t.Helper()
 	if err := ct.Add(context.Background(), item, parentID, 0, tenant); err != nil {
