@@ -169,10 +169,16 @@ func (ct *Tree) ClosureTableName() string {
 // represents the table that store the relationships
 // Note: if upgrading from a previous version, manually run: DROP INDEX idx_desc_ten
 type closureTree struct {
-	AncestorID   uint   `gorm:"not null;index:idx_anc_ten_dep,composite:1;uniqueIndex:idx_closure_uniq,composite:a"`
-	DescendantID uint   `gorm:"not null;index:idx_desc_ten_dep,composite:1;uniqueIndex:idx_closure_uniq,composite:b"`
-	Tenant       string `gorm:"not null;index:idx_anc_ten_dep,composite:2;index:idx_desc_ten_dep,composite:2;uniqueIndex:idx_closure_uniq,composite:c"`
-	Depth        int    `gorm:"not null;default:0;check:chk_depth,depth >= 0;index:idx_anc_ten_dep,composite:3;index:idx_desc_ten_dep,composite:3;uniqueIndex:idx_closure_uniq,composite:d"`
+	// Index names use GORM's empty-name composite form so each is scoped per closure table
+	// (idx_<reltable>_<id>). A hardcoded name would collide when two trees are migrated into one
+	// database, because index names are schema-global on SQLite/Postgres. priority preserves the
+	// column order: (ancestor_id, tenant, depth), (descendant_id, tenant, depth), and the unique
+	// (ancestor_id, descendant_id, tenant, depth). The depth check is likewise left unnamed so GORM
+	// scopes it per table (chk_<reltable>_depth) — MySQL check-constraint names are schema-global.
+	AncestorID   uint   `gorm:"not null;index:,composite:anc_ten_dep,priority:1;uniqueIndex:,composite:uniq,priority:1"`
+	DescendantID uint   `gorm:"not null;index:,composite:desc_ten_dep,priority:1;uniqueIndex:,composite:uniq,priority:2"`
+	Tenant       string `gorm:"not null;index:,composite:anc_ten_dep,priority:2;index:,composite:desc_ten_dep,priority:2;uniqueIndex:,composite:uniq,priority:3"`
+	Depth        int    `gorm:"not null;default:0;check:depth >= 0;index:,composite:anc_ten_dep,priority:3;index:,composite:desc_ten_dep,priority:3;uniqueIndex:,composite:uniq,priority:4"`
 }
 
 // closureTreeLock holds one anchor row per tenant. Every structural write locks its tenant's row
