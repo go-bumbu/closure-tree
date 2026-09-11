@@ -205,7 +205,7 @@ func (ct *Tree) Renormalize(ctx context.Context, parentID uint, tenant string) e
 	if err != nil {
 		return err
 	}
-	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) (txErr error) {
+	return ct.writeTx(ctx, tenant, func(tx *gorm.DB) (txErr error) {
 		sqlstr := fmt.Sprintf(`SELECT n.node_id FROM %s n
 JOIN %s r ON r.descendant_id = n.node_id AND r.depth = 1 AND r.tenant = n.tenant
 WHERE r.ancestor_id = ? AND n.tenant = ?

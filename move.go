@@ -86,7 +86,7 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint
 		}
 	}
 
-	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
 		if item != nil {
 			if err := ct.updateFieldsInTx(tx, id, updateMap, tenant); err != nil {
 				return err

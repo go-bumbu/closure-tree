@@ -60,12 +60,10 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // set them; on the found path item is fully overwritten with the stored row (like GetNode), so
 // any fields you set beyond the match are replaced by the existing node's values.
 //
-// Atomicity: the find and the add run in a single transaction, so a node is never left half
-// created. However this does NOT fully serialize two callers creating the same brand-new child
-// concurrently: because the child does not yet exist there is no row to lock, so both may pass
-// the find and insert, yielding two sibling nodes with the same content. If several callers may
-// race to create the same new child, serialize those calls (e.g. a single import worker) or
-// deduplicate afterwards. Re-adding an already-existing child is race-free.
+// Atomicity: the find and the add run in a single transaction that first takes the tree's
+// per-tenant write lock, so two callers racing to create the same brand-new child are serialized —
+// the first creates it and the second finds it (created=false), leaving no duplicate siblings. See
+// the concurrency note on Tree.
 func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant string, matchFields []string) (created bool, err error) {
 	if err = checkItem(item); err != nil {
 		return false, err
@@ -82,7 +80,7 @@ func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant st
 
 	reflectItem, t, itemIsPointer := stripNodeCopy(item)
 
-	err = ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
 		found, ferr := ct.findChildInTx(tx, parentID, tenant, whereSQL, whereArgs, reflectItem)
 		if ferr != nil {
 			return ferr

@@ -44,24 +44,25 @@ var (
 
 // Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items.
 //
-// Concurrency: a Tree is safe to share across goroutines, and each operation runs in its own
-// transaction. However, operations are NOT fully serialized against each other under the default
-// database isolation level, so a few cross-goroutine patterns can race:
-//   - GetOrAdd of the same not-yet-existing child from two goroutines can create duplicate
-//     siblings (there is no row to lock until one exists; see GetOrAdd).
-//   - Two conflicting moves (e.g. "move A under B" and "move B under A") can both commit and
-//     form a cycle.
-//   - Add under a parent racing DeleteRecurse of that parent can leave an orphaned node or
-//     stale closure rows.
+// Concurrency: a Tree is safe to share across goroutines. Every structural write (Add, Update,
+// DeleteRecurse, GetOrAdd, Renormalize) first takes a per-tenant lock, so writes within a tenant
+// serialize and cannot corrupt the tree. This prevents the patterns that would otherwise race under
+// the default isolation level: two conflicting moves ("move A under B" and "move B under A") forming
+// a cycle, Add racing DeleteRecurse of the same parent leaving orphaned nodes or stale closure rows,
+// and two GetOrAdd calls creating duplicate siblings. Writes for different tenants run concurrently,
+// and reads never take the lock.
 //
-// If your workload can hit these, serialize the affected calls (e.g. a single writer) or add
-// your own locking.
+// The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MySQL (released
+// when the transaction ends); on SQLite, which already serializes writers per database, it is the
+// anchor upsert. SQLite callers should set a busy_timeout so a waiting writer blocks briefly instead
+// of failing immediately with SQLITE_BUSY.
 type Tree struct {
 	db *gorm.DB
 	// table names, allows multiple trees
 	nodesTbl     string
 	relationsTbl string
 	metaTbl      string
+	lockTbl      string
 	col2FieldMap map[string]string
 	model        any // node model retained so Migrate can AutoMigrate it
 }
@@ -97,6 +98,7 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 	name := stmt.Schema.Table
 	relTbl := strings.ToLower(fmt.Sprintf("%s_%s", closureTblName, name))
 	metaTbl := strings.ToLower(fmt.Sprintf("closure_tree_meta_%s", name))
+	lockTbl := strings.ToLower(fmt.Sprintf("closure_tree_lock_%s", name))
 
 	if err := validateTableName(name); err != nil {
 		return nil, err
@@ -105,6 +107,9 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		return nil, err
 	}
 	if err := validateTableName(metaTbl); err != nil {
+		return nil, err
+	}
+	if err := validateTableName(lockTbl); err != nil {
 		return nil, err
 	}
 
@@ -121,14 +126,16 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		col2FieldMap: columnFieldMap,
 		relationsTbl: relTbl,
 		metaTbl:      metaTbl,
+		lockTbl:      lockTbl,
 		model:        item,
 	}
 
 	return ct, nil
 }
 
-// Migrate creates or updates the three tables this Tree manages — the node table, the closure
-// relationship table, and the sort-order metadata table — via GORM AutoMigrate. It is separate from
+// Migrate creates or updates the four tables this Tree manages — the node table, the closure
+// relationship table, the sort-order metadata table, and the per-tenant lock table — via GORM
+// AutoMigrate. It is separate from
 // New so that construction needs no DDL privilege and so migration can be run explicitly (e.g. once
 // at startup, guarded against concurrent runners). AutoMigrate is additive: it will not drop or
 // alter an existing index, so see the note on closureTree when upgrading a pre-0.10 schema.
@@ -141,6 +148,9 @@ func (ct *Tree) Migrate() error {
 	}
 	if err := ct.db.Table(ct.metaTbl).AutoMigrate(closureTreeMeta{}); err != nil {
 		return fmt.Errorf("unable to migrate meta table: %w", err)
+	}
+	if err := ct.db.Table(ct.lockTbl).AutoMigrate(closureTreeLock{}); err != nil {
+		return fmt.Errorf("unable to migrate lock table: %w", err)
 	}
 	return nil
 }
@@ -184,6 +194,14 @@ type closureTree struct {
 	Depth        int    `gorm:"not null;default:0;check:chk_depth,depth >= 0;index:idx_anc_ten_dep,composite:3;index:idx_desc_ten_dep,composite:3;uniqueIndex:idx_closure_uniq,composite:d"`
 }
 
+// closureTreeLock holds one anchor row per tenant. Every structural write locks its tenant's row
+// (SELECT ... FOR UPDATE, or the plain upsert on SQLite) as the first statement of its transaction,
+// so conflicting writes within a tenant serialize instead of racing on the lock-free guards. See
+// lockTenant.
+type closureTreeLock struct {
+	Tenant string `gorm:"not null;primaryKey"`
+}
+
 // DefaultTenant is used in the database as a stub if not tenant was passed
 const DefaultTenant = "DefaultTenant"
 
@@ -225,7 +243,7 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *
 	pid, aid := derefUint(parentID), derefUint(afterNodeID)
 	reflectItem, t, itemIsPointer := stripNodeCopy(item)
 
-	err = ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
 		return ct.addInTx(tx, reflectItem, t, pid, aid, tenant)
 	})
 	if err != nil {
@@ -368,7 +386,7 @@ func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) e
 	if err != nil {
 		return err
 	}
-	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
 
 		// delete the nodes
 		delNodesSql := fmt.Sprintf(deleteNodesRec, ct.nodesTbl, ct.relationsTbl, ct.nodesTbl)

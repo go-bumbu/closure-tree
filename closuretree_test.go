@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"runtime"
 	"sort"
+	"sync"
 	"testing"
+	"time"
 
 	closuretree "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
@@ -127,6 +130,7 @@ func dropTreeTables(gdb *gorm.DB, model any) {
 	}
 	gdb.Exec("DROP TABLE IF EXISTS closure_tree_rel_" + tbl)
 	gdb.Exec("DROP TABLE IF EXISTS closure_tree_meta_" + tbl)
+	gdb.Exec("DROP TABLE IF EXISTS closure_tree_lock_" + tbl)
 	gdb.Exec("DROP TABLE IF EXISTS " + tbl)
 }
 
@@ -144,6 +148,27 @@ func TestMetaTableCreated(t *testing.T) {
 			err = gdb.Exec("INSERT INTO closure_tree_meta_test_payloads (tenant, parent_id, min_halvings) VALUES ('t', 0, 99)").Error
 			if err != nil {
 				t.Errorf("meta table not created: %v", err)
+			}
+		})
+	}
+}
+
+// TestLockTableCreated verifies Migrate creates the per-tenant lock table used to serialize
+// concurrent structural writes (the anchor row grabbed with SELECT ... FOR UPDATE).
+func TestLockTableCreated(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+
+			_, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Verify the lock table exists by inserting a row.
+			err = gdb.Exec("INSERT INTO closure_tree_lock_test_payloads (tenant) VALUES ('t')").Error
+			if err != nil {
+				t.Errorf("lock table not created: %v", err)
 			}
 		})
 	}
@@ -2940,6 +2965,171 @@ func TestUpdateMoveAppendsLast(t *testing.T) {
 			want := []string{"x", "y", "a"}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("move-append order: want %v, got %v", want, got)
+			}
+		})
+	}
+}
+
+// relCount returns the number of closure rows placing desc strictly under anc (depth >= 1) for
+// the tenant — i.e. whether anc is an ancestor of desc.
+func relCount(t *testing.T, gdb *gorm.DB, rel string, anc, desc uint, tenant string) int64 {
+	t.Helper()
+	var n int64
+	if err := gdb.Table(rel).
+		Where("ancestor_id = ? AND descendant_id = ? AND depth >= 1 AND tenant = ?", anc, desc, tenant).
+		Count(&n).Error; err != nil {
+		t.Fatalf("count closure rows: %v", err)
+	}
+	return n
+}
+
+// countRaw runs a COUNT(*) query and returns the result.
+func countRaw(t *testing.T, gdb *gorm.DB, query string, args ...any) int64 {
+	t.Helper()
+	var n int64
+	if err := gdb.Raw(query, args...).Scan(&n).Error; err != nil {
+		t.Fatalf("count query failed: %v", err)
+	}
+	return n
+}
+
+// TestConcurrentConflictingMovesNoCycle races two opposing re-parent operations ("move A under B"
+// and "move B under A") many times. Without the per-tenant lock both moves pass their lock-free
+// cycle guards on stale snapshots and commit, making A and B mutual ancestors — a cycle that makes
+// recursive subtree reads run away. The invariant: whichever move wins, A and B are never mutual
+// ancestors. (SQLite serializes writers, so it cannot exhibit the race; MySQL/Postgres can.)
+func TestConcurrentConflictingMovesNoCycle(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			rel := ct.ClosureTableName()
+
+			move := func(id, under uint) error {
+				var e error
+				for attempt := 0; attempt < 50; attempt++ {
+					e = ct.Update(ctx, id, nil, up(under), nil, tenant1)
+					if e == nil || errors.Is(e, closuretree.ErrInvalidMove) || !isTransientDBErr(e) {
+						return e
+					}
+					runtime.Gosched()
+					time.Sleep(time.Millisecond)
+				}
+				return e
+			}
+
+			const iterations = 40
+			for i := 0; i < iterations; i++ {
+				a := &TestPayload{Name: "A"}
+				if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
+					t.Fatal(err)
+				}
+				b := &TestPayload{Name: "B"}
+				if err := ct.Add(ctx, b, nil, nil, tenant1); err != nil {
+					t.Fatal(err)
+				}
+
+				start := make(chan struct{})
+				var wg sync.WaitGroup
+				errs := make([]error, 2)
+				wg.Add(2)
+				go func() { defer wg.Done(); <-start; errs[0] = move(a.NodeId, b.NodeId) }()
+				go func() { defer wg.Done(); <-start; errs[1] = move(b.NodeId, a.NodeId) }()
+				close(start)
+				wg.Wait()
+
+				for _, e := range errs {
+					if e != nil && !errors.Is(e, closuretree.ErrInvalidMove) {
+						t.Fatalf("iteration %d: unexpected move error: %v", i, e)
+					}
+				}
+
+				if relCount(t, gdb, rel, b.NodeId, a.NodeId, tenant1) > 0 &&
+					relCount(t, gdb, rel, a.NodeId, b.NodeId, tenant1) > 0 {
+					t.Fatalf("iteration %d: cycle formed — A(%d) and B(%d) are mutual ancestors", i, a.NodeId, b.NodeId)
+				}
+			}
+		})
+	}
+}
+
+// TestConcurrentAddVsDeleteConsistency races Add(child under P) against DeleteRecurse(P). Without
+// the per-tenant lock, Add's lock-free parent check can pass while a concurrent delete removes P,
+// leaving a phantom node (a node with no closure self-row) or an orphan closure row (a row pointing
+// at a deleted node). The invariant: node table and closure table stay mutually consistent. Each
+// iteration uses its own tenant so the consistency check is independent.
+func TestConcurrentAddVsDeleteConsistency(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			nodes := ct.NodeTableName()
+			rel := ct.ClosureTableName()
+
+			const iterations = 40
+			for i := 0; i < iterations; i++ {
+				tenant := fmt.Sprintf("t-%d", i)
+				parent := &TestPayload{Name: "P"}
+				if err := ct.Add(ctx, parent, nil, nil, tenant); err != nil {
+					t.Fatal(err)
+				}
+
+				start := make(chan struct{})
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					<-start
+					child := &TestPayload{Name: "child"}
+					for attempt := 0; attempt < 50; attempt++ {
+						e := ct.Add(ctx, child, up(parent.NodeId), nil, tenant)
+						if e == nil || errors.Is(e, closuretree.ErrParentNotFound) || !isTransientDBErr(e) {
+							break
+						}
+						runtime.Gosched()
+						time.Sleep(time.Millisecond)
+					}
+				}()
+				go func() {
+					defer wg.Done()
+					<-start
+					for attempt := 0; attempt < 50; attempt++ {
+						e := ct.DeleteRecurse(ctx, parent.NodeId, tenant)
+						if e == nil || errors.Is(e, closuretree.ErrNodeNotFound) || !isTransientDBErr(e) {
+							break
+						}
+						runtime.Gosched()
+						time.Sleep(time.Millisecond)
+					}
+				}()
+				close(start)
+				wg.Wait()
+
+				phantom := countRaw(t, gdb, fmt.Sprintf(
+					"SELECT COUNT(*) FROM %s n WHERE n.tenant = ? AND NOT EXISTS "+
+						"(SELECT 1 FROM %s r WHERE r.descendant_id = n.node_id AND r.ancestor_id = n.node_id AND r.depth = 0 AND r.tenant = n.tenant)",
+					nodes, rel), tenant)
+				if phantom > 0 {
+					t.Fatalf("iteration %d: %d phantom node(s) with no closure self-row", i, phantom)
+				}
+				orphan := countRaw(t, gdb, fmt.Sprintf(
+					"SELECT COUNT(*) FROM %s r WHERE r.tenant = ? AND ("+
+						"(r.descendant_id <> 0 AND NOT EXISTS (SELECT 1 FROM %s n WHERE n.node_id = r.descendant_id AND n.tenant = r.tenant)) OR "+
+						"(r.ancestor_id <> 0 AND NOT EXISTS (SELECT 1 FROM %s n WHERE n.node_id = r.ancestor_id AND n.tenant = r.tenant)))",
+					rel, nodes, nodes), tenant)
+				if orphan > 0 {
+					t.Fatalf("iteration %d: %d orphan closure row(s) referencing a missing node", i, orphan)
+				}
 			}
 		})
 	}

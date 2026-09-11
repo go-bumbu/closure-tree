@@ -531,9 +531,10 @@ func TestGetOrAddErrors(t *testing.T) {
 }
 
 // TestGetOrAddConcurrent exercises many goroutines racing to get-or-create the same child.
-// GetOrAdd wraps find+add in a single transaction but does not fully eliminate the race for
-// a brand-new child (documented on the method). The invariant that MUST hold regardless is:
-// the number of actual child nodes equals the number of created=true results.
+// The per-tenant write lock serializes the find+add transactions, so exactly one goroutine
+// creates the child and every other finds it: exactly one child node exists and exactly one
+// created=true result is returned. (SQLite serializes writers on its own; the lock closes the
+// race on MySQL/Postgres.)
 func TestGetOrAddConcurrent(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -600,14 +601,11 @@ func TestGetOrAddConcurrent(t *testing.T) {
 					childNodes++
 				}
 			}
-			if childNodes < 1 {
-				t.Errorf("expected at least one child node, got %d", childNodes)
+			if childNodes != 1 {
+				t.Errorf("expected exactly one child node (no duplicates), got %d", childNodes)
 			}
-			if childNodes != createdCount {
-				t.Errorf("consistency violated: created=true count %d but %d child nodes exist", createdCount, childNodes)
-			}
-			if createdCount < 1 {
-				t.Errorf("expected at least one goroutine to create the child, got %d", createdCount)
+			if createdCount != 1 {
+				t.Errorf("expected exactly one goroutine to create the child, got %d", createdCount)
 			}
 		})
 	}
