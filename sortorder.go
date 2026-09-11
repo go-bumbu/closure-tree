@@ -181,18 +181,8 @@ func (ct *Tree) upsertMetaHalvings(tx *gorm.DB, parentID uint, tenant string, ha
 	if res.RowsAffected > 0 {
 		return nil
 	}
-	// Row doesn't exist or already has equal/lower value — insert, ignore conflict
-	var insertSQL string
-	if isMySQLDialect(tx) {
-		insertSQL = fmt.Sprintf(
-			`INSERT INTO %s (tenant, parent_id, min_halvings) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE min_halvings = LEAST(min_halvings, VALUES(min_halvings))`,
-			ct.metaTbl)
-	} else {
-		insertSQL = fmt.Sprintf(
-			`INSERT INTO %s (tenant, parent_id, min_halvings) VALUES (?, ?, ?) ON CONFLICT (tenant, parent_id) DO UPDATE SET min_halvings = EXCLUDED.min_halvings WHERE %s.min_halvings > EXCLUDED.min_halvings`,
-			ct.metaTbl, ct.metaTbl)
-	}
-	return tx.Exec(insertSQL, tenant, parentID, halvings).Error
+	// Row doesn't exist or already has an equal/lower value — insert, keeping the lower min_halvings.
+	return tx.Exec(ct.dialect.metaUpsertSQL(ct.metaTbl), tenant, parentID, halvings).Error
 }
 
 // Renormalize rewrites sort_order for all direct children of parentID as 10.0, 20.0, 30.0, …

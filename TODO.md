@@ -95,8 +95,8 @@ Notes for editors:
   closuretree.go:983 (GORM ScanRows) vs 1084/1118/1257 (hand-rolled mapRowToStruct) - Descendants and TreeDescendants can disagree on type coercion for the same model/driver [architect, conf 85].
 - [x] Migration is fused into construction, additive-only and unversioned
   closuretree.go:53-67 -> 112-126 - New always AutoMigrates (needs DDL privilege; concurrent starts race); cannot drop the stale index it tells users to DROP by hand (:251); no schema version / backfill for 0.10's sort_order + meta [architect, conf 82]. Consider exposing newTree as a migration-free constructor + an explicit Migrate().
-- [ ] Dialect handling has no home (hand-maintained portability despite GORM)
-  closuretree.go:211-223, 781, 1222-1231 - scattered isMySQLDialect checks (version gate, upsert branch, CTE-in-DELETE workaround); consider a single dialect-capabilities seam if the DB matrix grows [architect, conf 72].
+- [x] Dialect handling has no home (hand-maintained portability despite GORM)
+  closuretree.go:211-223, 781, 1222-1231 - scattered isMySQLDialect checks (version gate, upsert branch, CTE-in-DELETE workaround); consider a single dialect-capabilities seam if the DB matrix grows [architect, conf 72]. Fixed: dialect.go is now the single seam - dialectOf classifies once, and the per-dialect behaviors (checkVersion, metaUpsertSQL, lockTenant) live on the dialect enum; isMySQLDialect and the raw driver-name switch are gone. Non-branching portable SQL (recursive-CTE ceiling, CTE-in-DELETE) left as-is.
 - [ ] Two sources of truth for column names (parsed map vs hardcoded literals)
   closuretree.go:152-154, 170, 533 etc. hardcode node_id/tenant/sort_order/parent_id while readers use col2FieldMap -> split-brain if Node's mapping changes [architect, conf 78]. Fix: centralize as named constants used by both.
 - [x] Standardize not-found detection and slice validation across operations

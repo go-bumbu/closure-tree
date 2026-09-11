@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
@@ -63,6 +62,7 @@ type Tree struct {
 	relationsTbl string
 	metaTbl      string
 	lockTbl      string
+	dialect      dialect
 	col2FieldMap map[string]string
 	model        any // node model retained so Migrate can AutoMigrate it
 }
@@ -76,10 +76,8 @@ func New(db *gorm.DB, item any) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	if isMySQLDialect(db) {
-		if err := checkMySQLVersion(db); err != nil {
-			return nil, err
-		}
+	if err := ct.dialect.checkVersion(db); err != nil {
+		return nil, err
 	}
 	return ct, nil
 }
@@ -127,6 +125,7 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		relationsTbl: relTbl,
 		metaTbl:      metaTbl,
 		lockTbl:      lockTbl,
+		dialect:      dialectOf(db),
 		model:        item,
 	}
 
@@ -151,24 +150,6 @@ func (ct *Tree) Migrate() error {
 	}
 	if err := ct.db.Table(ct.lockTbl).AutoMigrate(closureTreeLock{}); err != nil {
 		return fmt.Errorf("unable to migrate lock table: %w", err)
-	}
-	return nil
-}
-
-func isMySQLDialect(db *gorm.DB) bool {
-	return db.Name() == "mysql"
-}
-
-func checkMySQLVersion(db *gorm.DB) error {
-	var version string
-	if err := db.Raw("SELECT VERSION()").Scan(&version).Error; err != nil {
-		return fmt.Errorf("unable to check MySQL version: %w", err)
-	}
-	// SplitN with a non-empty separator always returns at least one element, so parts[0] is safe.
-	parts := strings.SplitN(version, ".", 2)
-	major, err := strconv.Atoi(parts[0])
-	if err != nil || major < 8 {
-		return fmt.Errorf("MySQL 8.0+ required; got %s", version)
 	}
 	return nil
 }
