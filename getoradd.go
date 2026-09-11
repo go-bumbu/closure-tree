@@ -9,18 +9,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// FindChild looks up a single DIRECT child of parentID (depth=1 in the closure table) whose
-// non-zero exported fields all equal those of match (query-by-example), scoped to tenant.
-// parentID=0 matches among the root nodes.
+// FindChild looks up a single DIRECT child of parentID (depth=1 in the closure table) whose fields
+// named in matchFields all equal those of match (query-by-example), scoped to tenant. parentID=0
+// matches among the root nodes.
 //
-// match must embed Node; only its non-Node, non-zero fields are used for the WHERE, so the
-// caller never has to know internal ids or the tenant. If match has no non-zero field to
-// match on, ErrEmptyMatch is returned.
+// match must embed Node. matchFields names the fields that form the match key (Go field names or
+// column names); each is matched by its actual value, INCLUDING zero values (false/0/""), and a nil
+// pointer field matches as IS NULL. An empty matchFields returns ErrEmptyMatch; an unknown or
+// Node-owned field returns ErrUnknownMatchField.
 //
-// out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the
-// same way GetNode does (including NodeId and the read-only ParentId) and found is true. When
-// nothing matches, found is false and err is nil.
-func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, match any, out any) (found bool, err error) {
+// out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the same
+// way GetNode does (including NodeId and the read-only ParentId) and found is true. When nothing
+// matches, found is false and err is nil.
+func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, match any, matchFields []string, out any) (found bool, err error) {
 	if err = checkItem(match); err != nil {
 		return false, err
 	}
@@ -35,21 +36,25 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 		return false, ErrItemNotPointerToStruct
 	}
 
-	whereSQL, whereArgs, err := ct.buildMatchConditions(ctx, match)
+	whereSQL, whereArgs, err := ct.buildMatchConditions(ctx, match, matchFields)
 	if err != nil {
 		return false, err
 	}
 	return ct.findChildInTx(ct.db.WithContext(ctx), parentID, tenant, whereSQL, whereArgs, out)
 }
 
-// GetOrAdd is an idempotent get-or-create for a direct child of parentID. It looks up a direct
-// child matching match (see FindChild for the match semantics); if one exists it loads it into
-// item and returns created=false, otherwise it adds item under parentID (placed first among its
-// siblings) and returns created=true. parentID=0 operates on the root level.
+// GetOrAdd is an idempotent get-or-create for a direct child of parentID. It looks up a direct child
+// whose fields named in matchFields equal those of item; if one exists it loads it into item and
+// returns created=false, otherwise it adds item under parentID (placed first among its siblings) and
+// returns created=true. parentID=0 operates on the root level.
 //
-// When item is a pointer, its embedded Node — including NodeId — is populated on BOTH paths, so
-// the returned node id can be chained as the parentID of the next level down. match must embed
-// Node and have at least one non-zero field (else ErrEmptyMatch).
+// The match key is read from item itself (there is no separate match struct): matchFields names the
+// fields — Go field names or column names — that identify the child, matched by their actual value
+// including zero values (see FindChild). An empty matchFields returns ErrEmptyMatch; an unknown or
+// Node-owned field returns ErrUnknownMatchField.
+//
+// When item is a pointer, its embedded Node — including NodeId — is populated on BOTH paths, so the
+// returned node id can be chained as the parentID of the next level down.
 //
 // The two paths treat your payload differently: on create, item's non-Node fields are kept as you
 // set them; on the found path item is fully overwritten with the stored row (like GetNode), so
@@ -61,11 +66,8 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // the find and insert, yielding two sibling nodes with the same content. If several callers may
 // race to create the same new child, serialize those calls (e.g. a single import worker) or
 // deduplicate afterwards. Re-adding an already-existing child is race-free.
-func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant string, match any) (created bool, err error) {
+func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant string, matchFields []string) (created bool, err error) {
 	if err = checkItem(item); err != nil {
-		return false, err
-	}
-	if err = checkItem(match); err != nil {
 		return false, err
 	}
 	tenant, err = validateTenant(tenant)
@@ -73,7 +75,7 @@ func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant st
 		return false, err
 	}
 
-	whereSQL, whereArgs, err := ct.buildMatchConditions(ctx, match)
+	whereSQL, whereArgs, err := ct.buildMatchConditions(ctx, item, matchFields)
 	if err != nil {
 		return false, err
 	}
@@ -125,14 +127,17 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 	}
 }
 
-// buildMatchConditions builds the WHERE fragment and bind args for a query-by-example match.
-// It uses only the non-zero exported fields of match that are NOT owned by the embedded Node
-// (so NodeId, Tenant, SortOrder and the read-only ParentId are always ignored). Field values are
-// read via GORM's schema accessor, so fields contributed by a gorm-embedded sub-struct are
-// matched too; column identifiers are dialect-quoted, so a field mapping to a reserved-word
-// column still produces valid SQL. Values are returned as bind args. Returns ErrEmptyMatch when
-// no usable non-zero field is present.
-func (ct *Tree) buildMatchConditions(ctx context.Context, match any) (string, []any, error) {
+// buildMatchConditions builds the WHERE fragment and bind args for a query-by-example match on the
+// fields named in matchFields. Each name is resolved against the model schema (Go field name or
+// column name) and matched by its ACTUAL value — including zero values (false/0/"") — so a key that
+// is legitimately zero is honored rather than silently dropped; a nil pointer field matches as
+// IS NULL. Node-owned fields (NodeId/Tenant/SortOrder/ParentId) and unknown fields are rejected with
+// ErrUnknownMatchField. An empty matchFields returns ErrEmptyMatch. Column identifiers are
+// dialect-quoted, so a field mapping to a reserved-word column still produces valid SQL.
+func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields []string) (string, []any, error) {
+	if len(matchFields) == 0 {
+		return "", nil, ErrEmptyMatch
+	}
 	stmt := &gorm.Statement{DB: ct.db}
 	if err := stmt.Parse(match); err != nil {
 		return "", nil, fmt.Errorf("unable to parse match schema: %w", err)
@@ -142,24 +147,29 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any) (string, []
 	nodeType := reflect.TypeOf(Node{})
 	var conds []string
 	var args []any
-	for _, f := range stmt.Schema.Fields {
-		if f.DBName == "" { // gorm:"-" fields have no column
-			continue
+	for _, name := range matchFields {
+		f := stmt.Schema.LookUpField(name)
+		if f == nil || f.DBName == "" { // unknown field, or gorm:"-" (no column)
+			return "", nil, fmt.Errorf("%w: %q on %T", ErrUnknownMatchField, name, match)
 		}
 		if f.OwnerSchema != nil && f.OwnerSchema.ModelType == nodeType {
-			continue
-		}
-		val, isZero := f.ValueOf(ctx, rv)
-		if isZero {
-			continue
+			return "", nil, fmt.Errorf("%w: %q is a Node-owned field", ErrUnknownMatchField, name)
 		}
 		var b strings.Builder
 		ct.db.QuoteTo(&b, "nodes."+f.DBName)
-		conds = append(conds, b.String()+" = ?")
+		col := b.String()
+
+		val, _ := f.ValueOf(ctx, rv)
+		rvVal := reflect.ValueOf(val)
+		if val == nil || (rvVal.Kind() == reflect.Pointer && rvVal.IsNil()) {
+			conds = append(conds, col+" IS NULL")
+			continue
+		}
+		if rvVal.Kind() == reflect.Pointer {
+			val = rvVal.Elem().Interface() // bind the dereferenced value, not the pointer
+		}
+		conds = append(conds, col+" = ?")
 		args = append(args, val)
-	}
-	if len(conds) == 0 {
-		return "", nil, ErrEmptyMatch
 	}
 	return strings.Join(conds, " AND "), args, nil
 }

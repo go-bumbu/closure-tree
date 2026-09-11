@@ -99,6 +99,9 @@ type NodeDetails struct {
 const tenant1 = "t1"
 const tenant2 = "t2"
 
+// up returns a pointer to v, for the *uint parentID/afterNodeID arguments of Add.
+func up(v uint) *uint { return &v }
+
 // connAndClose creates a database connection for the test and disables idle connection
 // pooling so connections are released immediately after each operation, preventing
 // PostgreSQL connection exhaustion when many tests accumulate open pools.
@@ -195,7 +198,7 @@ func TestNodeSortOrderField(t *testing.T) {
 				t.Fatal(err)
 			}
 			item := &SampleStruct{Name: "root"}
-			if err := ct.Add(context.Background(), item, 0, 0, closuretree.DefaultTenant); err != nil {
+			if err := ct.Add(context.Background(), item, nil, nil, closuretree.DefaultTenant); err != nil {
 				t.Fatal(err)
 			}
 			// SortOrder must be present on Node (zero value is fine for now)
@@ -219,7 +222,7 @@ func TestAddSortOrder(t *testing.T) {
 
 			// First node: afterNodeID=0, no siblings → sort_order = 0.0
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			if a.SortOrder != 0.0 {
@@ -228,7 +231,7 @@ func TestAddSortOrder(t *testing.T) {
 
 			// Second node: afterNodeID=a → sort_order = 0.0 + 10.0 = 10.0
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, 0, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, nil, up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			if b.SortOrder != 10.0 {
@@ -237,7 +240,7 @@ func TestAddSortOrder(t *testing.T) {
 
 			// Third node appended: afterNodeID=b → sort_order = 10.0 + 10.0 = 20.0
 			c := &TestPayload{Name: "c"}
-			if err := ct.Add(ctx, c, 0, b.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, c, nil, up(b.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			if c.SortOrder != 20.0 {
@@ -246,7 +249,7 @@ func TestAddSortOrder(t *testing.T) {
 
 			// Insert d before all (afterNodeID=0): sort_order = 0.0 - 10.0 = -10.0
 			d := &TestPayload{Name: "d"}
-			if err := ct.Add(ctx, d, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, d, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			if d.SortOrder != -10.0 {
@@ -255,7 +258,7 @@ func TestAddSortOrder(t *testing.T) {
 
 			// Insert e between a(0.0) and b(10.0): afterNodeID=a → midpoint = 5.0
 			e := &TestPayload{Name: "e"}
-			if err := ct.Add(ctx, e, 0, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, e, nil, up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			if e.SortOrder != 5.0 {
@@ -280,7 +283,7 @@ func TestAddSortOrder(t *testing.T) {
 
 			// afterNodeID=0 on empty sibling set: verify SortOrder=0.0
 			child := &TestPayload{Name: "child"}
-			if err := ct.Add(ctx, child, a.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, child, up(a.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			if child.SortOrder != 0.0 {
@@ -302,29 +305,29 @@ func TestAddSortOrderErrors(t *testing.T) {
 			ctx := context.Background()
 
 			parent := &TestPayload{Name: "parent"}
-			if err := ct.Add(ctx, parent, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, parent, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			child := &TestPayload{Name: "child"}
-			if err := ct.Add(ctx, child, parent.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, child, up(parent.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
 			// afterNodeID is not a sibling of root (child is under parent, not root)
 			other := &TestPayload{Name: "other"}
-			err = ct.Add(ctx, other, 0, child.NodeId, tenant1)
+			err = ct.Add(ctx, other, nil, up(child.NodeId), tenant1)
 			if !errors.Is(err, closuretree.ErrInvalidAfterNode) {
 				t.Errorf("wrong parent: want ErrInvalidAfterNode, got %v", err)
 			}
 
 			// afterNodeID in wrong tenant (parent belongs to tenant1, we ask with tenant2)
-			err = ct.Add(ctx, other, 0, parent.NodeId, tenant2)
+			err = ct.Add(ctx, other, nil, up(parent.NodeId), tenant2)
 			if !errors.Is(err, closuretree.ErrInvalidAfterNode) {
 				t.Errorf("wrong tenant: want ErrInvalidAfterNode, got %v", err)
 			}
 
 			// afterNodeID non-existent
-			err = ct.Add(ctx, other, 0, 9999, tenant1)
+			err = ct.Add(ctx, other, nil, up(9999), tenant1)
 			if !errors.Is(err, closuretree.ErrInvalidAfterNode) {
 				t.Errorf("non-existent: want ErrInvalidAfterNode, got %v", err)
 			}
@@ -345,15 +348,15 @@ func TestUpdateSortOrder(t *testing.T) {
 
 			// Build: a(0), b(10), c(20) at root
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, 0, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, nil, up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			c := &TestPayload{Name: "c"}
-			if err := ct.Add(ctx, c, 0, b.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, c, nil, up(b.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -424,15 +427,15 @@ func TestUpdateSortOrderErrors(t *testing.T) {
 			ctx := context.Background()
 
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, 0, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, nil, up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			child := &TestPayload{Name: "child"}
-			if err := ct.Add(ctx, child, a.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, child, up(a.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -566,7 +569,7 @@ func TestAddNodes(t *testing.T) {
 					}
 
 					// add topItem as parent
-					err = ct.Add(context.Background(), tc.topItem, 0, 0, tc.topItemDetails.Tenant)
+					err = ct.Add(context.Background(), tc.topItem, nil, nil, tc.topItemDetails.Tenant)
 					if tc.topItemExpect.Err != "" {
 						if err == nil {
 							t.Fatal("expecting an error but got none")
@@ -589,7 +592,7 @@ func TestAddNodes(t *testing.T) {
 					}
 
 					// add childItem to parent
-					err = ct.Add(context.Background(), tc.childItem, 1, 0, tc.childItemDetails.Tenant)
+					err = ct.Add(context.Background(), tc.childItem, up(1), nil, tc.childItemDetails.Tenant)
 					if tc.childItemExpect.Err != "" {
 						if err == nil {
 							t.Error("expecting an error but got none")
@@ -626,7 +629,7 @@ func populateTree(t *testing.T, ct *closuretree.Tree) {
 			},
 		}
 
-		err := ct.Add(context.Background(), tagItem, item.parent, 0, tenant1)
+		err := ct.Add(context.Background(), tagItem, up(item.parent), nil, tenant1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -641,7 +644,7 @@ func populateTree(t *testing.T, ct *closuretree.Tree) {
 			},
 		}
 
-		err := ct.Add(context.Background(), tagItem, item.parent, 0, tenant2)
+		err := ct.Add(context.Background(), tagItem, up(item.parent), nil, tenant2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1456,19 +1459,19 @@ func TestMoveBetweenParents_NoDuplicates(t *testing.T) {
 			//     └── Child
 			//   ParentB (root)
 			parentA := &TestPayload{Name: "ParentA"}
-			err = ct.Add(ctx, parentA, 0, 0, tenant1)
+			err = ct.Add(ctx, parentA, nil, nil, tenant1)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			child := &TestPayload{Name: "Child"}
-			err = ct.Add(ctx, child, parentA.Id(), 0, tenant1)
+			err = ct.Add(ctx, child, up(parentA.Id()), nil, tenant1)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			parentB := &TestPayload{Name: "ParentB"}
-			err = ct.Add(ctx, parentB, 0, 0, tenant1)
+			err = ct.Add(ctx, parentB, nil, nil, tenant1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1943,7 +1946,7 @@ func TestAddMultiLevelEmbed(t *testing.T) {
 				BasePayload: BasePayload{Description: "base desc"},
 				Name:        "top",
 			}
-			err = ct.Add(context.Background(), item, 0, 0, closuretree.DefaultTenant)
+			err = ct.Add(context.Background(), item, nil, nil, closuretree.DefaultTenant)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1973,7 +1976,7 @@ func TestUpdateMultiLevelEmbed(t *testing.T) {
 				BasePayload: BasePayload{Description: "original"},
 				Name:        "original name",
 			}
-			err = ct.Add(context.Background(), item, 0, 0, closuretree.DefaultTenant)
+			err = ct.Add(context.Background(), item, nil, nil, closuretree.DefaultTenant)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2015,28 +2018,28 @@ func TestRenormalize(t *testing.T) {
 
 			// Build: a(0), b(10), c(20) at root using sequential afterNodeID adds
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, 0, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, nil, up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			c := &TestPayload{Name: "c"}
-			if err := ct.Add(ctx, c, 0, b.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, c, nil, up(b.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 
 			// Insert d before a (sort_order = -10.0), making order: d, a, b, c
 			d := &TestPayload{Name: "d"}
-			if err := ct.Add(ctx, d, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, d, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
 			// Insert ~60 nodes between a and b to exhaust the float gap and create a low min_halvings meta row
 			for i := 0; i < 60; i++ {
 				node := &TestPayload{Name: fmt.Sprintf("node_%d", i)}
-				if err := ct.Add(ctx, node, 0, a.NodeId, tenant1); err != nil {
+				if err := ct.Add(ctx, node, nil, up(a.NodeId), tenant1); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -2100,24 +2103,24 @@ func TestDescendantsSortOrder(t *testing.T) {
 			// Build tree: root → [a, b, c] with sort orders a=0, b=10, c=20
 			// then insert d before all (sort_order = -10.0)
 			root := &TestPayload{Name: "root"}
-			if err := ct.Add(ctx, root, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, root.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, up(root.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, root.NodeId, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, up(root.NodeId), up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			c := &TestPayload{Name: "c"}
-			if err := ct.Add(ctx, c, root.NodeId, b.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, c, up(root.NodeId), up(b.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			// Insert d before a (sort_order = -10.0)
 			d := &TestPayload{Name: "d"}
-			if err := ct.Add(ctx, d, root.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, d, up(root.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2160,20 +2163,20 @@ func TestTreeDescendantsSortOrder(t *testing.T) {
 			ctx := context.Background()
 
 			root := &TestPayload{Name: "root"}
-			if err := ct.Add(ctx, root, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, root.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, up(root.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, root.NodeId, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, up(root.NodeId), up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			// Insert c before a (sort_order = -10.0)
 			c := &TestPayload{Name: "c"}
-			if err := ct.Add(ctx, c, root.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, c, up(root.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2237,20 +2240,20 @@ func TestTreeDescendantsIdsSortOrder(t *testing.T) {
 			ctx := context.Background()
 
 			root := &TestPayload{Name: "root"}
-			if err := ct.Add(ctx, root, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, root.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, up(root.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, root.NodeId, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, up(root.NodeId), up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			// c inserted before a (sort_order = -10.0)
 			c := &TestPayload{Name: "c"}
-			if err := ct.Add(ctx, c, root.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, c, up(root.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2321,7 +2324,7 @@ func TestSortOrderRegression(t *testing.T) {
 			var nodeIDs []uint
 			for _, name := range names {
 				item := &TestPayload{Name: name}
-				if err := ct.Add(ctx, item, 0, prevID, tenant1); err != nil {
+				if err := ct.Add(ctx, item, nil, up(prevID), tenant1); err != nil {
 					t.Fatal(err)
 				}
 				nodeIDs = append(nodeIDs, item.NodeId)
@@ -2360,11 +2363,11 @@ func TestNeedsRenormalize(t *testing.T) {
 
 			// Fresh tree: should not need renormalize at buffer=0 or buffer=15
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, 0, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, nil, up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2382,7 +2385,7 @@ func TestNeedsRenormalize(t *testing.T) {
 			prevID := a.NodeId
 			for i := 0; i < 37; i++ {
 				node := &TestPayload{Name: fmt.Sprintf("n%d", i)}
-				if err := ct.Add(ctx, node, 0, prevID, tenant1); err != nil {
+				if err := ct.Add(ctx, node, nil, up(prevID), tenant1); err != nil {
 					t.Fatal(err)
 				}
 				prevID = node.NodeId
@@ -2409,7 +2412,7 @@ func TestNeedsRenormalize(t *testing.T) {
 			// Exhaust completely: insert ~20 more times
 			for i := 37; i < 60; i++ {
 				node := &TestPayload{Name: fmt.Sprintf("n%d", i)}
-				if err := ct.Add(ctx, node, 0, prevID, tenant1); err != nil {
+				if err := ct.Add(ctx, node, nil, up(prevID), tenant1); err != nil {
 					t.Fatal(err)
 				}
 				prevID = node.NodeId
@@ -2470,19 +2473,19 @@ func TestNeedsRenormalizeAny(t *testing.T) {
 
 			// Build tree: parentA at root, parentB at root, a1 and a2 as children of parentA
 			parentA := &TestPayload{Name: "parentA"}
-			if err := ct.Add(ctx, parentA, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, parentA, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			parentB := &TestPayload{Name: "parentB"}
-			if err := ct.Add(ctx, parentB, 0, parentA.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, parentB, nil, up(parentA.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			a1 := &TestPayload{Name: "a1"}
-			if err := ct.Add(ctx, a1, parentA.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a1, up(parentA.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			a2 := &TestPayload{Name: "a2"}
-			if err := ct.Add(ctx, a2, parentA.NodeId, a1.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, a2, up(parentA.NodeId), up(a1.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2490,7 +2493,7 @@ func TestNeedsRenormalizeAny(t *testing.T) {
 			prev := a1.NodeId
 			for i := 0; i < 60; i++ {
 				node := &TestPayload{Name: fmt.Sprintf("x%d", i)}
-				if err := ct.Add(ctx, node, parentA.NodeId, prev, tenant1); err != nil {
+				if err := ct.Add(ctx, node, up(parentA.NodeId), up(prev), tenant1); err != nil {
 					t.Fatal(err)
 				}
 				prev = node.NodeId
@@ -2561,19 +2564,19 @@ func TestRenormalizeAll(t *testing.T) {
 			//   Group 1: root children (parentID=0) — rootA, rootB
 			//   Group 2: children of rootA (parentID=rootA.NodeId) — childA1, childA2
 			rootA := &TestPayload{Name: "rootA"}
-			if err := ct.Add(ctx, rootA, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, rootA, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			rootB := &TestPayload{Name: "rootB"}
-			if err := ct.Add(ctx, rootB, 0, rootA.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, rootB, nil, up(rootA.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 			childA1 := &TestPayload{Name: "childA1"}
-			if err := ct.Add(ctx, childA1, rootA.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, childA1, up(rootA.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			childA2 := &TestPayload{Name: "childA2"}
-			if err := ct.Add(ctx, childA2, rootA.NodeId, childA1.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, childA2, up(rootA.NodeId), up(childA1.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2581,7 +2584,7 @@ func TestRenormalizeAll(t *testing.T) {
 			prev := rootA.NodeId
 			for i := 0; i < 60; i++ {
 				node := &TestPayload{Name: fmt.Sprintf("rn%d", i)}
-				if err := ct.Add(ctx, node, 0, prev, tenant1); err != nil {
+				if err := ct.Add(ctx, node, nil, up(prev), tenant1); err != nil {
 					t.Fatal(err)
 				}
 				prev = node.NodeId
@@ -2591,7 +2594,7 @@ func TestRenormalizeAll(t *testing.T) {
 			prev = childA1.NodeId
 			for i := 0; i < 60; i++ {
 				node := &TestPayload{Name: fmt.Sprintf("cn%d", i)}
-				if err := ct.Add(ctx, node, rootA.NodeId, prev, tenant1); err != nil {
+				if err := ct.Add(ctx, node, up(rootA.NodeId), up(prev), tenant1); err != nil {
 					t.Fatal(err)
 				}
 				prev = node.NodeId
@@ -2648,11 +2651,11 @@ func TestMetaWrittenOnAdd(t *testing.T) {
 			ctx := context.Background()
 
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			b := &TestPayload{Name: "b"}
-			if err := ct.Add(ctx, b, 0, a.NodeId, tenant1); err != nil {
+			if err := ct.Add(ctx, b, nil, up(a.NodeId), tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2686,7 +2689,7 @@ func TestUpdateReorderOnlyMissingNode(t *testing.T) {
 
 			// A real node so the tenant / sibling group exists.
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2723,7 +2726,7 @@ func TestNilItemPointer(t *testing.T) {
 			var nilItem *TestPayload // typed nil pointer
 			valid := &TestPayload{Name: "x"}
 
-			if err := ct.Add(ctx, nilItem, 0, 0, tenant1); !errors.Is(err, closuretree.ErrNilItem) {
+			if err := ct.Add(ctx, nilItem, nil, nil, tenant1); !errors.Is(err, closuretree.ErrNilItem) {
 				t.Errorf("Add(nil): want ErrNilItem, got %v", err)
 			}
 			if err := ct.Update(ctx, 1, nilItem, nil, nil, tenant1); !errors.Is(err, closuretree.ErrNilItem) {
@@ -2732,13 +2735,13 @@ func TestNilItemPointer(t *testing.T) {
 			if err := ct.GetNode(ctx, 1, tenant1, nilItem); !errors.Is(err, closuretree.ErrNilItem) {
 				t.Errorf("GetNode(nil): want ErrNilItem, got %v", err)
 			}
-			if _, err := ct.GetOrAdd(ctx, nilItem, 0, tenant1, valid); !errors.Is(err, closuretree.ErrNilItem) {
+			if _, err := ct.GetOrAdd(ctx, nilItem, 0, tenant1, []string{"Name"}); !errors.Is(err, closuretree.ErrNilItem) {
 				t.Errorf("GetOrAdd(nil item): want ErrNilItem, got %v", err)
 			}
-			if _, err := ct.FindChild(ctx, 0, tenant1, nilItem, valid); !errors.Is(err, closuretree.ErrNilItem) {
+			if _, err := ct.FindChild(ctx, 0, tenant1, nilItem, []string{"Name"}, valid); !errors.Is(err, closuretree.ErrNilItem) {
 				t.Errorf("FindChild(nil match): want ErrNilItem, got %v", err)
 			}
-			if _, err := ct.FindChild(ctx, 0, tenant1, valid, nilItem); !errors.Is(err, closuretree.ErrNilItem) {
+			if _, err := ct.FindChild(ctx, 0, tenant1, valid, []string{"Name"}, nilItem); !errors.Is(err, closuretree.ErrNilItem) {
 				t.Errorf("FindChild(nil out): want ErrNilItem, got %v", err)
 			}
 		})
@@ -2762,15 +2765,15 @@ func TestDeleteRecurseCleansInnerMeta(t *testing.T) {
 			// root -> childA -> grandchild. Adding grandchild under childA creates a meta
 			// row keyed by parent_id=childA (an inner node).
 			root := &TestPayload{Name: "root"}
-			if err := ct.Add(ctx, root, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			childA := &TestPayload{Name: "childA"}
-			if err := ct.Add(ctx, childA, root.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, childA, up(root.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 			grandchild := &TestPayload{Name: "grandchild"}
-			if err := ct.Add(ctx, grandchild, childA.NodeId, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, grandchild, up(childA.NodeId), nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2820,7 +2823,7 @@ func TestUpdateNoOpFieldsExistingNode(t *testing.T) {
 			ctx := context.Background()
 
 			a := &TestPayload{Name: "a"}
-			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2879,6 +2882,64 @@ func TestGetLeavesCustomJoinColumns(t *testing.T) {
 			}
 			if leaves[0].Name != "custom-leaf" {
 				t.Errorf("expected 'custom-leaf', got %q", leaves[0].Name)
+			}
+		})
+	}
+}
+
+// TestUpdateMoveAppendsLast is the A5 regression: a move with no afterNodeID must give the moved
+// node a fresh sort_order that appends it after its new siblings, not keep its old value.
+func TestUpdateMoveAppendsLast(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+
+			// pA with child "a"; pB with children "x","y" (in that order).
+			pA := &TestPayload{Name: "pA"}
+			if err := ct.Add(ctx, pA, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			pB := &TestPayload{Name: "pB"}
+			if err := ct.Add(ctx, pB, nil, up(pA.NodeId), tenant1); err != nil {
+				t.Fatal(err)
+			}
+			a := &TestPayload{Name: "a"}
+			if err := ct.Add(ctx, a, up(pA.NodeId), nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			x := &TestPayload{Name: "x"}
+			if err := ct.Add(ctx, x, up(pB.NodeId), nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			y := &TestPayload{Name: "y"}
+			if err := ct.Add(ctx, y, up(pB.NodeId), up(x.NodeId), tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			// Move "a" under pB with NO afterNodeID -> it must append after x and y.
+			pBID := pB.NodeId
+			if err := ct.Update(ctx, a.NodeId, nil, &pBID, nil, tenant1); err != nil {
+				t.Fatalf("move failed: %v", err)
+			}
+
+			var kids []TestPayload
+			if err := ct.Descendants(ctx, pB.NodeId, 1, tenant1, &kids); err != nil {
+				t.Fatal(err)
+			}
+			sort.Slice(kids, func(i, j int) bool { return kids[i].SortOrder < kids[j].SortOrder })
+			got := make([]string, 0, len(kids))
+			for _, k := range kids {
+				got = append(got, k.Name)
+			}
+			want := []string{"x", "y", "a"}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("move-append order: want %v, got %v", want, got)
 			}
 		})
 	}

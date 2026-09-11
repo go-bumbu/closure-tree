@@ -34,7 +34,8 @@ var (
 	ErrNodeNotFound           = errors.New("node not found")
 	ErrInvalidMove            = errors.New("invalid move")
 	ErrItemNotPointerToStruct = errors.New("item needs to be a pointer to a struct")
-	ErrEmptyMatch             = errors.New("match has no non-zero fields to match on")
+	ErrEmptyMatch             = errors.New("no match fields provided")
+	ErrUnknownMatchField      = errors.New("match field not found on the model")
 	ErrNoOp                   = errors.New("update called with no item, no new parent, and no new sort order")
 	ErrInvalidAfterNode       = errors.New("afterNodeID is not a sibling of the target parent")
 	ErrAfterNodeIsSelf        = errors.New("afterNodeID cannot be the node itself")
@@ -240,6 +241,37 @@ func (ct *Tree) placeAmongSiblings(tx *gorm.DB, parentID, afterID uint, tenant s
 	return sortOrder, nil
 }
 
+// placeLastInTx gives node id a fresh sort_order after the current last child of parentID
+// (excluding id itself) and refreshes the meta. Used when a move supplies no afterNodeID, so the
+// moved node appends among its new siblings instead of keeping its old sort_order.
+func (ct *Tree) placeLastInTx(tx *gorm.DB, id, parentID uint, tenant string) error {
+	var maxOrder *float64
+	err := tx.Raw(
+		fmt.Sprintf(`SELECT MAX(n.sort_order) FROM %s n
+JOIN %s r ON r.descendant_id = n.node_id AND r.depth = 1 AND r.tenant = n.tenant
+WHERE r.ancestor_id = ? AND n.tenant = ? AND n.node_id != ?`, ct.nodesTbl, ct.relationsTbl),
+		parentID, tenant, id,
+	).Scan(&maxOrder).Error
+	if err != nil {
+		return fmt.Errorf("unable to find last sibling: %w", err)
+	}
+	var newOrder float64
+	var halvings int
+	if maxOrder == nil {
+		newOrder, halvings = 0.0, 9999 // no other siblings
+	} else {
+		newOrder = *maxOrder + 10.0
+		halvings = halvingsRemaining(*maxOrder, newOrder)
+	}
+	if err := ct.upsertMetaHalvings(tx, parentID, tenant, halvings); err != nil {
+		return fmt.Errorf("unable to update sort order metadata: %w", err)
+	}
+	return tx.Exec(
+		fmt.Sprintf(`UPDATE %s SET sort_order = ? WHERE node_id = ? AND tenant = ?`, ct.nodesTbl),
+		newOrder, id, tenant,
+	).Error
+}
+
 // currentParent returns the direct parent id of node id (0 for a root node) and whether the node
 // exists, by reading its depth-1 closure row. Must be called inside a transaction.
 func (ct *Tree) currentParent(tx *gorm.DB, id uint, tenant string) (parentID uint, found bool, err error) {
@@ -345,9 +377,22 @@ func validateTenant(in string) (string, error) {
 	return in, nil
 }
 
-// Add will add a new entry into the node Database under a specific parent and owned to a specific tenant
-// Note: the passed item has to embed a Node struct, but any value added to the Node will be ignored
-func (ct *Tree) Add(ctx context.Context, item any, parentID uint, afterNodeID uint, tenant string) error {
+// derefUint returns the pointed-to value, or 0 for a nil pointer. Used to fold Add's *uint
+// parentID/afterNodeID (where nil is equivalent to 0) onto the internal uint helpers.
+func derefUint(p *uint) uint {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// Add adds a new entry into the node Database under a specific parent, owned by a specific tenant.
+// The passed item has to embed a Node struct, but any value set on the Node is ignored.
+//
+// parentID and afterNodeID follow Update's *uint convention: a nil parentID (or &0) adds at the
+// root, &id adds under that node; a nil afterNodeID (or &0) places first among the siblings, &id
+// places after that sibling.
+func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *uint, tenant string) error {
 	if err := checkItem(item); err != nil {
 		return err
 	}
@@ -357,10 +402,11 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID uint, afterNodeID ui
 		return err
 	}
 
+	pid, aid := derefUint(parentID), derefUint(afterNodeID)
 	reflectItem, t, itemIsPointer := stripNodeCopy(item)
 
 	err = ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return ct.addInTx(tx, reflectItem, t, parentID, afterNodeID, tenant)
+		return ct.addInTx(tx, reflectItem, t, pid, aid, tenant)
 	})
 	if err != nil {
 		return err
@@ -532,6 +578,13 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint
 		if newParentID != nil {
 			if err := ct.maybeMoveInTx(tx, id, *newParentID, afterNodeID != nil, tenant); err != nil {
 				return err
+			}
+			// A5: a move with no explicit afterNodeID appends the node among its new siblings,
+			// giving it a fresh sort_order (moveInTx alone keeps the old one) and refreshing meta.
+			if afterNodeID == nil {
+				if err := ct.placeLastInTx(tx, id, *newParentID, tenant); err != nil {
+					return err
+				}
 			}
 		}
 		if afterNodeID != nil {

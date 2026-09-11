@@ -36,7 +36,7 @@ Notes for editors:
   closuretree.go:304-317 + node.go:29-44 - hasNode passes a typed-nil pointer, then stripNodeCopy's reflect.Set panics; crashes Add/Update/GetNode/FindChild/GetOrAdd on caller input [Pike conf 92 + go-code-reviewer conf 80; reproduced]. Fix: reject a nil pointer with a sentinel error at the hasNode guard.
 - [x] DeleteRecurse leaks closure_tree_meta rows for inner sub-nodes
   closuretree.go:822-831 - the meta cleanup SELECTs descendants from the relations table AFTER those rows were deleted at :815-819, so it matches 0 -> permanent no-op, unbounded meta leak per subtree delete [go-code-reviewer, conf 86]. Fix: capture descendant ids (or delete meta) before deleting the closure rows.
-- [ ] Move-only does not maintain the sort_order / meta invariants that Add and reorder uphold
+- [x] Move-only does not maintain the sort_order / meta invariants that Add and reorder uphold
   closuretree.go:702-743 (+455-464, 1206-1232, 633) - a re-parent without afterNodeID never rescales the moved node's sort_order to its new siblings nor updates the destination parent's min_halvings -> sibling sort_order collisions and false-negative NeedsRenormalize [go-architect-reviewer, conf 78]. Decision first: should move own re-placement (like Add/reorder), or must callers pair move+reorder? Then fix accordingly.
 
 ## B. Concurrency hardening - needs a design decision (no row locks / FKs under READ COMMITTED)
@@ -52,9 +52,9 @@ Notes for editors:
   closuretree.go:1209-1232 - two concurrent first-Adds under a parent race; the loser's lower min_halvings is dropped -> NeedsRenormalize warns slightly late (self-heals) [DB/SQL, conf 75]. Optional fix: ON CONFLICT DO UPDATE SET min_halvings = LEAST(...).
 
 ## C. API sharp edges - decide before the 0.10 API freeze
-- [ ] Query-by-example silently ignores zero-valued match fields
+- [x] Query-by-example silently ignores zero-valued match fields
   getoradd.go:131-161 (skip at 148-151) - a match on a legitimately false/0/"" field contributes nothing to the WHERE -> GetOrAdd can reuse the wrong sibling or create a duplicate [Pike, conf 85]. Fix: document loudly and/or add a map-based match form.
-- [ ] afterNodeID has inconsistent zero-value semantics between Add and Update
+- [x] afterNodeID has inconsistent zero-value semantics between Add and Update
   closuretree.go:274 vs 421 - Add uses bare uint (0 = "first"); Update uses *uint (nil = "don't reorder", &0 = "first"); parentID likewise uint-vs-*uint [architect conf 85 + Pike conf 70]. Fix: unify the sentinel convention / document prominently.
 - [x] GetOrAdd overwrites caller payload on the found path but preserves it on create
   getoradd.go:95-106 - found path replaces the whole item with the loaded row; create path keeps caller fields -> surprising path-dependent result [Pike, conf 75]. Fix: document the asymmetry on the exported method.
