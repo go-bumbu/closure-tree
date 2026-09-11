@@ -29,6 +29,7 @@ const ancestorIDMapKey = "ancestorId"
 
 var (
 	ErrItemIsNotTreeNode      = errors.New("the item does not embed Node")
+	ErrNilItem                = errors.New("item must not be a nil pointer")
 	ErrParentNotFound         = errors.New("wrong parent ID")
 	ErrNodeNotFound           = errors.New("node not found")
 	ErrInvalidMove            = errors.New("invalid move")
@@ -37,9 +38,26 @@ var (
 	ErrNoOp                   = errors.New("update called with no item, no new parent, and no new sort order")
 	ErrInvalidAfterNode       = errors.New("afterNodeID is not a sibling of the target parent")
 	ErrAfterNodeIsSelf        = errors.New("afterNodeID cannot be the node itself")
+
+	ErrItemsNil                    = errors.New("items cannot be nil")
+	ErrItemsNotPointerToSlice      = errors.New("items must be a pointer to a slice")
+	ErrSliceElemNotPointerToStruct = errors.New("slice element type must be a pointer to a struct")
 )
 
-// Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items
+// Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items.
+//
+// Concurrency: a Tree is safe to share across goroutines, and each operation runs in its own
+// transaction. However, operations are NOT fully serialized against each other under the default
+// database isolation level, so a few cross-goroutine patterns can race:
+//   - GetOrAdd of the same not-yet-existing child from two goroutines can create duplicate
+//     siblings (there is no row to lock until one exists; see GetOrAdd).
+//   - Two conflicting moves (e.g. "move A under B" and "move B under A") can both commit and
+//     form a cycle.
+//   - Add under a parent racing DeleteRecurse of that parent can leave an orphaned node or
+//     stale closure rows.
+//
+// If your workload can hit these, serialize the affected calls (e.g. a single writer) or add
+// your own locking.
 type Tree struct {
 	db *gorm.DB
 	// table names, allows multiple trees
@@ -68,8 +86,8 @@ func New(db *gorm.DB, item any) (*Tree, error) {
 
 // newTree parses the schema and validates the item but does not run migrations.
 func newTree(db *gorm.DB, item any) (*Tree, error) {
-	if !hasNode(item) {
-		return nil, ErrItemIsNotTreeNode
+	if err := checkItem(item); err != nil {
+		return nil, err
 	}
 
 	stmt := &gorm.Statement{DB: db}
@@ -208,6 +226,66 @@ LIMIT 1`, ct.nodesTbl, ct.relationsTbl),
 	return mid, h, nil
 }
 
+// placeAmongSiblings computes the sort_order for a node placed after afterID among the children
+// of parentID and records the resulting halvings in the meta table. afterID=0 places first.
+// Must be called inside a transaction.
+func (ct *Tree) placeAmongSiblings(tx *gorm.DB, parentID, afterID uint, tenant string) (float64, error) {
+	sortOrder, halvings, err := ct.computeSortOrder(tx, parentID, afterID, tenant)
+	if err != nil {
+		return 0, fmt.Errorf("unable to compute sort order: %w", err)
+	}
+	if err := ct.upsertMetaHalvings(tx, parentID, tenant, halvings); err != nil {
+		return 0, fmt.Errorf("unable to update sort order metadata: %w", err)
+	}
+	return sortOrder, nil
+}
+
+// currentParent returns the direct parent id of node id (0 for a root node) and whether the node
+// exists, by reading its depth-1 closure row. Must be called inside a transaction.
+func (ct *Tree) currentParent(tx *gorm.DB, id uint, tenant string) (parentID uint, found bool, err error) {
+	var row struct{ AncestorID uint }
+	res := tx.Raw(
+		fmt.Sprintf(`SELECT ancestor_id FROM %s WHERE descendant_id = ? AND depth = 1 AND tenant = ? LIMIT 1`, ct.relationsTbl),
+		id, tenant,
+	).Scan(&row)
+	if res.Error != nil {
+		return 0, false, fmt.Errorf("unable to look up current parent: %w", res.Error)
+	}
+	return row.AncestorID, res.RowsAffected > 0, nil
+}
+
+// nodeExists reports whether a node with the given id exists for tenant. Must run inside a tx.
+func (ct *Tree) nodeExists(tx *gorm.DB, id uint, tenant string) (bool, error) {
+	var count int64
+	if err := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Count(&count).Error; err != nil {
+		return false, fmt.Errorf("unable to verify node exists: %w", err)
+	}
+	return count > 0, nil
+}
+
+// updateFieldsInTx applies the column updates to node id within tx. It returns ErrNodeNotFound if
+// no such node exists for tenant; a no-op update (unchanged values) is not an error, even on MySQL
+// where it reports RowsAffected=0.
+func (ct *Tree) updateFieldsInTx(tx *gorm.DB, id uint, updateMap map[string]any, tenant string) error {
+	res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(updateMap)
+	if res.Error != nil {
+		return fmt.Errorf("unable to update node: %w", res.Error)
+	}
+	if res.RowsAffected > 0 {
+		return nil
+	}
+	// MySQL reports RowsAffected=0 for a no-op update (all values unchanged), so an explicit
+	// existence check is needed to tell a missing node from an idempotent one.
+	exists, err := ct.nodeExists(tx, id, tenant)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNodeNotFound
+	}
+	return nil
+}
+
 func isMySQLDialect(db *gorm.DB) bool {
 	return db.Name() == "mysql"
 }
@@ -217,10 +295,8 @@ func checkMySQLVersion(db *gorm.DB) error {
 	if err := db.Raw("SELECT VERSION()").Scan(&version).Error; err != nil {
 		return fmt.Errorf("unable to check MySQL version: %w", err)
 	}
+	// SplitN with a non-empty separator always returns at least one element, so parts[0] is safe.
 	parts := strings.SplitN(version, ".", 2)
-	if len(parts) < 1 {
-		return fmt.Errorf("unable to parse MySQL version: %s", version)
-	}
 	major, err := strconv.Atoi(parts[0])
 	if err != nil || major < 8 {
 		return fmt.Errorf("MySQL 8.0+ required; got %s", version)
@@ -228,15 +304,15 @@ func checkMySQLVersion(db *gorm.DB) error {
 	return nil
 }
 
-// GetNodeTableName returns the table name of the stored Nodes, used if you need to interact directly
+// NodeTableName returns the table name of the stored Nodes, used if you need to interact directly
 // with the database
-func (ct *Tree) GetNodeTableName() string {
+func (ct *Tree) NodeTableName() string {
 	return ct.nodesTbl
 }
 
-// GetClosureTableName returns the table name of the node closure tree relationship, used if you need to interact directly
+// ClosureTableName returns the table name of the node closure tree relationship, used if you need to interact directly
 // with the database
-func (ct *Tree) GetClosureTableName() string {
+func (ct *Tree) ClosureTableName() string {
 	return ct.relationsTbl
 }
 
@@ -272,8 +348,8 @@ func validateTenant(in string) (string, error) {
 // Add will add a new entry into the node Database under a specific parent and owned to a specific tenant
 // Note: the passed item has to embed a Node struct, but any value added to the Node will be ignored
 func (ct *Tree) Add(ctx context.Context, item any, parentID uint, afterNodeID uint, tenant string) error {
-	if !hasNode(item) {
-		return ErrItemIsNotTreeNode
+	if err := checkItem(item); err != nil {
+		return err
 	}
 	var err error
 	tenant, err = validateTenant(tenant)
@@ -356,12 +432,9 @@ func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, 
 		}
 	}
 	// Compute the sort order for the new node
-	sortOrder, halvings, err := ct.computeSortOrder(tx, parentID, afterNodeID, tenant)
+	sortOrder, err := ct.placeAmongSiblings(tx, parentID, afterNodeID, tenant)
 	if err != nil {
-		return fmt.Errorf("unable to compute sort order: %w", err)
-	}
-	if err := ct.upsertMetaHalvings(tx, parentID, tenant, halvings); err != nil {
-		return fmt.Errorf("unable to update sort order metadata: %w", err)
+		return err
 	}
 
 	// Set Node fields (including SortOrder) on the item before Create
@@ -384,7 +457,7 @@ func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, 
 	// Add reflexive relationship
 	err = tx.Table(ct.relationsTbl).Create(&closureTree{AncestorID: id, DescendantID: id, Tenant: gotTennant, Depth: 0}).Error
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to add reflexive relationship: %w", err)
 	}
 
 	if parentID == 0 {
@@ -392,19 +465,25 @@ func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, 
 		sqlstr := fmt.Sprintf(addRootRelQuery, ct.relationsTbl)
 		ex := tx.Exec(sqlstr, id, gotTennant)
 		if ex.Error != nil {
-			return ex.Error
+			return fmt.Errorf("unable to add root relationship: %w", ex.Error)
 		}
 	} else {
 		// Copy all ancestors of the parent to include the new tag
 		sqlstr := fmt.Sprintf(addRelsQuery, ct.relationsTbl, ct.relationsTbl)
 		ex := tx.Exec(sqlstr, id, gotTennant, parentID, gotTennant)
 		if ex.Error != nil {
-			return ex.Error
+			return fmt.Errorf("unable to add ancestor relationships: %w", ex.Error)
 		}
 	}
 	return nil
 }
 
+// Virtual root: ancestor_id 0 is a synthetic node that is never stored in the nodes table.
+// Every node — not just roots — gets one closure row with ancestor_id=0 whose depth equals the
+// node's absolute level in the tree (1 for a root, 2 for its children, and so on). Root nodes get
+// it directly via addRootRelQuery; deeper nodes inherit it because addRelsQuery copies all of the
+// parent's ancestor rows (including the parent's ancestor_id=0 row) with depth+1. This row is
+// load-bearing: the depth filter and the level-based queries rely on it existing for every node.
 const addRelsQuery = `INSERT INTO %s (ancestor_id, descendant_id, tenant, depth)
 			SELECT ancestor_id, ?, ?, depth + 1
 			FROM %s
@@ -430,8 +509,10 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint
 	if item == nil && newParentID == nil && afterNodeID == nil {
 		return ErrNoOp
 	}
-	if item != nil && !hasNode(item) {
-		return ErrItemIsNotTreeNode
+	if item != nil {
+		if err = checkItem(item); err != nil {
+			return err
+		}
 	}
 
 	var updateMap map[string]any
@@ -444,12 +525,8 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint
 
 	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if item != nil {
-			res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(updateMap)
-			if res.Error != nil {
-				return fmt.Errorf("unable to update node: %w", res.Error)
-			}
-			if res.RowsAffected == 0 {
-				return ErrNodeNotFound
+			if err := ct.updateFieldsInTx(tx, id, updateMap, tenant); err != nil {
+				return err
 			}
 		}
 		if newParentID != nil {
@@ -471,15 +548,11 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint
 // ErrInvalidMove for a same-parent reorder before the reorder gets to run.
 func (ct *Tree) maybeMoveInTx(tx *gorm.DB, id, newPID uint, hasReorder bool, tenant string) error {
 	if hasReorder {
-		var row struct{ AncestorID uint }
-		if err := tx.Raw(
-			fmt.Sprintf(`SELECT ancestor_id FROM %s WHERE descendant_id = ? AND depth = 1 AND tenant = ? LIMIT 1`,
-				ct.relationsTbl),
-			id, tenant,
-		).Scan(&row).Error; err != nil {
+		curParent, _, err := ct.currentParent(tx, id, tenant)
+		if err != nil {
 			return err
 		}
-		if row.AncestorID == newPID {
+		if curParent == newPID {
 			return nil // already under target parent; let reorder handle the rest
 		}
 	}
@@ -500,17 +573,15 @@ func (ct *Tree) reorderInTx(tx *gorm.DB, id, afterID uint, newParentID *uint, te
 	if newParentID != nil {
 		effectiveParentID = *newParentID
 	} else {
-		// Look up current parent via closure table
-		var row struct{ AncestorID uint }
-		err := tx.Raw(
-			fmt.Sprintf(`SELECT ancestor_id FROM %s WHERE descendant_id = ? AND depth = 1 AND tenant = ? LIMIT 1`,
-				ct.relationsTbl),
-			id, tenant,
-		).Scan(&row).Error
+		// Look up current parent (also verifies the node exists)
+		parentID, found, err := ct.currentParent(tx, id, tenant)
 		if err != nil {
 			return err
 		}
-		effectiveParentID = row.AncestorID
+		if !found {
+			return ErrNodeNotFound
+		}
+		effectiveParentID = parentID
 	}
 
 	// Validate afterID (if non-zero)
@@ -521,18 +592,19 @@ func (ct *Tree) reorderInTx(tx *gorm.DB, id, afterID uint, newParentID *uint, te
 	}
 
 	// Compute new sort_order
-	sortOrder, halvings, err := ct.computeSortOrder(tx, effectiveParentID, afterID, tenant)
+	sortOrder, err := ct.placeAmongSiblings(tx, effectiveParentID, afterID, tenant)
 	if err != nil {
-		return fmt.Errorf("unable to compute sort order: %w", err)
-	}
-	if err := ct.upsertMetaHalvings(tx, effectiveParentID, tenant, halvings); err != nil {
-		return fmt.Errorf("unable to update sort order metadata: %w", err)
+		return err
 	}
 
-	return tx.Exec(
+	res := tx.Exec(
 		fmt.Sprintf(`UPDATE %s SET sort_order = ? WHERE node_id = ? AND tenant = ?`, ct.nodesTbl),
 		sortOrder, id, tenant,
-	).Error
+	)
+	if res.Error != nil {
+		return fmt.Errorf("unable to update sort order: %w", res.Error)
+	}
+	return nil
 }
 
 // Renormalize rewrites sort_order for all direct children of parentID as 10.0, 20.0, 30.0, …
@@ -705,7 +777,7 @@ func (ct *Tree) moveInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
 	if err := tx.Table(ct.relationsTbl).
 		Where("ancestor_id = ? AND descendant_id = ? AND depth = 1 AND tenant = ?", newPID, id, tenant).
 		Count(&sameParentCount).Error; err != nil {
-		return err
+		return fmt.Errorf("unable to check current parent: %w", err)
 	}
 	if sameParentCount > 0 {
 		return ErrInvalidMove
@@ -717,7 +789,7 @@ func (ct *Tree) moveInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
 		if err := tx.Table(ct.relationsTbl).
 			Where("ancestor_id = ? AND descendant_id = ? AND tenant = ?", id, newPID, tenant).
 			Limit(1).Count(&descCount).Error; err != nil {
-			return err
+			return fmt.Errorf("unable to check for cycle: %w", err)
 		}
 		if descCount > 0 {
 			return ErrInvalidMove
@@ -729,7 +801,7 @@ func (ct *Tree) moveInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
 	delSql := fmt.Sprintf(moveDeleteExternalPaths, ct.relationsTbl, ct.relationsTbl)
 	delExec := tx.Exec(delSql, id, tenant, tenant)
 	if delExec.Error != nil {
-		return delExec.Error
+		return fmt.Errorf("unable to delete external closure paths: %w", delExec.Error)
 	}
 	// Note: in the combined path (item != nil), this check is redundant because the
 	// field update above already verified the node exists. It is kept intentionally to
@@ -750,14 +822,20 @@ func (ct *Tree) insertNewPathsInTx(tx *gorm.DB, id, newPID uint, tenant string) 
 		if insExec.Error == nil && insExec.RowsAffected == 0 {
 			return ErrNodeNotFound
 		}
-		return insExec.Error
+		if insExec.Error != nil {
+			return fmt.Errorf("unable to insert closure paths: %w", insExec.Error)
+		}
+		return nil
 	}
 	insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
 	insExec := tx.Exec(insertSql, id, newPID, tenant, tenant)
 	if insExec.Error == nil && insExec.RowsAffected == 0 {
 		return ErrParentNotFound
 	}
-	return insExec.Error
+	if insExec.Error != nil {
+		return fmt.Errorf("unable to insert closure paths: %w", insExec.Error)
+	}
+	return nil
 }
 
 const moveQueryInsertNewToRoot = `
@@ -789,6 +867,11 @@ WHERE descendant_id IN (SELECT descendant_id FROM subtree)
 AND ancestor_id NOT IN (SELECT descendant_id FROM subtree)
 AND tenant = ?`
 
+// DeleteRecurse deletes the node identified by nodeId together with its entire subtree
+// (all descendants at any depth), scoped to tenant. It also removes every closure relationship
+// referencing the deleted nodes and cleans up their sort-order metadata. The operation is
+// transactional. It returns ErrNodeNotFound if no node with that id exists for the given tenant,
+// and ErrEmptyTenant if tenant is empty.
 func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) error {
 	var err error
 	tenant, err = validateTenant(tenant)
@@ -801,7 +884,7 @@ func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) e
 		delNodesSql := fmt.Sprintf(deleteNodesRec, ct.nodesTbl, ct.relationsTbl, ct.nodesTbl)
 		exec1 := tx.Exec(delNodesSql, nodeId, tenant, tenant)
 		if exec1.Error != nil {
-			return exec1.Error
+			return fmt.Errorf("deleteRecurse: failed to delete nodes: %w", exec1.Error)
 		}
 
 		// make sure we don't delete relations if no node was deleted
@@ -811,14 +894,8 @@ func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) e
 			return ErrNodeNotFound
 		}
 
-		// Delete old closure relationships
-		delRelSql := fmt.Sprintf(deleteRelationsQuery, ct.relationsTbl, ct.relationsTbl)
-		exec2 := tx.Exec(delRelSql, nodeId, tenant, tenant)
-		if exec2.Error != nil {
-			return exec2.Error
-		}
-
-		// Clean up sort-order metadata for any deleted parent groups.
+		// Clean up sort-order metadata BEFORE deleting the closure rows: this cleanup identifies
+		// descendants via the relations table, so those rows must still exist when it runs.
 		// Deleted nodes can no longer have children, so their meta rows are stale.
 		// This includes both deleted descendants and the root node itself.
 		if err := tx.Exec(
@@ -836,6 +913,13 @@ func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) e
 			tenant, nodeId,
 		).Error; err != nil {
 			return fmt.Errorf("deleteRecurse: failed to clean metadata for root: %w", err)
+		}
+
+		// Delete the closure relationships last, after the metadata cleanup above has used them.
+		delRelSql := fmt.Sprintf(deleteRelationsQuery, ct.relationsTbl, ct.relationsTbl)
+		exec2 := tx.Exec(delRelSql, nodeId, tenant, tenant)
+		if exec2.Error != nil {
+			return fmt.Errorf("deleteRecurse: failed to delete relations: %w", exec2.Error)
 		}
 
 		return nil
@@ -865,8 +949,8 @@ WHERE tenant = ?
 // GetNode loads a single item into the passed pointer
 func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item any) error {
 
-	if !hasNode(item) {
-		return ErrItemIsNotTreeNode
+	if err := checkItem(item); err != nil {
+		return err
 	}
 	var err error
 	tenant, err = validateTenant(tenant)
@@ -941,18 +1025,18 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 // parent determines the root node id of to load.
 // maxDepth determines the depth of the relationship to load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
-func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tenant string, items interface{}) (err error) {
+func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any) (err error) {
 	if items == nil {
-		return errors.New("items cannot be nil")
+		return ErrItemsNil
 	}
 
 	itemsVal := reflect.ValueOf(items)
 	if itemsVal.Kind() != reflect.Pointer {
-		return errors.New("items must be a pointer to a slice")
+		return ErrItemsNotPointerToSlice
 	}
 	sliceVal := itemsVal.Elem()
 	if sliceVal.Kind() != reflect.Slice {
-		return errors.New("items must be a pointer to a slice")
+		return ErrItemsNotPointerToSlice
 	}
 
 	elemType := sliceVal.Type().Elem()
@@ -1045,6 +1129,11 @@ const absMaxDepth = 2147483647
 // parent determines the root node id of to load.
 // maxDepth determines the depth of the relationship to load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
+//
+// Note: this uses a recursive CTE. On MySQL 8 the recursion is bounded by cte_max_recursion_depth
+// (default 1000), so loading a subtree deeper than that many levels fails with error 3636; SQLite
+// and PostgreSQL have no such default ceiling. Set maxDepth, or raise cte_max_recursion_depth for
+// the session, if you need deeper trees on MySQL.
 func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any) (err error) {
 	if err := validateItems(items); err != nil {
 		return err
@@ -1098,19 +1187,19 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 
 func validateItems(items any) error {
 	if items == nil {
-		return errors.New("items cannot be nil")
+		return ErrItemsNil
 	}
 	itemsVal := reflect.ValueOf(items)
 	if itemsVal.Kind() != reflect.Pointer {
-		return errors.New("items must be a pointer to a slice")
+		return ErrItemsNotPointerToSlice
 	}
 	sliceVal := itemsVal.Elem()
 	if sliceVal.Kind() != reflect.Slice {
-		return errors.New("items must point to a slice")
+		return ErrItemsNotPointerToSlice
 	}
 	elemType := sliceVal.Type().Elem()
 	if elemType.Kind() != reflect.Pointer || elemType.Elem().Kind() != reflect.Struct {
-		return errors.New("slice element type must be a pointer to a struct")
+		return ErrSliceElemNotPointerToStruct
 	}
 	return nil
 }
@@ -1122,8 +1211,8 @@ func scanRowsToNodes(rows *sql.Rows, columns []string, col2FieldMap map[string]s
 	ancestorMap := make(map[int64]int64)
 
 	for rows.Next() {
-		values := make([]interface{}, len(columns))
-		valuePtrs := make([]interface{}, len(columns))
+		values := make([]any, len(columns))
+		valuePtrs := make([]any, len(columns))
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
@@ -1221,12 +1310,12 @@ func (ct *Tree) upsertMetaHalvings(tx *gorm.DB, parentID uint, tenant string, ha
 	var insertSQL string
 	if isMySQLDialect(tx) {
 		insertSQL = fmt.Sprintf(
-			`INSERT INTO %s (tenant, parent_id, min_halvings) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE min_halvings = min_halvings`,
+			`INSERT INTO %s (tenant, parent_id, min_halvings) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE min_halvings = LEAST(min_halvings, VALUES(min_halvings))`,
 			ct.metaTbl)
 	} else {
 		insertSQL = fmt.Sprintf(
-			`INSERT INTO %s (tenant, parent_id, min_halvings) VALUES (?, ?, ?) ON CONFLICT (tenant, parent_id) DO NOTHING`,
-			ct.metaTbl)
+			`INSERT INTO %s (tenant, parent_id, min_halvings) VALUES (?, ?, ?) ON CONFLICT (tenant, parent_id) DO UPDATE SET min_halvings = EXCLUDED.min_halvings WHERE %s.min_halvings > EXCLUDED.min_halvings`,
+			ct.metaTbl, ct.metaTbl)
 	}
 	return tx.Exec(insertSQL, tenant, parentID, halvings).Error
 }
@@ -1254,7 +1343,7 @@ func trySetFromString(s string, fieldVal reflect.Value) bool {
 	return false
 }
 
-func mapRowToStruct(values []interface{}, columns []string, col2FieldMap map[string]string, elemType reflect.Type) (
+func mapRowToStruct(values []any, columns []string, col2FieldMap map[string]string, elemType reflect.Type) (
 	reflect.Value, int64, int64, error,
 ) {
 	newElem := reflect.New(elemType.Elem())
@@ -1390,7 +1479,10 @@ const treeDescendantsQuery = `WITH RECURSIVE Tree AS (
 	)
 	SELECT  * FROM Tree ORDER BY cte_depth;`
 
-// TreeDescendantsIds returns the tree structure of the descendants to the passed item
+// TreeDescendantsIds returns the tree structure of the descendants to the passed item.
+//
+// Note: like TreeDescendants this uses a recursive CTE, so on MySQL 8 it is bounded by
+// cte_max_recursion_depth (default 1000, error 3636 beyond it); SQLite and PostgreSQL are not.
 func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth int, tenant string) (tree []*TreeNode, err error) {
 	tenant, err = validateTenant(tenant)
 	if err != nil {

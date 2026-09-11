@@ -81,6 +81,15 @@ type TestLeaf struct {
 	Nodes []*TestPayload `gorm:"many2many:test_leaf_nodes;"`
 }
 
+// CustomNamedLeaf uses explicit non-default many2many join-column names (via joinForeignKey /
+// joinReferences), exercising resolution of the join columns from the parsed schema rather than
+// reconstructing them by string munging.
+type CustomNamedLeaf struct {
+	closuretree.Leaf
+	Name  string
+	Nodes []*TestPayload `gorm:"many2many:cnl_join;joinForeignKey:LRef;joinReferences:NRef"`
+}
+
 type NodeDetails struct {
 	Id     int
 	Tenant string
@@ -2656,6 +2665,220 @@ func TestMetaWrittenOnAdd(t *testing.T) {
 			}
 			if minH < 40 {
 				t.Errorf("expected min_halvings >= 40 for fresh tree, got %d", minH)
+			}
+		})
+	}
+}
+
+// TestUpdateReorderOnlyMissingNode is a regression test: a reorder-only Update
+// (item=nil, newParentID=nil) of a node that does not exist for the tenant must
+// return ErrNodeNotFound instead of silently succeeding.
+func TestUpdateReorderOnlyMissingNode(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+
+			// A real node so the tenant / sibling group exists.
+			a := &TestPayload{Name: "a"}
+			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			zero := uint(0)
+
+			// Non-existent id.
+			err = ct.Update(ctx, 9999, nil, nil, &zero, tenant1)
+			if !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("reorder-only of missing id: want ErrNodeNotFound, got %v", err)
+			}
+
+			// Real id, wrong tenant.
+			err = ct.Update(ctx, a.NodeId, nil, nil, &zero, tenant2)
+			if !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("reorder-only wrong tenant: want ErrNodeNotFound, got %v", err)
+			}
+		})
+	}
+}
+
+// TestNilItemPointer is a regression test: passing a typed-nil pointer to the entry
+// points that reflect over the item used to panic; they must now return ErrNilItem.
+func TestNilItemPointer(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+
+			var nilItem *TestPayload // typed nil pointer
+			valid := &TestPayload{Name: "x"}
+
+			if err := ct.Add(ctx, nilItem, 0, 0, tenant1); !errors.Is(err, closuretree.ErrNilItem) {
+				t.Errorf("Add(nil): want ErrNilItem, got %v", err)
+			}
+			if err := ct.Update(ctx, 1, nilItem, nil, nil, tenant1); !errors.Is(err, closuretree.ErrNilItem) {
+				t.Errorf("Update(nil): want ErrNilItem, got %v", err)
+			}
+			if err := ct.GetNode(ctx, 1, tenant1, nilItem); !errors.Is(err, closuretree.ErrNilItem) {
+				t.Errorf("GetNode(nil): want ErrNilItem, got %v", err)
+			}
+			if _, err := ct.GetOrAdd(ctx, nilItem, 0, tenant1, valid); !errors.Is(err, closuretree.ErrNilItem) {
+				t.Errorf("GetOrAdd(nil item): want ErrNilItem, got %v", err)
+			}
+			if _, err := ct.FindChild(ctx, 0, tenant1, nilItem, valid); !errors.Is(err, closuretree.ErrNilItem) {
+				t.Errorf("FindChild(nil match): want ErrNilItem, got %v", err)
+			}
+			if _, err := ct.FindChild(ctx, 0, tenant1, valid, nilItem); !errors.Is(err, closuretree.ErrNilItem) {
+				t.Errorf("FindChild(nil out): want ErrNilItem, got %v", err)
+			}
+		})
+	}
+}
+
+// TestDeleteRecurseCleansInnerMeta is a regression test: DeleteRecurse must remove the
+// sort-order meta rows of inner sub-nodes, not just the root. The meta cleanup resolves
+// descendants from the closure table, so it has to run before those rows are deleted.
+func TestDeleteRecurseCleansInnerMeta(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+
+			// root -> childA -> grandchild. Adding grandchild under childA creates a meta
+			// row keyed by parent_id=childA (an inner node).
+			root := &TestPayload{Name: "root"}
+			if err := ct.Add(ctx, root, 0, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			childA := &TestPayload{Name: "childA"}
+			if err := ct.Add(ctx, childA, root.NodeId, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			grandchild := &TestPayload{Name: "grandchild"}
+			if err := ct.Add(ctx, grandchild, childA.NodeId, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			metaCount := func(parentID uint) int64 {
+				t.Helper()
+				var n int64
+				if err := gdb.Raw("SELECT COUNT(*) FROM closure_tree_meta_test_payloads WHERE tenant = ? AND parent_id = ?",
+					tenant1, parentID).Scan(&n).Error; err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+
+			// Precondition: the inner node childA has a meta row to leak.
+			if got := metaCount(childA.NodeId); got != 1 {
+				t.Fatalf("setup: want 1 meta row for inner node childA, got %d", got)
+			}
+
+			if err := ct.DeleteRecurse(ctx, root.NodeId, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			// The inner node's meta row must be gone, not leaked.
+			if got := metaCount(childA.NodeId); got != 0 {
+				t.Errorf("inner-node meta row leaked after DeleteRecurse: want 0, got %d", got)
+			}
+			// The root's own meta row must also be gone.
+			if got := metaCount(root.NodeId); got != 0 {
+				t.Errorf("root meta row leaked after DeleteRecurse: want 0, got %d", got)
+			}
+		})
+	}
+}
+
+// TestUpdateNoOpFieldsExistingNode covers the MySQL no-op case: updating an existing node with
+// unchanged field values must succeed, not return ErrNodeNotFound. On MySQL an idempotent update
+// reports RowsAffected=0, so this exercises the existence-check fallback (via make test-full).
+func TestUpdateNoOpFieldsExistingNode(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+
+			a := &TestPayload{Name: "a"}
+			if err := ct.Add(ctx, a, 0, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			// Update with the SAME field value: a no-op on the row. Must not error.
+			if err := ct.Update(ctx, a.NodeId, &TestPayload{Name: "a"}, nil, nil, tenant1); err != nil {
+				t.Errorf("no-op field update of existing node should succeed, got %v", err)
+			}
+
+			// A field update of a genuinely missing node still returns ErrNodeNotFound.
+			err = ct.Update(ctx, 99999, &TestPayload{Name: "x"}, nil, nil, tenant1)
+			if !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("field update of missing node: want ErrNodeNotFound, got %v", err)
+			}
+		})
+	}
+}
+
+// TestGetLeavesCustomJoinColumns proves GetLeaves resolves the many2many join columns from the
+// parsed schema: CustomNamedLeaf uses non-default join-column names that the old string-munging
+// join reconstruction could not have produced.
+func TestGetLeavesCustomJoinColumns(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := db.ConnDbName("getleavescustom")
+			gdb.Exec("DROP TABLE IF EXISTS cnl_join")
+			gdb.Exec("DROP TABLE IF EXISTS custom_named_leaves")
+			dropTreeTables(gdb, TestPayload{})
+
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			populateTree(t, ct)
+
+			if err := gdb.AutoMigrate(&CustomNamedLeaf{}); err != nil {
+				t.Fatal(err)
+			}
+
+			leaf := CustomNamedLeaf{Leaf: closuretree.Leaf{Tenant: tenant1}, Name: "custom-leaf"}
+			if err := gdb.Create(&leaf).Error; err != nil {
+				t.Fatal(err)
+			}
+			// Associate with node 2 (Mobile Phones), a child of node 1 (Electronics).
+			node2 := &TestPayload{}
+			node2.NodeId = 2
+			if err := gdb.Model(&leaf).Association("Nodes").Append(node2); err != nil {
+				t.Fatal(err)
+			}
+
+			var leaves []CustomNamedLeaf
+			if err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1); err != nil {
+				t.Fatalf("GetLeaves with custom join columns failed: %v", err)
+			}
+			if len(leaves) != 1 {
+				t.Fatalf("expected 1 leaf, got %d", len(leaves))
+			}
+			if leaves[0].Name != "custom-leaf" {
+				t.Errorf("expected 'custom-leaf', got %q", leaves[0].Name)
 			}
 		})
 	}

@@ -43,6 +43,19 @@ func hasNode(item any) bool {
 	return hasNodeType(itemType)
 }
 
+// checkItem validates that item is usable as a tree node. It returns ErrNilItem for a typed-nil
+// pointer (which would otherwise panic once reflection dereferences it) and ErrItemIsNotTreeNode
+// if item does not embed Node.
+func checkItem(item any) error {
+	if v := reflect.ValueOf(item); v.Kind() == reflect.Pointer && v.IsNil() {
+		return ErrNilItem
+	}
+	if !hasNode(item) {
+		return ErrItemIsNotTreeNode
+	}
+	return nil
+}
+
 func hasNodeType(t reflect.Type) bool {
 	if t == reflect.TypeOf(Node{}) {
 		return true
@@ -56,7 +69,7 @@ func hasNodeType(t reflect.Type) bool {
 	return false
 }
 
-func getNodeData(item interface{}) (uint, string, error) {
+func getNodeData(item any) (uint, string, error) {
 	if item == nil {
 		return 0, "", errors.New("getNodeData: item cannot be nil")
 	}
@@ -100,7 +113,7 @@ func findNodeValue(t reflect.Type, v reflect.Value) (reflect.Value, bool) {
 	return reflect.Value{}, false
 }
 
-func dereference(item interface{}) (reflect.Type, reflect.Value) {
+func dereference(item any) (reflect.Type, reflect.Value) {
 	t := reflect.TypeOf(item)
 	v := reflect.ValueOf(item)
 

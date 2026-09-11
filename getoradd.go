@@ -21,11 +21,11 @@ import (
 // same way GetNode does (including NodeId and the read-only ParentId) and found is true. When
 // nothing matches, found is false and err is nil.
 func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, match any, out any) (found bool, err error) {
-	if !hasNode(match) {
-		return false, ErrItemIsNotTreeNode
+	if err = checkItem(match); err != nil {
+		return false, err
 	}
-	if !hasNode(out) {
-		return false, ErrItemIsNotTreeNode
+	if err = checkItem(out); err != nil {
+		return false, err
 	}
 	tenant, err = validateTenant(tenant)
 	if err != nil {
@@ -35,7 +35,7 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 		return false, ErrItemNotPointerToStruct
 	}
 
-	whereSQL, whereArgs, err := ct.buildMatchConditions(match)
+	whereSQL, whereArgs, err := ct.buildMatchConditions(ctx, match)
 	if err != nil {
 		return false, err
 	}
@@ -51,6 +51,10 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // the returned node id can be chained as the parentID of the next level down. match must embed
 // Node and have at least one non-zero field (else ErrEmptyMatch).
 //
+// The two paths treat your payload differently: on create, item's non-Node fields are kept as you
+// set them; on the found path item is fully overwritten with the stored row (like GetNode), so
+// any fields you set beyond the match are replaced by the existing node's values.
+//
 // Atomicity: the find and the add run in a single transaction, so a node is never left half
 // created. However this does NOT fully serialize two callers creating the same brand-new child
 // concurrently: because the child does not yet exist there is no row to lock, so both may pass
@@ -58,18 +62,18 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // race to create the same new child, serialize those calls (e.g. a single import worker) or
 // deduplicate afterwards. Re-adding an already-existing child is race-free.
 func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant string, match any) (created bool, err error) {
-	if !hasNode(item) {
-		return false, ErrItemIsNotTreeNode
+	if err = checkItem(item); err != nil {
+		return false, err
 	}
-	if !hasNode(match) {
-		return false, ErrItemIsNotTreeNode
+	if err = checkItem(match); err != nil {
+		return false, err
 	}
 	tenant, err = validateTenant(tenant)
 	if err != nil {
 		return false, err
 	}
 
-	whereSQL, whereArgs, err := ct.buildMatchConditions(match)
+	whereSQL, whereArgs, err := ct.buildMatchConditions(ctx, match)
 	if err != nil {
 		return false, err
 	}
@@ -128,7 +132,7 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // matched too; column identifiers are dialect-quoted, so a field mapping to a reserved-word
 // column still produces valid SQL. Values are returned as bind args. Returns ErrEmptyMatch when
 // no usable non-zero field is present.
-func (ct *Tree) buildMatchConditions(match any) (string, []any, error) {
+func (ct *Tree) buildMatchConditions(ctx context.Context, match any) (string, []any, error) {
 	stmt := &gorm.Statement{DB: ct.db}
 	if err := stmt.Parse(match); err != nil {
 		return "", nil, fmt.Errorf("unable to parse match schema: %w", err)
@@ -145,7 +149,7 @@ func (ct *Tree) buildMatchConditions(match any) (string, []any, error) {
 		if f.OwnerSchema != nil && f.OwnerSchema.ModelType == nodeType {
 			continue
 		}
-		val, isZero := f.ValueOf(context.Background(), rv)
+		val, isZero := f.ValueOf(ctx, rv)
 		if isZero {
 			continue
 		}

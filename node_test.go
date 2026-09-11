@@ -17,7 +17,7 @@ type nonEmbeddingStruct struct {
 func TestHasBranch(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    interface{}
+		input    any
 		expected bool
 	}{
 		{
@@ -80,7 +80,7 @@ func TestHasBranch(t *testing.T) {
 func TestGetNodeData(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    interface{}
+		input    any
 		expected string
 		expectId uint
 		hasError bool

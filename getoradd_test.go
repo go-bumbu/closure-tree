@@ -588,6 +588,65 @@ func TestGetOrAddConcurrent(t *testing.T) {
 			if childNodes != createdCount {
 				t.Errorf("consistency violated: created=true count %d but %d child nodes exist", createdCount, childNodes)
 			}
+			if createdCount < 1 {
+				t.Errorf("expected at least one goroutine to create the child, got %d", createdCount)
+			}
+		})
+	}
+}
+
+// TestGetOrAddIdempotent asserts the get-or-create contract deterministically: the first call
+// creates the child, a second identical call finds it (created=false) and adds no duplicate.
+func TestGetOrAddIdempotent(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := closuretree.New(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+
+			parent := &TestPayload{Name: "parent"}
+			if err := ct.Add(ctx, parent, 0, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			first := &TestPayload{Name: "child"}
+			created, err := ct.GetOrAdd(ctx, first, parent.NodeId, tenant1, TestPayload{Name: "child"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !created {
+				t.Fatalf("first GetOrAdd should create the child")
+			}
+
+			second := &TestPayload{Name: "child"}
+			created, err = ct.GetOrAdd(ctx, second, parent.NodeId, tenant1, TestPayload{Name: "child"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if created {
+				t.Errorf("second GetOrAdd should find the existing child, not create a new one")
+			}
+			if second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd returned a different node: first=%d second=%d", first.NodeId, second.NodeId)
+			}
+
+			var kids []TestPayload
+			if err := ct.Descendants(ctx, parent.NodeId, 1, tenant1, &kids); err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for _, k := range kids {
+				if k.Name == "child" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Errorf("expected exactly one child after idempotent GetOrAdd, got %d", count)
+			}
 		})
 	}
 }
