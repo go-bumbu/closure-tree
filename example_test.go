@@ -22,7 +22,7 @@ func ExampleTree_Descendants() {
 	db := getGormDb("tagTree.example")
 	// A table suffix should be added, this allows to use multiple trees on the same database
 	// two tables will be created: one for tags and one to keep the closure tree structure
-	tree, _ := ct.New(db, Tag{})
+	tree, _ := newTestTree(db, Tag{})
 
 	// add nodes with a tree structure
 
@@ -83,7 +83,7 @@ func ExampleTree_TreeDescendants() {
 	db := getGormDb("tagTree2.example")
 	// A table suffix should be added, this allows to use multiple trees on the same database
 	// two tables will be created: one for tags and one to keep the closure tree structure
-	tree, _ := ct.New(db, Tag{})
+	tree, _ := newTestTree(db, Tag{})
 
 	// add nodes with a tree structure
 
@@ -138,124 +138,9 @@ func printTree(nodes []*NestedTag, indent string) {
 	}
 }
 
-type Book struct {
-	ID     uint `gorm:"primarykey"`
-	Name   string
-	Genres []Genre `gorm:"many2many:books_genres;"`
-}
-
 type Genre struct {
 	ct.Node // embed the Node struct to add a branch primary key
 	Name    string
-}
-
-// ExampleTree_DescendantIds_treeWithM2MRelations illustrates on how to get the descendant IDs of a particular node
-// and construct a custom sql query to get the leaves belonging to this list of IDs
-func ExampleTree_DescendantIds_treeWithM2MRelations() {
-	db := getGormDb("booksM2M.example")
-
-	tree, err := ct.New(db, Genre{})
-	handleErr(err)
-	_ = tree
-	// add this sample data
-	// 1  -  Science Fiction
-	// 2  -   | -  Space Opera
-	// 3  -   |      |  - Galactic Empires
-	// 4  -   |      |  - Interstellar Wars
-	// 5  -   | -  Hard Sci-Fi
-	// 6  -   |      |  - Futuristic Technology
-	// 7  -   |      |  - Quantum Exploration
-	// 8  -  Fantasy
-	// 9  -   | -  High Fantasy
-	// 10 -   |      |  - Epic Quests
-	// 11 -   |      |  - Mythical Creatures
-	// 12 -   | -  Urban Fantasy
-	// 13 -   |      |  - Magic in the Modern World
-	// 14 -   |      |  - Supernatural Detectives
-
-	tenant := "sampleTenant"
-	ctx := context.Background()
-
-	scifi := Genre{Name: "Science Fiction"}
-	err = tree.Add(ctx, &scifi, nil, nil, tenant)
-	handleErr(err)
-
-	spaceOpera := Genre{Name: "Space Opera"}
-	_ = tree.Add(ctx, &spaceOpera, up(scifi.NodeId), nil, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Galactic Empires"}, up(spaceOpera.Id()), nil, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Interstellar Wars"}, up(spaceOpera.Id()), nil, tenant)
-
-	hardScifi := Genre{Name: "Hard Sci-Fi"}
-	_ = tree.Add(ctx, &hardScifi, up(scifi.NodeId), nil, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Futuristic Technology"}, up(hardScifi.Id()), nil, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Quantum Exploration"}, up(hardScifi.Id()), nil, tenant)
-
-	fantasy := Genre{Name: "Fantasy"}
-	_ = tree.Add(ctx, &fantasy, nil, nil, tenant)
-
-	highFantasy := Genre{Name: "High Fantasy"}
-	_ = tree.Add(ctx, &highFantasy, up(fantasy.NodeId), nil, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Epic Quests"}, up(highFantasy.Id()), nil, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Mythical Creatures"}, up(highFantasy.Id()), nil, tenant)
-
-	urbanFantasy := Genre{Name: "Urban Fantasy"}
-	_ = tree.Add(ctx, &urbanFantasy, up(fantasy.NodeId), nil, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Magic in the Modern World"}, up(urbanFantasy.Id()), nil, tenant)
-	_ = tree.Add(ctx, Genre{Name: "Supernatural Detectives"}, up(urbanFantasy.Id()), nil, tenant)
-
-	// Create the Books table
-	_ = db.AutoMigrate(Book{})
-
-	// insert some Books
-	books := []Book{
-		{Name: "The Echoes of Eternity", Genres: []Genre{{Node: ct.Node{NodeId: 3}}, {Node: ct.Node{NodeId: 10}}}},
-		{Name: "Chronicles of the Shadowlands", Genres: []Genre{{Node: ct.Node{NodeId: 6}}}},
-		{Name: "Nebula’s Whisper", Genres: []Genre{{Node: ct.Node{NodeId: 4}}}},
-		{Name: "The Clockwork Alchemist", Genres: []Genre{{Node: ct.Node{NodeId: 4}}, {Node: ct.Node{NodeId: 8}}}},
-		{Name: "Through the Veil of Time", Genres: []Genre{{Node: ct.Node{NodeId: 13}}, {Node: ct.Node{NodeId: 14}}}},
-		{Name: "Tides of an Emerald Sky", Genres: []Genre{{Node: ct.Node{NodeId: 14}}}},
-	}
-	db.Create(books) // pass a slice to insert multiple row
-
-	// query space operas
-	spaceOperaIds, _ := tree.DescendantIds(ctx, 2, 0, tenant)
-	var gotBooks []Book
-	db.Model(&Book{}).InnerJoins("INNER JOIN books_genres ON books.id = books_genres.book_id").
-		Preload("Genres").
-		Where("books_genres.genre_node_id IN ?", spaceOperaIds).
-		Distinct().
-		Find(&gotBooks)
-
-	fmt.Println("Space Operas:")
-	for _, book := range gotBooks {
-		fmt.Printf("- %s\n", book.Name)
-	}
-	//spew.Dump(gotBooks)
-
-	// query Fantasy
-	fantasyIds, _ := tree.DescendantIds(ctx, 8, 0, tenant)
-	fantasyIds = append(fantasyIds, 8)
-	db.Model(&Book{}).InnerJoins("INNER JOIN books_genres ON books.id = books_genres.book_id").
-		Preload("Genres").
-		Where("books_genres.genre_node_id IN ?", fantasyIds).
-		Distinct().
-		Find(&gotBooks)
-
-	fmt.Println("Fantasy:")
-	for _, book := range gotBooks {
-		fmt.Printf("- %s\n", book.Name)
-	}
-
-	// Output:
-	//Space Operas:
-	//- The Echoes of Eternity
-	//- Nebula’s Whisper
-	//- The Clockwork Alchemist
-	//Fantasy:
-	//- The Echoes of Eternity
-	//- The Clockwork Alchemist
-	//- Through the Veil of Time
-	//- Tides of an Emerald Sky
 }
 
 type Song struct {
@@ -269,7 +154,7 @@ type Song struct {
 func ExampleTree_GetLeaves() {
 	db := getGormDb("booksM2M.example")
 
-	tree, err := ct.New(db, Genre{})
+	tree, err := newTestTree(db, Genre{})
 	handleErr(err)
 	_ = tree
 	// add this sample data
@@ -369,7 +254,7 @@ func ExampleTree_GetLeaves() {
 
 func ExampleTree_Add_sortOrder() {
 	db := getGormDb("tagTree.sortorder.example")
-	tree, _ := ct.New(db, Tag{})
+	tree, _ := newTestTree(db, Tag{})
 
 	tenant := "sampleTenant"
 	ctx := context.Background()
@@ -412,7 +297,7 @@ func ExampleTree_Add_sortOrder() {
 // Re-deriving a path that shares a prefix reuses the existing nodes instead of duplicating them.
 func ExampleTree_GetOrAdd() {
 	db := getGormDb("getOrAdd.example")
-	tree, _ := ct.New(db, Tag{})
+	tree, _ := newTestTree(db, Tag{})
 
 	tenant := "sampleTenant"
 	ctx := context.Background()

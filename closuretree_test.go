@@ -136,7 +136,7 @@ func TestMetaTableCreated(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
 
-			_, err := closuretree.New(gdb, TestPayload{})
+			_, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,7 +193,7 @@ func TestNodeSortOrderField(t *testing.T) {
 			}
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, SampleStruct{})
-			ct, err := closuretree.New(gdb, SampleStruct{})
+			ct, err := newTestTree(gdb, SampleStruct{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,7 +214,7 @@ func TestAddSortOrder(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -298,7 +298,7 @@ func TestAddSortOrderErrors(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -340,7 +340,7 @@ func TestUpdateSortOrder(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -420,7 +420,7 @@ func TestUpdateSortOrderErrors(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -556,7 +556,7 @@ func TestAddNodes(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					gdb := db.ConnDbName(fmt.Sprintf("addnodes%d", i))
 					dropTreeTables(gdb, tc.topItem)
-					ct, err := closuretree.New(gdb, tc.topItem)
+					ct, err := newTestTree(gdb, tc.topItem)
 					if err != nil {
 						if tc.topItemExpect.Err != "" {
 							if diff := cmp.Diff(err.Error(), tc.topItemExpect.Err); diff != "" {
@@ -659,7 +659,7 @@ func TestPopulateTree(t *testing.T) {
 
 			gdb := db.ConnDbName("populatetree")
 			dropTreeTables(gdb, TestPayload{})
-			ct, err = closuretree.New(gdb, TestPayload{})
+			ct, err = newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -673,7 +673,7 @@ func TestTreeGetNode(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -767,7 +767,7 @@ func TestUpdate(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -874,7 +874,7 @@ func TestUpdateAndMove(t *testing.T) {
 				t.Helper()
 				gdb := connAndClose(t, db)
 				dropTreeTables(gdb, TestPayload{})
-				ct, err := closuretree.New(gdb, TestPayload{})
+				ct, err := newTestTree(gdb, TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -986,7 +986,7 @@ func TestGetDescendants(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1087,7 +1087,7 @@ func TestGetTreeDescendants(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1223,7 +1223,7 @@ func TestMove(t *testing.T) {
 			setup := func(t *testing.T, name string) *closuretree.Tree {
 				gdb := connAndClose(t, db)
 				dropTreeTables(gdb, TestPayload{})
-				ct, err := closuretree.New(gdb, TestPayload{})
+				ct, err := newTestTree(gdb, TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1447,7 +1447,7 @@ func TestMoveBetweenParents_NoDuplicates(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1530,7 +1530,7 @@ func TestDelete(t *testing.T) {
 			setup := func(t *testing.T, name string) *closuretree.Tree {
 				gdb := connAndClose(t, db)
 				dropTreeTables(gdb, TestPayload{})
-				ct, err := closuretree.New(gdb, TestPayload{})
+				ct, err := newTestTree(gdb, TestPayload{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1621,7 +1621,7 @@ func TestIsDescendant(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1691,7 +1691,7 @@ func TestIsChildOf(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1759,7 +1759,7 @@ func TestGetLeaves(t *testing.T) {
 			gdb.Exec("DROP TABLE IF EXISTS test_leaves")
 			dropTreeTables(gdb, TestPayload{})
 
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1858,7 +1858,7 @@ func TestMoveSubtreeIntegrity(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := db.ConnDbName("movesubtreeintegrity")
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1937,7 +1937,7 @@ func TestAddMultiLevelEmbed(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, MultiLevelPayload{})
-			ct, err := closuretree.New(gdb, MultiLevelPayload{})
+			ct, err := newTestTree(gdb, MultiLevelPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1967,7 +1967,7 @@ func TestUpdateMultiLevelEmbed(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, MultiLevelPayload{})
-			ct, err := closuretree.New(gdb, MultiLevelPayload{})
+			ct, err := newTestTree(gdb, MultiLevelPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2010,7 +2010,7 @@ func TestRenormalize(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2094,7 +2094,7 @@ func TestDescendantsSortOrder(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2156,7 +2156,7 @@ func TestTreeDescendantsSortOrder(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2203,7 +2203,7 @@ func TestTreeDescendantsIdsDeterministic(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2233,7 +2233,7 @@ func TestTreeDescendantsIdsSortOrder(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2312,7 +2312,7 @@ func TestSortOrderRegression(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2355,7 +2355,7 @@ func TestNeedsRenormalize(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2456,7 +2456,7 @@ func TestNeedsRenormalizeAny(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2545,7 +2545,7 @@ func TestRenormalizeAll(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2644,7 +2644,7 @@ func TestMetaWrittenOnAdd(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2681,7 +2681,7 @@ func TestUpdateReorderOnlyMissingNode(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2717,7 +2717,7 @@ func TestNilItemPointer(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2756,7 +2756,7 @@ func TestDeleteRecurseCleansInnerMeta(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2816,7 +2816,7 @@ func TestUpdateNoOpFieldsExistingNode(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2852,7 +2852,7 @@ func TestGetLeavesCustomJoinColumns(t *testing.T) {
 			gdb.Exec("DROP TABLE IF EXISTS custom_named_leaves")
 			dropTreeTables(gdb, TestPayload{})
 
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2894,7 +2894,7 @@ func TestUpdateMoveAppendsLast(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}

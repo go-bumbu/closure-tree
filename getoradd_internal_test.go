@@ -30,6 +30,9 @@ func newInternalTree(t *testing.T, model any) *Tree {
 	if err != nil {
 		t.Fatalf("new tree: %v", err)
 	}
+	if err := ct.Migrate(); err != nil {
+		t.Fatalf("migrate tree: %v", err)
+	}
 	return ct
 }
 

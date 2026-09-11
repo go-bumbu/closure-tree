@@ -22,7 +22,7 @@ func TestFindChild(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -179,7 +179,7 @@ func TestFindChildSameNameDifferentParents(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -222,7 +222,7 @@ func TestGetOrAdd(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -281,7 +281,7 @@ func TestGetOrAddChaining(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,7 +327,7 @@ func TestGetOrAddDistinctUnderDifferentParents(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -377,7 +377,7 @@ func TestGetOrAddTenantIsolation(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -431,7 +431,7 @@ func TestGetOrAddValueItem(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -472,7 +472,7 @@ func TestGetOrAddErrors(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -539,7 +539,7 @@ func TestGetOrAddConcurrent(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -620,7 +620,7 @@ func TestGetOrAddIdempotent(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -676,7 +676,7 @@ func TestGetOrAddParentIdBothPaths(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}

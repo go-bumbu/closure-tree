@@ -40,11 +40,11 @@ Notes for editors:
   closuretree.go:702-743 (+455-464, 1206-1232, 633) - a re-parent without afterNodeID never rescales the moved node's sort_order to its new siblings nor updates the destination parent's min_halvings -> sibling sort_order collisions and false-negative NeedsRenormalize [go-architect-reviewer, conf 78]. Decision first: should move own re-placement (like Add/reorder), or must callers pair move+reorder? Then fix accordingly.
 
 ## B. Concurrency hardening - needs a design decision (no row locks / FKs under READ COMMITTED)
-- [ ] Concurrent conflicting moves can create a cycle or double-parent (CRITICAL)
+- [>] Concurrent conflicting moves can create a cycle or double-parent (CRITICAL)
   closuretree.go:702-743 - lock-free same-parent/cycle guards; "move A under B" || "move B under A" both pass and commit -> cycle -> runaway TreeDescendants CTE (or MySQL err 3636) [DB/SQL, conf 85]. Options: SELECT ... FOR UPDATE a per-tree lock anchor, advisory lock keyed on tenant, or SERIALIZABLE + retry; document until then.
-- [ ] Concurrent Add-under-parent vs DeleteRecurse(parent) orphans / phantoms closure rows
+- [>] Concurrent Add-under-parent vs DeleteRecurse(parent) orphans / phantoms closure rows
   closuretree.go:337-350, 390-404 vs 792-843 - Add's parent check is lock-free and there are no FKs, so a concurrent delete yields a phantom (unreachable) node or orphan closure rows; the "avoid TOCTOU" comment is misleading [DB/SQL, conf 80]. Fix: SELECT ... FOR SHARE the parent inside the tx and/or add FKs.
-- [ ] Closure unique index includes depth, so (ancestor_id, descendant_id, tenant) is not enforced unique
+- [x] Closure unique index includes depth, so (ancestor_id, descendant_id, tenant) is not enforced unique
   closuretree.go:252-257 - dropping depth from idx_closure_uniq turns concurrent double-parent / duplicate-path corruption into a loud UNIQUE violation instead of silent duplicates [DB/SQL, conf 80]. Note: AutoMigrate is additive-only and cannot alter this index - needs a real migration.
 - [x] GetOrAdd duplicate-sibling race - already documented/accepted; test is weak
   getoradd.go:79-90 - concurrent GetOrAdd of a not-yet-existing child both create it (distinct node_ids) -> duplicate siblings; no DB constraint can catch it as modeled. Accepted per prior decision; the concurrent test only asserts childNodes==createdCount [DB/SQL, conf 90]. Decision: strengthen test / revisit the deferred race-proofing, or leave documented.
@@ -82,21 +82,21 @@ Notes for editors:
   closuretree.go:944 + node.go:59, 103 - cosmetic consistency (Go 1.25) [Pike, conf 90].
 
 ## E. Structure and refactors - lower urgency
-- [ ] Split the 1503-line closuretree.go by concern
+- [x] Split the 1503-line closuretree.go by concern
   closuretree.go (whole) - mixes construction/migration, sort-order/halvings, CRUD + closure SQL, query/CTE, and reflection scanning; getoradd.go already set the split precedent [architect conf 88 + Pike conf 70]. Mechanical move, no behavior change (e.g. sortorder.go, move.go, scan.go, query.go).
 - [x] De-duplicate the closure-maintenance choreography and the current-parent lookup
   closuretree.go:353-365 vs 517-530; 474-481 vs 504-513 - the compute-sort -> upsert-meta sequence and the "find my current parent" query are written twice and coupled by convention [architect, conf 88]. Fix: extract a place-among-siblings helper and a currentParent(tx, id, tenant) helper.
-- [ ] Two row->struct scanning strategies can diverge
+- [x] Two row->struct scanning strategies can diverge
   closuretree.go:983 (GORM ScanRows) vs 1084/1118/1257 (hand-rolled mapRowToStruct) - Descendants and TreeDescendants can disagree on type coercion for the same model/driver [architect, conf 85].
-- [ ] Migration is fused into construction, additive-only and unversioned
+- [x] Migration is fused into construction, additive-only and unversioned
   closuretree.go:53-67 -> 112-126 - New always AutoMigrates (needs DDL privilege; concurrent starts race); cannot drop the stale index it tells users to DROP by hand (:251); no schema version / backfill for 0.10's sort_order + meta [architect, conf 82]. Consider exposing newTree as a migration-free constructor + an explicit Migrate().
-- [ ] Dialect handling has no home (hand-maintained portability despite GORM)
+- [>] Dialect handling has no home (hand-maintained portability despite GORM)
   closuretree.go:211-223, 781, 1222-1231 - scattered isMySQLDialect checks (version gate, upsert branch, CTE-in-DELETE workaround); consider a single dialect-capabilities seam if the DB matrix grows [architect, conf 72].
-- [ ] Two sources of truth for column names (parsed map vs hardcoded literals)
+- [>] Two sources of truth for column names (parsed map vs hardcoded literals)
   closuretree.go:152-154, 170, 533 etc. hardcode node_id/tenant/sort_order/parent_id while readers use col2FieldMap -> split-brain if Node's mapping changes [architect, conf 78]. Fix: centralize as named constants used by both.
-- [ ] Standardize not-found detection and slice validation across operations
+- [x] Standardize not-found detection and slice validation across operations
   closuretree.go mixes RowsAffected==0 vs gorm.ErrRecordNotFound; Descendants (949-957) inlines validation while TreeDescendants uses validateItems (1099-1116) [architect, conf 75].
-- [ ] Reconsider exposing internal table names as a first-class pattern
+- [x] Reconsider exposing internal table names as a first-class pattern
   closuretree.go:233, 239 + example_test.go:223-227 - teaching the manual raw-JOIN path next to the safe GetLeaves invites tenant / closure-invariant bypass; the meta table has no accessor (asymmetric) [architect, conf 60].
 - [x] GetLeaves validates target after a DB round-trip; checkMySQLVersion has a dead branch
   leaves.go:120-136 (move isLeaveSlice above the DescendantIds call) + closuretree.go:220-223 (SplitN can never yield len < 1) [Pike, conf 85].
