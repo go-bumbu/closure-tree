@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -29,6 +30,9 @@ func newInternalTree(t *testing.T, model any) *Tree {
 	if err != nil {
 		t.Fatalf("new tree: %v", err)
 	}
+	if err := ct.Migrate(); err != nil {
+		t.Fatalf("migrate tree: %v", err)
+	}
 	return ct
 }
 
@@ -42,7 +46,7 @@ type matchColSample struct {
 func TestBuildMatchConditionsQuotesColumns(t *testing.T) {
 	ct := newInternalTree(t, matchColSample{})
 
-	where, args, err := ct.buildMatchConditions(matchColSample{Name: "x"})
+	where, args, err := ct.buildMatchConditions(context.Background(), matchColSample{Name: "x"}, []string{"Name"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -74,7 +78,7 @@ type matchEmbeddedSample struct {
 func TestBuildMatchConditionsEmbeddedNamedStruct(t *testing.T) {
 	ct := newInternalTree(t, matchEmbeddedSample{})
 
-	_, args, err := ct.buildMatchConditions(matchEmbeddedSample{Meta: matchEmbeddedMeta{Color: "red"}})
+	_, args, err := ct.buildMatchConditions(context.Background(), matchEmbeddedSample{Meta: matchEmbeddedMeta{Color: "red"}}, []string{"Color"})
 	if err != nil {
 		t.Fatalf("embedded field should produce a condition, got err: %v", err)
 	}

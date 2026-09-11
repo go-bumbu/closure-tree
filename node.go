@@ -8,9 +8,12 @@ import (
 // Node is an embeddable ID to be used in closure tree, this is mandatory.
 // ParentId is ignored during write operations, it is only populated during read.
 type Node struct {
-	NodeId    uint    `gorm:"autoIncrement;primaryKey;not null;index:idx_node_tenant,composite:2" json:"id"`
+	// The (tenant, node_id) index uses GORM's empty-name composite form so the generated name is
+	// scoped per node table (idx_<table>_tenant_node). A hardcoded name would collide when two node
+	// models are migrated into one database, because index names are schema-global on SQLite/Postgres.
+	NodeId    uint    `gorm:"autoIncrement;primaryKey;not null;index:,composite:tenant_node,priority:2" json:"id"`
 	ParentId  uint    `json:"parentId" gorm:"column:parent_id;->;-:migration"` // field is Read-only, no migration
-	Tenant    string  `gorm:"not null;index:idx_node_tenant,composite:1" json:"tenant"`
+	Tenant    string  `gorm:"not null;index:,composite:tenant_node,priority:1" json:"tenant"`
 	SortOrder float64 `gorm:"not null;default:0" json:"sortOrder"`
 }
 
@@ -43,6 +46,19 @@ func hasNode(item any) bool {
 	return hasNodeType(itemType)
 }
 
+// checkItem validates that item is usable as a tree node. It returns ErrNilItem for a typed-nil
+// pointer (which would otherwise panic once reflection dereferences it) and ErrItemIsNotTreeNode
+// if item does not embed Node.
+func checkItem(item any) error {
+	if v := reflect.ValueOf(item); v.Kind() == reflect.Pointer && v.IsNil() {
+		return ErrNilItem
+	}
+	if !hasNode(item) {
+		return ErrItemIsNotTreeNode
+	}
+	return nil
+}
+
 func hasNodeType(t reflect.Type) bool {
 	if t == reflect.TypeOf(Node{}) {
 		return true
@@ -56,7 +72,7 @@ func hasNodeType(t reflect.Type) bool {
 	return false
 }
 
-func getNodeData(item interface{}) (uint, string, error) {
+func getNodeData(item any) (uint, string, error) {
 	if item == nil {
 		return 0, "", errors.New("getNodeData: item cannot be nil")
 	}
@@ -100,7 +116,7 @@ func findNodeValue(t reflect.Type, v reflect.Value) (reflect.Value, bool) {
 	return reflect.Value{}, false
 }
 
-func dereference(item interface{}) (reflect.Type, reflect.Value) {
+func dereference(item any) (reflect.Type, reflect.Value) {
 	t := reflect.TypeOf(item)
 	v := reflect.ValueOf(item)
 

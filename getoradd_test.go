@@ -22,7 +22,7 @@ func TestFindChild(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -33,6 +33,7 @@ func TestFindChild(t *testing.T) {
 				parentID    uint
 				tenant      string
 				match       any
+				matchFields []string
 				out         any
 				wantFound   bool
 				wantPayload TestPayload
@@ -44,6 +45,7 @@ func TestFindChild(t *testing.T) {
 					parentID:    1,
 					tenant:      tenant1,
 					match:       TestPayload{Name: "Mobile Phones"},
+					matchFields: []string{"Name"},
 					out:         &TestPayload{},
 					wantFound:   true,
 					wantPayload: TestPayload{Name: "Mobile Phones", Node: closuretree.Node{NodeId: 2, Tenant: tenant1, ParentId: 1}},
@@ -54,79 +56,96 @@ func TestFindChild(t *testing.T) {
 					parentID:    0,
 					tenant:      tenant1,
 					match:       TestPayload{Name: "Electronics"},
+					matchFields: []string{"Name"},
 					out:         &TestPayload{},
 					wantFound:   true,
 					wantPayload: TestPayload{Name: "Electronics", Node: closuretree.Node{NodeId: 1, Tenant: tenant1, ParentId: 0}},
 				},
 				{
-					name:      "grandchild is not a direct child",
-					parentID:  1,
-					tenant:    tenant1,
-					match:     TestPayload{Name: "Touch Screen"},
-					out:       &TestPayload{},
-					wantFound: false,
+					name:        "grandchild is not a direct child",
+					parentID:    1,
+					tenant:      tenant1,
+					match:       TestPayload{Name: "Touch Screen"},
+					matchFields: []string{"Name"},
+					out:         &TestPayload{},
+					wantFound:   false,
 				},
 				{
-					name:      "child of a different parent is not found",
-					parentID:  1,
-					tenant:    tenant1,
-					match:     TestPayload{Name: "T-Shirt"},
-					out:       &TestPayload{},
-					wantFound: false,
+					name:        "child of a different parent is not found",
+					parentID:    1,
+					tenant:      tenant1,
+					match:       TestPayload{Name: "T-Shirt"},
+					matchFields: []string{"Name"},
+					out:         &TestPayload{},
+					wantFound:   false,
 				},
 				{
-					name:      "tenant isolation",
-					parentID:  0,
-					tenant:    tenant2,
-					match:     TestPayload{Name: "Electronics"},
-					out:       &TestPayload{},
-					wantFound: false,
+					name:        "tenant isolation",
+					parentID:    0,
+					tenant:      tenant2,
+					match:       TestPayload{Name: "Electronics"},
+					matchFields: []string{"Name"},
+					out:         &TestPayload{},
+					wantFound:   false,
 				},
 				{
-					name:     "empty match returns ErrEmptyMatch",
+					name:     "empty matchFields returns ErrEmptyMatch",
 					parentID: 0,
 					tenant:   tenant1,
-					match:    TestPayload{},
+					match:    TestPayload{Name: "Electronics"},
 					out:      &TestPayload{},
 					wantErr:  closuretree.ErrEmptyMatch,
 				},
 				{
-					name:     "empty tenant returns error",
-					parentID: 1,
-					tenant:   "",
-					match:    TestPayload{Name: "Mobile Phones"},
-					out:      &TestPayload{},
-					wantErr:  closuretree.ErrEmptyTenant,
+					name:        "unknown match field returns ErrUnknownMatchField",
+					parentID:    1,
+					tenant:      tenant1,
+					match:       TestPayload{Name: "Mobile Phones"},
+					matchFields: []string{"Nope"},
+					out:         &TestPayload{},
+					wantErr:     closuretree.ErrUnknownMatchField,
 				},
 				{
-					name:     "out is not a pointer",
-					parentID: 1,
-					tenant:   tenant1,
-					match:    TestPayload{Name: "Mobile Phones"},
-					out:      TestPayload{},
-					wantErr:  closuretree.ErrItemNotPointerToStruct,
+					name:        "empty tenant returns error",
+					parentID:    1,
+					tenant:      "",
+					match:       TestPayload{Name: "Mobile Phones"},
+					matchFields: []string{"Name"},
+					out:         &TestPayload{},
+					wantErr:     closuretree.ErrEmptyTenant,
 				},
 				{
-					name:     "out does not embed Node",
-					parentID: 1,
-					tenant:   tenant1,
-					match:    TestPayload{Name: "Mobile Phones"},
-					out:      &map[string]string{},
-					wantErr:  closuretree.ErrItemIsNotTreeNode,
+					name:        "out is not a pointer",
+					parentID:    1,
+					tenant:      tenant1,
+					match:       TestPayload{Name: "Mobile Phones"},
+					matchFields: []string{"Name"},
+					out:         TestPayload{},
+					wantErr:     closuretree.ErrItemNotPointerToStruct,
 				},
 				{
-					name:     "match does not embed Node",
-					parentID: 1,
-					tenant:   tenant1,
-					match:    struct{ Name string }{Name: "Mobile Phones"},
-					out:      &TestPayload{},
-					wantErr:  closuretree.ErrItemIsNotTreeNode,
+					name:        "out does not embed Node",
+					parentID:    1,
+					tenant:      tenant1,
+					match:       TestPayload{Name: "Mobile Phones"},
+					matchFields: []string{"Name"},
+					out:         &map[string]string{},
+					wantErr:     closuretree.ErrItemIsNotTreeNode,
+				},
+				{
+					name:        "match does not embed Node",
+					parentID:    1,
+					tenant:      tenant1,
+					match:       struct{ Name string }{Name: "Mobile Phones"},
+					matchFields: []string{"Name"},
+					out:         &TestPayload{},
+					wantErr:     closuretree.ErrItemIsNotTreeNode,
 				},
 			}
 
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					found, err := ct.FindChild(context.Background(), tc.parentID, tc.tenant, tc.match, tc.out)
+					found, err := ct.FindChild(context.Background(), tc.parentID, tc.tenant, tc.match, tc.matchFields, tc.out)
 					if tc.wantErr != nil {
 						if err == nil {
 							t.Fatalf("expected error %v, but got none", tc.wantErr)
@@ -160,7 +179,7 @@ func TestFindChildSameNameDifferentParents(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,7 +196,7 @@ func TestFindChildSameNameDifferentParents(t *testing.T) {
 			mustAdd(t, ct, dupB, b.NodeId, tenant1)
 
 			var out TestPayload
-			found, err := ct.FindChild(ctx, a.NodeId, tenant1, TestPayload{Name: "dup"}, &out)
+			found, err := ct.FindChild(ctx, a.NodeId, tenant1, TestPayload{Name: "dup"}, []string{"Name"}, &out)
 			if err != nil || !found {
 				t.Fatalf("expected to find dup under a: found=%v err=%v", found, err)
 			}
@@ -185,7 +204,7 @@ func TestFindChildSameNameDifferentParents(t *testing.T) {
 				t.Errorf("under a: got node id %d, want %d", out.NodeId, dupA.NodeId)
 			}
 
-			found, err = ct.FindChild(ctx, b.NodeId, tenant1, TestPayload{Name: "dup"}, &out)
+			found, err = ct.FindChild(ctx, b.NodeId, tenant1, TestPayload{Name: "dup"}, []string{"Name"}, &out)
 			if err != nil || !found {
 				t.Fatalf("expected to find dup under b: found=%v err=%v", found, err)
 			}
@@ -203,7 +222,7 @@ func TestGetOrAdd(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +230,7 @@ func TestGetOrAdd(t *testing.T) {
 
 			// create-when-absent
 			a := &TestPayload{Name: "a"}
-			created, err := ct.GetOrAdd(ctx, a, 0, tenant1, TestPayload{Name: "a"})
+			created, err := ct.GetOrAdd(ctx, a, 0, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -225,7 +244,7 @@ func TestGetOrAdd(t *testing.T) {
 
 			// return-existing-when-present
 			a2 := &TestPayload{Name: "a"}
-			created, err = ct.GetOrAdd(ctx, a2, 0, tenant1, TestPayload{Name: "a"})
+			created, err = ct.GetOrAdd(ctx, a2, 0, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -262,21 +281,21 @@ func TestGetOrAddChaining(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
 
 			a := &TestPayload{Name: "a"}
-			mustGetOrAdd(t, ct, a, 0, tenant1, TestPayload{Name: "a"})
+			mustGetOrAdd(t, ct, a, 0, tenant1, []string{"Name"})
 			b := &TestPayload{Name: "b"}
-			mustGetOrAdd(t, ct, b, a.NodeId, tenant1, TestPayload{Name: "b"})
+			mustGetOrAdd(t, ct, b, a.NodeId, tenant1, []string{"Name"})
 			c := &TestPayload{Name: "c"}
-			mustGetOrAdd(t, ct, c, b.NodeId, tenant1, TestPayload{Name: "c"})
+			mustGetOrAdd(t, ct, c, b.NodeId, tenant1, []string{"Name"})
 
 			b2 := &TestPayload{Name: "b"}
-			created, err := ct.GetOrAdd(ctx, b2, a.NodeId, tenant1, TestPayload{Name: "b"})
+			created, err := ct.GetOrAdd(ctx, b2, a.NodeId, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -308,24 +327,24 @@ func TestGetOrAddDistinctUnderDifferentParents(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
 
 			a := &TestPayload{Name: "a"}
-			mustGetOrAdd(t, ct, a, 0, tenant1, TestPayload{Name: "a"})
+			mustGetOrAdd(t, ct, a, 0, tenant1, []string{"Name"})
 			b := &TestPayload{Name: "b"}
-			mustGetOrAdd(t, ct, b, 0, tenant1, TestPayload{Name: "b"})
+			mustGetOrAdd(t, ct, b, 0, tenant1, []string{"Name"})
 
 			dupA := &TestPayload{Name: "dup"}
-			cA, err := ct.GetOrAdd(ctx, dupA, a.NodeId, tenant1, TestPayload{Name: "dup"})
+			cA, err := ct.GetOrAdd(ctx, dupA, a.NodeId, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			dupB := &TestPayload{Name: "dup"}
-			cB, err := ct.GetOrAdd(ctx, dupB, b.NodeId, tenant1, TestPayload{Name: "dup"})
+			cB, err := ct.GetOrAdd(ctx, dupB, b.NodeId, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -337,7 +356,7 @@ func TestGetOrAddDistinctUnderDifferentParents(t *testing.T) {
 			}
 
 			again := &TestPayload{Name: "dup"}
-			c, err := ct.GetOrAdd(ctx, again, a.NodeId, tenant1, TestPayload{Name: "dup"})
+			c, err := ct.GetOrAdd(ctx, again, a.NodeId, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -358,19 +377,19 @@ func TestGetOrAddTenantIsolation(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
 
 			a1 := &TestPayload{Name: "a"}
-			c1, err := ct.GetOrAdd(ctx, a1, 0, tenant1, TestPayload{Name: "a"})
+			c1, err := ct.GetOrAdd(ctx, a1, 0, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			a2 := &TestPayload{Name: "a"}
-			c2, err := ct.GetOrAdd(ctx, a2, 0, tenant2, TestPayload{Name: "a"})
+			c2, err := ct.GetOrAdd(ctx, a2, 0, tenant2, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -379,7 +398,7 @@ func TestGetOrAddTenantIsolation(t *testing.T) {
 			}
 
 			a1b := &TestPayload{Name: "a"}
-			c, err := ct.GetOrAdd(ctx, a1b, 0, tenant1, TestPayload{Name: "a"})
+			c, err := ct.GetOrAdd(ctx, a1b, 0, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -412,13 +431,13 @@ func TestGetOrAddValueItem(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
 
-			created, err := ct.GetOrAdd(ctx, TestPayload{Name: "x"}, 0, tenant1, TestPayload{Name: "x"})
+			created, err := ct.GetOrAdd(ctx, TestPayload{Name: "x"}, 0, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -427,7 +446,7 @@ func TestGetOrAddValueItem(t *testing.T) {
 			}
 
 			var out TestPayload
-			found, err := ct.FindChild(ctx, 0, tenant1, TestPayload{Name: "x"}, &out)
+			found, err := ct.FindChild(ctx, 0, tenant1, TestPayload{Name: "x"}, []string{"Name"}, &out)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -436,7 +455,7 @@ func TestGetOrAddValueItem(t *testing.T) {
 			}
 
 			// second call must dedupe rather than create a duplicate
-			created, err = ct.GetOrAdd(ctx, TestPayload{Name: "x"}, 0, tenant1, TestPayload{Name: "x"})
+			created, err = ct.GetOrAdd(ctx, TestPayload{Name: "x"}, 0, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -453,53 +472,52 @@ func TestGetOrAddErrors(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
 
 			tcs := []struct {
-				name    string
-				item    any
-				parent  uint
-				tenant  string
-				match   any
-				wantErr error
+				name        string
+				item        any
+				parent      uint
+				tenant      string
+				matchFields []string
+				wantErr     error
 			}{
 				{
-					name:    "empty match",
+					name:    "empty matchFields",
 					item:    &TestPayload{Name: "a"},
 					tenant:  tenant1,
-					match:   TestPayload{},
 					wantErr: closuretree.ErrEmptyMatch,
 				},
 				{
-					name:    "item does not embed Node",
-					item:    &struct{ Name string }{Name: "a"},
-					tenant:  tenant1,
-					match:   TestPayload{Name: "a"},
-					wantErr: closuretree.ErrItemIsNotTreeNode,
+					name:        "item does not embed Node",
+					item:        &struct{ Name string }{Name: "a"},
+					tenant:      tenant1,
+					matchFields: []string{"Name"},
+					wantErr:     closuretree.ErrItemIsNotTreeNode,
 				},
 				{
-					name:    "empty tenant",
-					item:    &TestPayload{Name: "a"},
-					tenant:  "",
-					match:   TestPayload{Name: "a"},
-					wantErr: closuretree.ErrEmptyTenant,
+					name:        "empty tenant",
+					item:        &TestPayload{Name: "a"},
+					tenant:      "",
+					matchFields: []string{"Name"},
+					wantErr:     closuretree.ErrEmptyTenant,
 				},
 				{
-					name:    "parent not found",
-					item:    &TestPayload{Name: "a"},
-					parent:  9999,
-					tenant:  tenant1,
-					match:   TestPayload{Name: "a"},
-					wantErr: closuretree.ErrParentNotFound,
+					name:        "parent not found",
+					item:        &TestPayload{Name: "a"},
+					parent:      9999,
+					tenant:      tenant1,
+					matchFields: []string{"Name"},
+					wantErr:     closuretree.ErrParentNotFound,
 				},
 			}
 			for _, tc := range tcs {
 				t.Run(tc.name, func(t *testing.T) {
-					_, err := ct.GetOrAdd(ctx, tc.item, tc.parent, tc.tenant, tc.match)
+					_, err := ct.GetOrAdd(ctx, tc.item, tc.parent, tc.tenant, tc.matchFields)
 					if err == nil {
 						t.Fatalf("expected error %v, got none", tc.wantErr)
 					}
@@ -513,22 +531,23 @@ func TestGetOrAddErrors(t *testing.T) {
 }
 
 // TestGetOrAddConcurrent exercises many goroutines racing to get-or-create the same child.
-// GetOrAdd wraps find+add in a single transaction but does not fully eliminate the race for
-// a brand-new child (documented on the method). The invariant that MUST hold regardless is:
-// the number of actual child nodes equals the number of created=true results.
+// The per-tenant write lock serializes the find+add transactions, so exactly one goroutine
+// creates the child and every other finds it: exactly one child node exists and exactly one
+// created=true result is returned. (SQLite serializes writers on its own; the lock closes the
+// race on MySQL/Postgres.)
 func TestGetOrAddConcurrent(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
 
 			parent := &TestPayload{Name: "parent"}
-			if err := ct.Add(ctx, parent, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, parent, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
@@ -544,7 +563,7 @@ func TestGetOrAddConcurrent(t *testing.T) {
 					var created bool
 					var e error
 					for attempt := 0; attempt < 50; attempt++ {
-						created, e = ct.GetOrAdd(ctx, item, parent.NodeId, tenant1, TestPayload{Name: "child"})
+						created, e = ct.GetOrAdd(ctx, item, parent.NodeId, tenant1, []string{"Name"})
 						if e == nil || !isTransientDBErr(e) {
 							break
 						}
@@ -582,11 +601,67 @@ func TestGetOrAddConcurrent(t *testing.T) {
 					childNodes++
 				}
 			}
-			if childNodes < 1 {
-				t.Errorf("expected at least one child node, got %d", childNodes)
+			if childNodes != 1 {
+				t.Errorf("expected exactly one child node (no duplicates), got %d", childNodes)
 			}
-			if childNodes != createdCount {
-				t.Errorf("consistency violated: created=true count %d but %d child nodes exist", createdCount, childNodes)
+			if createdCount != 1 {
+				t.Errorf("expected exactly one goroutine to create the child, got %d", createdCount)
+			}
+		})
+	}
+}
+
+// TestGetOrAddIdempotent asserts the get-or-create contract deterministically: the first call
+// creates the child, a second identical call finds it (created=false) and adds no duplicate.
+func TestGetOrAddIdempotent(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+
+			parent := &TestPayload{Name: "parent"}
+			if err := ct.Add(ctx, parent, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			first := &TestPayload{Name: "child"}
+			created, err := ct.GetOrAdd(ctx, first, parent.NodeId, tenant1, []string{"Name"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !created {
+				t.Fatalf("first GetOrAdd should create the child")
+			}
+
+			second := &TestPayload{Name: "child"}
+			created, err = ct.GetOrAdd(ctx, second, parent.NodeId, tenant1, []string{"Name"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if created {
+				t.Errorf("second GetOrAdd should find the existing child, not create a new one")
+			}
+			if second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd returned a different node: first=%d second=%d", first.NodeId, second.NodeId)
+			}
+
+			var kids []TestPayload
+			if err := ct.Descendants(ctx, parent.NodeId, 1, tenant1, &kids); err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for _, k := range kids {
+				if k.Name == "child" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Errorf("expected exactly one child after idempotent GetOrAdd, got %d", count)
 			}
 		})
 	}
@@ -599,20 +674,20 @@ func TestGetOrAddParentIdBothPaths(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			dropTreeTables(gdb, TestPayload{})
-			ct, err := closuretree.New(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
 
 			root := &TestPayload{Name: "root"}
-			if err := ct.Add(ctx, root, 0, 0, tenant1); err != nil {
+			if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
 
 			// created path: ParentId must be set to the parent
 			child := &TestPayload{Name: "child"}
-			created, err := ct.GetOrAdd(ctx, child, root.NodeId, tenant1, TestPayload{Name: "child"})
+			created, err := ct.GetOrAdd(ctx, child, root.NodeId, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -625,7 +700,7 @@ func TestGetOrAddParentIdBothPaths(t *testing.T) {
 
 			// found path: ParentId must match too
 			child2 := &TestPayload{Name: "child"}
-			created, err = ct.GetOrAdd(ctx, child2, root.NodeId, tenant1, TestPayload{Name: "child"})
+			created, err = ct.GetOrAdd(ctx, child2, root.NodeId, tenant1, []string{"Name"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -641,14 +716,14 @@ func TestGetOrAddParentIdBothPaths(t *testing.T) {
 
 func mustAdd(t *testing.T, ct *closuretree.Tree, item any, parentID uint, tenant string) {
 	t.Helper()
-	if err := ct.Add(context.Background(), item, parentID, 0, tenant); err != nil {
+	if err := ct.Add(context.Background(), item, up(parentID), nil, tenant); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
 }
 
-func mustGetOrAdd(t *testing.T, ct *closuretree.Tree, item any, parentID uint, tenant string, match any) {
+func mustGetOrAdd(t *testing.T, ct *closuretree.Tree, item any, parentID uint, tenant string, matchFields []string) {
 	t.Helper()
-	if _, err := ct.GetOrAdd(context.Background(), item, parentID, tenant, match); err != nil {
+	if _, err := ct.GetOrAdd(context.Background(), item, parentID, tenant, matchFields); err != nil {
 		t.Fatalf("GetOrAdd failed: %v", err)
 	}
 }

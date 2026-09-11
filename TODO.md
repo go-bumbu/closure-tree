@@ -21,7 +21,3 @@ Notes for editors:
 -->
 
 # New features
-
-# Code review
-
-- [ ] Launch code review and capture fidnings
