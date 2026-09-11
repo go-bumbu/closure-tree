@@ -116,7 +116,7 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 	for _, field := range stmt.Schema.Fields {
 		columnFieldMap[field.DBName] = field.Name
 	}
-	columnFieldMap["ancestor_id"] = ancestorIDMapKey
+	columnFieldMap[colAncestorID] = ancestorIDMapKey
 
 	ct := &Tree{
 		db:           db,
