@@ -18,10 +18,13 @@ var ErrNoAncestors = errors.New("no ancestors given")
 //
 //	db.Where("fk IN (?)", sub)
 //
+// The returned value is a raw statement for embedding: conditions chained on it (Where, Limit,
+// Order) are ignored, so put them in the outer query. It can also be executed directly with Scan.
+//
 // By default the subtree of each ancestor includes the ancestor itself (from depth 0, with no upper
-// limit). Ancestor
-// 0 is the virtual root and stands for every node of the tenant. Duplicate and overlapping ancestors
-// are fine; the subquery is meant for IN and does not remove duplicate ids itself.
+// limit). Ancestor 0 is the virtual root and stands for every node of the tenant. Duplicate and
+// overlapping ancestors are fine; the subquery is meant for IN and does not remove duplicate ids
+// itself.
 //
 // SubtreeIDs honours the read options Filter, Unfiltered, PerNode and DepthRange; the others are
 // ignored. With a filter and without PerNode a node is left out when it or any node between it and
@@ -29,11 +32,14 @@ var ErrNoAncestors = errors.New("no ancestors given")
 // range leaves the ancestor itself out. With PerNode only the node itself is tested. A requested
 // ancestor that does not match selects nothing in the pruning form.
 //
-// The slice form binds one value per ancestor, so a set of many thousands of ancestors should go
-// through SubtreeIDsOf. With a filter the subquery reads the node table, and MySQL rejects that
-// inside an UPDATE or DELETE on the node table (error 1093): wrap it as
-// "IN (SELECT descendant_id FROM (?) AS sub)". Do not put a LIMIT inside it (MySQL error 1235);
-// page in the outer query.
+// The slice form binds one value per ancestor, within the databases' limits of bound values
+// (SQLite 32766, PostgreSQL and MySQL 65535 per statement). On PostgreSQL gorm also rewrites the
+// placeholders of an embedded subquery one by one, which gets slow beyond a few thousand values:
+// about 0.1 s for 10,000 and 1 s for 30,000 per statement. Use SubtreeIDsOf for large sets.
+//
+// With a filter the subquery reads the node table, and MySQL rejects that inside an UPDATE or
+// DELETE on the node table (error 1093): wrap it as "IN (SELECT descendant_id FROM (?) AS sub)".
+// Do not put a LIMIT inside it (MySQL error 1235); page in the outer query.
 func (ct *Tree) SubtreeIDs(tenant string, ancestors []uint, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {
@@ -49,7 +55,8 @@ func (ct *Tree) SubtreeIDs(tenant string, ancestors []uint, opts ...ReadOption) 
 // node ids. A nil subquery is ErrNoAncestors, and a subquery whose Error is set returns that error,
 // because gorm would render it as nothing and the statement would read IN (). The subquery must be
 // one that gorm can render on its own, built with Table, Model or Raw: the builder renders it once
-// in a dry run and returns an error when that fails. Everything else is as in SubtreeIDs.
+// in a dry run and returns an error when that fails. Everything else is as in SubtreeIDs, also that
+// the returned value is for embedding.
 func (ct *Tree) SubtreeIDsOf(tenant string, ancestors *gorm.DB, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {
@@ -110,13 +117,20 @@ func (ct *Tree) subquery(sql string, args []any) *gorm.DB {
 //
 //	db.Table("(?) AS cp", pairs).Select("cp.ancestor_id, COUNT(*)").Group("cp.ancestor_id")
 //
+// The returned value is for embedding, as that of SubtreeIDs: conditions chained on it are ignored.
+//
 // Every node is paired with itself at depth 0 and with each of its descendants. ClosurePairs honours
 // the read options Filter, Unfiltered, DepthRange, ForAncestors and IncludeVirtualRoot; the others
 // are ignored. With a filter the descendant and the ancestor must both match; nodes in between are
 // not checked, and the virtual root always matches. ForAncestors restricts the ancestors and binds
 // one value per id; ForAncestors without ids selects nothing. The virtual root (ancestor 0) appears
-// when ForAncestors names it, and without ForAncestors only with IncludeVirtualRoot. The depth range
-// defaults to from depth 0 (the node itself), with no upper limit.
+// when ForAncestors names it, and without ForAncestors only with IncludeVirtualRoot. By default the
+// depth range starts at depth 0 (the node itself) and has no upper limit.
+//
+// Without ForAncestors the statement reads the closure rows of every tenant to find those of this
+// one, because no index of the closure table leads with the tenant; ForAncestors avoids that. With
+// a filter the statement also reads the node table, so MySQL rejects it inside an UPDATE or DELETE
+// on the node table (error 1093); wrap it as SubtreeIDs describes.
 func (ct *Tree) ClosurePairs(tenant string, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

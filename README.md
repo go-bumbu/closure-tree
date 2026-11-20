@@ -221,9 +221,8 @@ subqueries" and "Querying leaves".
   tree reads; parent 0 always matches. With `PerNode()` the parent is not checked.
 * Without `Columns` a read selects every column of the node table. `Columns(names ...string)`
   selects `node_id`, `tenant`, `sort_order` and the named columns. Fields that are not selected stay
-  zero. A filter may name a
-  column that is not selected. The parent is always computed from the closure rows and overrides a
-  leftover physical `parent_id` column.
+  zero. A filter may name a column that is not selected. The parent is always computed from the
+  closure rows and overrides a leftover physical `parent_id` column.
 * Do not pass a struct that was read with `Columns` to `Update`: `Update` writes every field of the
   item, so the columns that were not selected would be overwritten with zero values.
 * `WithFilter(conds ...Cond)` returns a copy of the Tree with a default filter for every read in the
@@ -265,7 +264,9 @@ counts, err := tree.ChildCounts(ctx, []uint{0, colorTag.Id()}, "user1")
 you embed the result in your own query, which runs on your connection and in your transaction, so
 it also sees the uncommitted rows of that transaction. The output columns are stable:
 `descendant_id` for `SubtreeIDs` and `SubtreeIDsOf`; `ancestor_id`, `descendant_id` and `depth`
-for `ClosurePairs`.
+for `ClosurePairs`. The returned value is a raw statement: conditions chained on it (`Where`,
+`Limit`, `Order`) are ignored, so put them in the outer query. You can also run it directly with
+`Scan`.
 
 `SubtreeIDs` as a semi-join, with your own ordering, limit and count. A book attached to two nodes
 of the subtree comes once:
@@ -299,6 +300,27 @@ err = db.Table("(?) AS cp", pairs).
     Group("cp.ancestor_id").Scan(&sizes).Error
 ```
 
+Your own rows per subtree are counted the same way, by joining your join table on
+`descendant_id`. Index the node column of the join table. A many2many join table created by gorm
+has only its composite primary key, led by the owner's column, so on SQLite and PostgreSQL the node
+column has no index (MySQL adds one for the foreign key). Without it a count per subtree scans the
+join table once per closure row.
+
+```GO
+// once: CREATE INDEX idx_books_tags_tag ON books_tags (tag_node_id)
+pairs, err := tree.ClosurePairs("user1", ct.ForAncestors(colorTag.Id(), warmColor.Id()))
+// handle error
+
+var books []struct {
+    AncestorID uint
+    N          int64
+}
+err = db.Table("(?) AS cp", pairs).
+    Select("cp.ancestor_id AS ancestor_id, COUNT(DISTINCT bt.book_id) AS n").
+    Joins("JOIN books_tags AS bt ON bt.tag_node_id = cp.descendant_id").
+    Group("cp.ancestor_id").Order("cp.ancestor_id").Scan(&books).Error
+```
+
 * `DepthRange(min, max)` limits the distance from the ancestor: 0 is the node itself, 1 its direct
   children. A `max` below 0 means no upper limit. The default is 0 to unlimited, so the ancestor
   itself is included. `DepthRange(0, 0)` is the node only, `DepthRange(1, -1)` everything strictly
@@ -309,17 +331,20 @@ err = db.Table("(?) AS cp", pairs).
   when the depth range leaves it out. `PerNode()` tests only the node itself.
 * The filter in `ClosurePairs` requires the descendant and the ancestor to match. It does not check
   the nodes in between, and `PerNode` does not apply. The virtual root always matches.
-* Ancestor 0 in `SubtreeIDs` stands for every node of the tenant. No ancestors, an empty slice or a
-  nil subquery, is `ErrNoAncestors`.
+* Ancestor 0 in `SubtreeIDs` stands for every node of the tenant. An empty slice is
+  `ErrNoAncestors` in `SubtreeIDs`, and a nil subquery is in `SubtreeIDsOf`.
 * `SubtreeIDs` binds one value per ancestor (SQLite 32766, PostgreSQL and MySQL 65535 per
-  statement). For a large or computed set of ancestors use `SubtreeIDsOf`, which takes them as a
+  statement). On PostgreSQL gorm also rewrites the placeholders of an embedded subquery one by one,
+  which gets slow beyond a few thousand values: about 0.1 s for 10,000 and 1 s for 30,000 per
+  statement. For a large or computed set of ancestors use `SubtreeIDsOf`, which takes them as a
   subquery that selects one column of node ids. It must be a subquery that gorm can render on its
   own, built with `Table`, `Model` or `Raw`; the builder renders it once and returns an error when
   that fails. A subquery whose `Error` is set returns that error.
 * `ForAncestors(ids...)` limits the ancestors of `ClosurePairs`; an id 0 includes the pairs of the
   virtual root. Without ids it selects nothing, and it binds one value per id, with the limits
   above. Without `ForAncestors`, `ClosurePairs` leaves the virtual root out unless you pass
-  `IncludeVirtualRoot()`.
+  `IncludeVirtualRoot()`, and it reads the closure rows of every tenant to find those of yours,
+  because no index of the closure table leads with the tenant. `ForAncestors` avoids that.
 * MySQL, error 1093: with a filter the subquery reads the node table, and MySQL rejects it inside an
   `UPDATE` or `DELETE` on the node table. Wrap it in a derived table:
   `db.Table("tags").Where("node_id IN (SELECT descendant_id FROM (?) AS sub)", sub).Update("name", "renamed")`.
@@ -472,9 +497,12 @@ err = tree.BuildFromParents(ctx, "user1", links)
 * PostgreSQL: rows copied with explicit ids leave the id sequence behind, and the next `Add` fails
   with a duplicate key. Advance the sequence after copying:
   `SELECT setval(pg_get_serial_sequence('categories', 'node_id'), (SELECT MAX(node_id) FROM categories))`.
-* PostgreSQL: run `ANALYZE` on the node table and the closure table after a bulk build
-  (`ANALYZE categories; ANALYZE closure_tree_rel_categories;`). Freshly loaded tables have no
-  statistics, and the planner then chooses slow plans.
+* After a bulk build or load, update the table statistics: `ANALYZE` on PostgreSQL
+  (`ANALYZE categories; ANALYZE closure_tree_rel_categories;`) and `ANALYZE TABLE` on MySQL
+  (`ANALYZE TABLE categories, closure_tree_rel_categories;`), on the tree's tables and on your own
+  tables that join them. Freshly loaded tables have no statistics, or stale ones, and the planner
+  then chooses slow plans; on MySQL `GetLeaves` and joins on the closure table can be planned very
+  badly.
 
 ---
 

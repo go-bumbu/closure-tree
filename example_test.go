@@ -150,7 +150,9 @@ type Song struct {
 }
 
 // ExampleTree_GetLeaves illustrates on how to use the build in leave type to get all (leave) items belonging
-// to a specific category, in this example leaves might belong to more than one node
+// to a specific category, in this example leaves might belong to more than one node.
+// The example model embeds Leaf, which is optional; a plain model with a many2many relation to the
+// nodes works the same.
 func ExampleTree_GetLeaves() {
 	db := getGormDb("booksM2M.example")
 
