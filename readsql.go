@@ -266,3 +266,22 @@ func (ct *Tree) ancestorsSQL(p *readPlan, idsOnly bool, nodeID uint, tenant stri
 	s.add("\nORDER BY ct.depth DESC")
 	return s.b.String(), s.args
 }
+
+// childCountsSQL counts the direct children (closure rows at depth 1) of each id, grouped by id.
+// The node table is joined only when the plan has conditions, to test the children against them;
+// the parent is never tested. Ids with no counted child have no row.
+func (ct *Tree) childCountsSQL(p *readPlan, ids []uint, tenant string) (string, []any) {
+	var s sqlBuf
+	s.add("SELECT r.ancestor_id, COUNT(*)\n")
+	s.add("FROM " + ct.relationsTbl + " AS r\n")
+	filter, fargs := ct.matchSQL("child", p.conds)
+	if filter != "" {
+		s.add(ct.orderedJoin() + " " + ct.nodesTbl + " AS child ON child.node_id = r.descendant_id AND child.tenant = r.tenant\n")
+	}
+	s.add("WHERE r.tenant = ? AND r.depth = 1 AND r.ancestor_id IN ?", tenant, ids)
+	if filter != "" {
+		s.add(" AND "+filter, fargs...)
+	}
+	s.add("\nGROUP BY r.ancestor_id")
+	return s.b.String(), s.args
+}
