@@ -285,3 +285,43 @@ func (ct *Tree) childCountsSQL(p *readPlan, ids []uint, tenant string) (string, 
 	s.add("\nGROUP BY r.ancestor_id")
 	return s.b.String(), s.args
 }
+
+// subtreeSQL selects the column descendant_id of the closure rows below the requested ancestors,
+// within the depth range. ancestors is a []uint (bound as a list) or a *gorm.DB (rendered by gorm as
+// a subquery). With conditions and PerNode each candidate must match; with conditions and without
+// PerNode a candidate is rejected when any node on the path from the requested ancestor down to it,
+// both ends included, does not match (the same check as descendantsSQL, with r as the outer alias).
+// Without conditions only the closure table is read.
+func (ct *Tree) subtreeSQL(p *readPlan, tenant string, ancestors any, depth depthRange) (string, []any) {
+	var s sqlBuf
+	s.add("SELECT r.descendant_id\n")
+	s.add("FROM " + ct.relationsTbl + " AS r\n")
+	filter, fargs := ct.matchSQL("n", p.conds)
+	if filter != "" && p.perNode {
+		s.add(ct.orderedJoin() + " " + ct.nodesTbl + " AS n ON n.node_id = r.descendant_id AND n.tenant = r.tenant\n")
+	}
+	in := "r.ancestor_id IN ?"
+	if _, isList := ancestors.([]uint); !isList {
+		in = "r.ancestor_id IN (?)"
+	}
+	s.add("WHERE r.tenant = ? AND "+in+" AND r.depth >= ?", tenant, ancestors, depth.min)
+	if depth.max >= 0 {
+		s.add(" AND r.depth <= ?", depth.max)
+	}
+	if filter == "" {
+		return s.b.String(), s.args
+	}
+	if p.perNode {
+		s.add("\n  AND "+filter, fargs...)
+		return s.b.String(), s.args
+	}
+	notMatch, nargs := ct.notMatchSQL("mid", p.conds)
+	s.add("\n  AND NOT EXISTS (\n")
+	s.add("    SELECT 1\n")
+	s.add("    FROM " + ct.relationsTbl + " AS path\n")
+	s.add("    JOIN " + ct.nodesTbl + " AS mid ON mid.node_id = path.ancestor_id AND mid.tenant = path.tenant\n")
+	s.add("    WHERE path.descendant_id = r.descendant_id AND path.tenant = r.tenant\n")
+	s.add("      AND path.depth <= r.depth\n")
+	s.add("      AND "+notMatch+"\n  )", nargs...)
+	return s.b.String(), s.args
+}
