@@ -130,6 +130,15 @@ func TestWithFilterPrecedence(t *testing.T) {
 	if !cmp.Equal(own, conds(ft, Unfiltered(), Filter(Eq("hidden", true))), opt) {
 		t.Error("a per-call Filter still applies next to Unfiltered")
 	}
+	if !cmp.Equal(def, conds(ft, Filter()), opt) {
+		t.Error("an empty Filter must not switch the default off")
+	}
+	if conds(ft, Filter(), Unfiltered()) != nil {
+		t.Error("an empty Filter next to Unfiltered must give no filter")
+	}
+	if !cmp.Equal(own, conds(ft, Filter(), Filter(Eq("hidden", true))), opt) {
+		t.Error("an empty Filter next to a Filter with conds must not matter")
+	}
 	if conds(ct) != nil {
 		t.Error("WithFilter changed the original Tree")
 	}

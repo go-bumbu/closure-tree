@@ -49,7 +49,6 @@ func In(column string, values ...any) Cond {
 // readConfig collects the ReadOptions of one call.
 type readConfig struct {
 	filter     []Cond
-	hasFilter  bool
 	perNode    bool
 	unfiltered bool
 	columns    []string
@@ -60,11 +59,10 @@ type readConfig struct {
 type ReadOption func(*readConfig)
 
 // Filter keeps only the nodes that match every condition. For this call it replaces the Tree's
-// default filter (see WithFilter); several Filter options are joined. An empty Filter matches every
-// node.
+// default filter (see WithFilter); several Filter options are joined. An empty Filter has no effect,
+// so the default filter still applies.
 func Filter(conds ...Cond) ReadOption {
 	return func(c *readConfig) {
-		c.hasFilter = true
 		c.filter = append(c.filter, conds...)
 	}
 }
@@ -169,7 +167,7 @@ func (ct *Tree) planRead(opts []ReadOption) (*readPlan, error) {
 	p := &readPlan{perNode: cfg.perNode}
 
 	switch {
-	case cfg.hasFilter:
+	case len(cfg.filter) > 0:
 		conds, err := ct.resolveConds(cfg.filter)
 		if err != nil {
 			return nil, err
@@ -205,7 +203,7 @@ func (ct *Tree) plainPlan() *readPlan {
 }
 
 // WithFilter returns a copy of the Tree whose reads apply conds by default. A read can replace the
-// default with its own Filter, or switch it off with Unfiltered. Writes are never filtered. The
+// default with its own Filter that has conditions (an empty Filter has no effect), or switch it off with Unfiltered. Writes are never filtered. The
 // original Tree is not changed. It returns ErrUnknownColumn when a condition names an unknown
 // column.
 func (ct *Tree) WithFilter(conds ...Cond) (*Tree, error) {
