@@ -142,10 +142,48 @@ func TestWithFilterPrecedence(t *testing.T) {
 	if conds(ct) != nil {
 		t.Error("WithFilter changed the original Tree")
 	}
+	withFilterReplaces(t, ft, own, opt)
 	if ft.NodeTableName() != ct.NodeTableName() || ft.ClosureTableName() != ct.ClosureTableName() {
 		t.Error("the copy lost its table names")
 	}
 	if bad, err := ct.WithFilter(Eq("nope", 1)); bad != nil || !errors.Is(err, ErrUnknownColumn) {
 		t.Errorf("want nil and ErrUnknownColumn, got %v, %v", bad, err)
+	}
+}
+
+// withFilterReplaces checks that WithFilter on a Tree that has a default replaces it, and that
+// without conds it leaves none.
+func withFilterReplaces(t *testing.T, ft *Tree, own []resolvedCond, opt cmp.Option) {
+	t.Helper()
+	wf, err := ft.WithFilter(Eq("hidden", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := wf.planRead(nil); err != nil || !cmp.Equal(own, p.conds, opt) {
+		t.Errorf("WithFilter must replace the default filter: %v", err)
+	}
+	wf, err = ft.WithFilter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := wf.planRead(nil); err != nil || p.conds != nil {
+		t.Errorf("WithFilter() must leave no default filter: %v", err)
+	}
+}
+
+func TestInCopiesValues(t *testing.T) {
+	ct := newInternalTree(t, optNode{})
+	vals := []any{"a", "b"}
+	vt, err := ct.WithFilter(In("name", vals...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vals[0] = "changed"
+	p, err := vt.planRead(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.conds) != 1 || p.conds[0].values[0] != "a" {
+		t.Errorf("In must copy its values, got %v", p.conds)
 	}
 }

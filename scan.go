@@ -42,8 +42,9 @@ func validateItems(items any) error {
 // *T, where T is elemType. Rows are scanned with gorm's scanner into the Tree's model, which gorm
 // parsed in New; when T is another type, the model's fields are then copied into T (see
 // modelToElem). gorm skips the result columns the model has no field for, such as cte_depth. An
-// element type that cannot take the model's fields fails before the query runs.
-func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemType reflect.Type, add func(elem, row reflect.Value)) (err error) {
+// element type that cannot take the model's fields fails before the query runs. errLabel starts the
+// error of a failed query ("<errLabel>: <cause>").
+func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemType reflect.Type, errLabel string, add func(elem, row reflect.Value)) (err error) {
 	toElem, err := ct.modelToElem(ctx, elemType)
 	if err != nil {
 		return err
@@ -51,7 +52,7 @@ func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemTyp
 	db := ct.db.WithContext(ctx)
 	rows, err := db.Raw(sqlstr, args...).Rows()
 	if err != nil {
-		return fmt.Errorf("failed to execute query: %w", err)
+		return fmt.Errorf("%s: %w", errLabel, err)
 	}
 	defer func() {
 		e := rows.Close()
@@ -88,7 +89,9 @@ type fieldCopy struct {
 // gorm takes for a relation without a foreign key. A field T lacks, or has unexported, is not
 // copied, so T may be smaller than the model. A value whose type differs is assigned when it is
 // assignable and converted when it is convertible; a pointer field is dereferenced first, and a
-// nil pointer leaves the element field zero. Any other type difference returns an error.
+// nil pointer leaves the element field zero. A slice is never converted to an array, although Go
+// allows it: the conversion panics when the slice is shorter. Any other type difference returns an
+// error.
 func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) (func(row reflect.Value) reflect.Value, error) {
 	if elemType == ct.schema.ModelType {
 		return func(row reflect.Value) reflect.Value { return row }, nil
@@ -139,16 +142,25 @@ func planFieldCopy(src *schema.Field, dst reflect.StructField) (fieldCopy, error
 	from := src.StructField.Type
 	switch {
 	case from.AssignableTo(dst.Type):
-	case from.ConvertibleTo(dst.Type):
+	case convertible(from, dst.Type):
 		c.conv = true
 	case from.Kind() == reflect.Pointer && from.Elem().AssignableTo(dst.Type):
 		c.deref = true
-	case from.Kind() == reflect.Pointer && from.Elem().ConvertibleTo(dst.Type):
+	case from.Kind() == reflect.Pointer && convertible(from.Elem(), dst.Type):
 		c.deref, c.conv = true, true
 	default:
 		return fieldCopy{}, fmt.Errorf("cannot assign type %s to field %s", from, src.Name)
 	}
 	return c, nil
+}
+
+// convertible is ConvertibleTo without the slice-to-array conversions, which panic at run time
+// when the slice is too short.
+func convertible(from, to reflect.Type) bool {
+	if from.Kind() == reflect.Slice && to.Kind() == reflect.Array {
+		return false
+	}
+	return from.ConvertibleTo(to)
 }
 
 // nodeOf returns the Node of v, a pointer to a struct that is or embeds Node.

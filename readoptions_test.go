@@ -427,6 +427,28 @@ type convertedNode struct {
 	Note string
 }
 
+type noteText string
+
+// noteTextNode takes the model's Note *string through dereference and conversion.
+type noteTextNode struct {
+	closuretree.Node
+	Name string
+	Note noteText
+}
+
+func checkNoteText(t *testing.T, ct *closuretree.Tree) {
+	t.Helper()
+	var texts []noteTextNode
+	if err := ct.Descendants(context.Background(), 0, 0, tenantF, &texts); err != nil || len(texts) != 8 {
+		t.Fatalf("Descendants into noteText: %d, %v", len(texts), err)
+	}
+	for _, n := range texts {
+		if (n.Name == "a" && n.Note != "keep") || (n.Name == "x" && n.Note != "") {
+			t.Errorf("noteText conversion: %s has note %q", n.Name, n.Note)
+		}
+	}
+}
+
 type wrongTypeNode struct {
 	closuretree.Node
 	Name     int
@@ -458,6 +480,8 @@ func TestReadIntoDifferentFieldTypes(t *testing.T) {
 			if byName["b"].Kind != "folder" || byName["a"].Note != "keep" || byName["x"].Note != "" {
 				t.Errorf("converted fields: b=%+v a=%+v x=%+v", byName["b"], byName["a"], byName["x"])
 			}
+
+			checkNoteText(t, ct)
 
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel() // a query would fail with context.Canceled, so the type check must come first

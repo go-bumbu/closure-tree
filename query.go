@@ -109,7 +109,7 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 		maxDepth = absMaxDepth
 	}
 	sqlstr, args := ct.descendantsSQL(p, false, parent, maxDepth, tenant)
-	return ct.scanEach(ctx, sqlstr, args, structType, func(elem, _ reflect.Value) {
+	return ct.scanEach(ctx, sqlstr, args, structType, "failed to execute query", func(elem, _ reflect.Value) {
 		if !elemIsPtr {
 			elem = elem.Elem()
 		}
@@ -186,7 +186,7 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 
 	sqlstr, args := ct.treeDescendantsSQL(p, false, parent, maxDepth, tenant)
 	var entries []treeEntry
-	err = ct.scanEach(ctx, sqlstr, args, elemType.Elem(), func(elem, row reflect.Value) {
+	err = ct.scanEach(ctx, sqlstr, args, elemType.Elem(), "failed to fetch tree descendants", func(elem, row reflect.Value) {
 		entries = append(entries, treeEntry{elem: elem, node: nodeOf(row)})
 	})
 	if err != nil {

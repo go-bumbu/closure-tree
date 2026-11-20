@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"gorm.io/gorm/schema"
 )
@@ -42,8 +43,9 @@ func IsNull(column string) Cond { return Cond{column: column, op: opIsNull} }
 func NotNull(column string) Cond { return Cond{column: column, op: opNotNull} }
 
 // In matches the nodes whose column equals one of the values. Without values it matches nothing.
+// The values are copied, so changing the slice afterwards does not change the condition.
 func In(column string, values ...any) Cond {
-	return Cond{column: column, op: opIn, values: values}
+	return Cond{column: column, op: opIn, values: slices.Clone(values)}
 }
 
 // readConfig collects the ReadOptions of one call.
@@ -202,10 +204,11 @@ func (ct *Tree) plainPlan() *readPlan {
 	return &readPlan{columns: ct.modelColumns}
 }
 
-// WithFilter returns a copy of the Tree whose reads apply conds by default. A read can replace the
-// default with its own Filter that has conditions (an empty Filter has no effect), or switch it off with Unfiltered. Writes are never filtered. The
-// original Tree is not changed. It returns ErrUnknownColumn when a condition names an unknown
-// column.
+// WithFilter returns a copy of the Tree whose reads apply conds by default. It replaces any default
+// filter the Tree already has; with no conds the copy has no default filter. A read can replace the
+// default with its own Filter that has conditions (an empty Filter has no effect), or switch it off
+// with Unfiltered. Writes are never filtered. The original Tree is not changed. It returns
+// ErrUnknownColumn when a condition names an unknown column.
 func (ct *Tree) WithFilter(conds ...Cond) (*Tree, error) {
 	resolved, err := ct.resolveConds(conds)
 	if err != nil {
