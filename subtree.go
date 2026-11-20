@@ -115,8 +115,8 @@ func (ct *Tree) subquery(sql string, args []any) *gorm.DB {
 // are ignored. With a filter the descendant and the ancestor must both match; nodes in between are
 // not checked, and the virtual root always matches. ForAncestors restricts the ancestors and binds
 // one value per id; ForAncestors without ids selects nothing. The virtual root (ancestor 0) appears
-// only with IncludeVirtualRoot, also when ForAncestors names it. The depth range defaults to
-// from depth 0 (the node itself), with no upper limit.
+// when ForAncestors names it, and without ForAncestors only with IncludeVirtualRoot. The depth range
+// defaults to from depth 0 (the node itself), with no upper limit.
 func (ct *Tree) ClosurePairs(tenant string, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

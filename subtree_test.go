@@ -117,6 +117,7 @@ func TestSubtreeIDsFiltered(t *testing.T) {
 				"Eq with NULL": closuretree.Filter(closuretree.Eq("note", "keep")),
 			} {
 				c.check(name+": prune", c.sub(a, f), "a", "a1")
+				c.check(name+": prune from the virtual root", c.sub([]string{""}, f), "a", "a1", "b", "b1")
 				c.check(name+": per node", c.sub(a, f, closuretree.PerNode()), "a", "a1", "x1", "x2", "x21")
 				c.check(name+": an ancestor that does not match", c.sub([]string{"x"}, f))
 				// pruning is relative to each requested ancestor: x2 is requested itself
@@ -615,7 +616,7 @@ func TestClosurePairs(t *testing.T) {
 			c.check("direct children", map[string]int64{"a": 2, "x": 2, "x2": 1, "b": 1}, closuretree.DepthRange(1, 1))
 			c.check("two ancestors", map[string]int64{"a": 6, "b": 2}, closuretree.ForAncestors(id["a"], id["b"]))
 			c.check("an empty ancestor set selects nothing", map[string]int64{}, closuretree.ForAncestors())
-			c.check("the virtual root is only included when asked for", map[string]int64{"a": 6},
+			c.check("naming the virtual root includes it", map[string]int64{"a": 6, "root": 8},
 				closuretree.ForAncestors(id["a"], 0))
 			c.check("the virtual root named and asked for", map[string]int64{"a": 6, "root": 8},
 				closuretree.ForAncestors(id["a"], 0), closuretree.IncludeVirtualRoot())
@@ -686,6 +687,44 @@ func TestClosurePairsTenants(t *testing.T) {
 			want := map[string]int64{"o1": 1, "root": 1}
 			if diff := cmp.Diff(want, pairCounts(t, gdb, id, other)); diff != "" {
 				t.Errorf("pairs of the other tenant (-want +got):\n%s", diff)
+			}
+			checkFilteredPairsOfTwoTenants(t, c)
+		})
+	}
+}
+
+// checkFilteredPairsOfTwoTenants checks that with a filter the pairs of the fixture tenant are
+// those without the other tenant, and that the other tenant's matching node o1 has its own pair only.
+func checkFilteredPairsOfTwoTenants(t *testing.T, c pairChecker) {
+	t.Helper()
+	active := closuretree.Filter(closuretree.IsNull("archived_at"))
+	c.check("filtered, the fixture tenant", map[string]int64{"a": 5, "a1": 1, "x1": 1, "x2": 2, "x21": 1, "b": 2, "b1": 1}, active)
+	other, err := c.ct.ClosurePairs("other", active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(map[string]int64{"o1": 1}, pairCounts(t, c.gdb, c.id, other)); diff != "" {
+		t.Errorf("filtered pairs of the other tenant (-want +got):\n%s", diff)
+	}
+}
+
+// MySQL rejects a LIMIT inside an IN subquery (error 1235); paging belongs in the outer query.
+func TestSubtreeIDsLimitInsideIn(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			if db.DbType() != testdbs.DBTypeMysql {
+				t.Skip("MySQL only")
+			}
+			gdb, ct, id := filterTree(t, db)
+			sub, err := ct.SubtreeIDs(tenantF, []uint{id["a"]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			err = gdb.Session(&gorm.Session{Logger: logger.Discard}).Table(ct.NodeTableName()).
+				Where("node_id IN (SELECT descendant_id FROM (?) AS s LIMIT 2)", sub).Pluck("name", &names).Error
+			if err == nil || !strings.Contains(err.Error(), "1235") {
+				t.Errorf("want MySQL error 1235, got %v", err)
 			}
 		})
 	}
@@ -771,6 +810,65 @@ func TestClosurePairsOnLargeTree(t *testing.T) {
 				var n int64
 				return gdb.Table("(?) AS cp", pairs).Count(&n).Error
 			})
+		})
+	}
+}
+
+// seedLargeJoinTable creates the join table large_item_nodes, with one row per node of the large
+// tree (item i on node i), and an index on its node column.
+func seedLargeJoinTable(t *testing.T, gdb *gorm.DB, ct *closuretree.Tree) {
+	t.Helper()
+	for _, stmt := range []string{
+		"DROP TABLE IF EXISTS large_item_nodes",
+		"CREATE TABLE large_item_nodes (item_id BIGINT NOT NULL, node_id BIGINT NOT NULL, PRIMARY KEY (item_id, node_id))",
+		// Without this index the join table is scanned once per closure row; on SQLite that took
+		// seconds. The primary key leads with item_id and does not serve the join on node_id.
+		"CREATE INDEX idx_large_item_nodes_node ON large_item_nodes (node_id)",
+	} {
+		if err := gdb.Exec(stmt).Error; err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := gdb.Exec("INSERT INTO large_item_nodes (item_id, node_id) SELECT node_id, node_id FROM "+
+		ct.NodeTableName()+" WHERE tenant = ?", tenantF).Error; err != nil {
+		t.Fatalf("fill the join table: %v", err)
+	}
+}
+
+// Rows of the caller's join table counted per subtree through ClosurePairs: node 5 has 1365 items
+// in its subtree, node 21 has 341.
+func TestClosurePairsCountJoinedRows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large tree")
+	}
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct := largeTree(t, db)
+			seedLargeJoinTable(t, gdb, ct)
+			counts := func(what string, want5, want21 int64, opts ...closuretree.ReadOption) {
+				t.Helper()
+				pairs, err := ct.ClosurePairs(tenantF, append(opts, closuretree.ForAncestors(5, 21))...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				within(t, what, func() error {
+					var rows []struct {
+						AncestorID uint
+						N          int64
+					}
+					err := gdb.Table("(?) AS cp", pairs).
+						Select("cp.ancestor_id AS ancestor_id, COUNT(DISTINCT j.item_id) AS n").
+						Joins("JOIN large_item_nodes AS j ON j.node_id = cp.descendant_id").
+						Group("cp.ancestor_id").Order("cp.ancestor_id").Scan(&rows).Error
+					if err == nil && (len(rows) != 2 || rows[0].N != want5 || rows[1].N != want21) {
+						t.Errorf("%s: %+v", what, rows)
+					}
+					return err
+				})
+			}
+			counts("items per subtree", 1365, 341)
+			// node 85 does not match; its 84 descendants do
+			counts("items per subtree, filtered", 1364, 340, closuretree.Filter(closuretree.Eq("kind", "doc")))
 		})
 	}
 }

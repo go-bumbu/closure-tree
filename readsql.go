@@ -334,8 +334,9 @@ func (ct *Tree) subtreeSQL(p *readPlan, tenant string, ancestors any, depth dept
 }
 
 // pairsSQL selects ancestor_id, descendant_id and depth of the closure rows within the depth range.
-// The virtual root (ancestor 0) is left out unless the plan asks for it, and ForAncestors restricts
-// the ancestors; ForAncestors without ids selects nothing. With conditions the node table is joined
+// ForAncestors restricts the ancestors, and selects the virtual root (ancestor 0) when it names it;
+// ForAncestors without ids selects nothing. Without ForAncestors the virtual root is left out unless
+// the plan asks for it. With conditions the node table is joined
 // twice: the descendant must match, and so must the ancestor, except the virtual root, which has no
 // node row and always matches. Nodes in between are not checked, and PerNode is not used.
 func (ct *Tree) pairsSQL(p *readPlan, tenant string, depth depthRange) (string, []any) {
@@ -352,7 +353,7 @@ func (ct *Tree) pairsSQL(p *readPlan, tenant string, depth depthRange) (string, 
 	if depth.max >= 0 {
 		s.add(" AND r.depth <= ?", depth.max)
 	}
-	if !p.virtualRoot {
+	if !p.virtualRoot && !p.hasAncestors {
 		s.add(" AND r.ancestor_id <> 0")
 	}
 	switch {

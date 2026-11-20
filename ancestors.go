@@ -29,11 +29,15 @@ func (ct *Tree) Ancestors(ctx context.Context, nodeID uint, tenant string, items
 	if err != nil {
 		return err
 	}
+	toElem, err := ct.modelToElem(ctx, structType)
+	if err != nil {
+		return err
+	}
 	if err := ct.requireNode(ctx, p, nodeID, tenant); err != nil {
 		return err
 	}
 	sqlstr, args := ct.ancestorsSQL(p, false, nodeID, tenant)
-	return ct.scanEach(ctx, sqlstr, args, structType, "failed to fetch ancestors", add)
+	return ct.scanEach(ctx, sqlstr, args, toElem, "failed to fetch ancestors", add)
 }
 
 // AncestorIds returns the ids of the ancestors of nodeID, root first, as Ancestors does. A root

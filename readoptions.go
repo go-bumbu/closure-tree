@@ -129,9 +129,9 @@ func DepthRange(min, max int) ReadOption {
 	return func(c *readConfig) { c.depth = &depthRange{min: min, max: max} }
 }
 
-// ForAncestors limits ClosurePairs to the pairs whose ancestor is one of ids. Without ids it
-// selects nothing. The ids are copied, and several ForAncestors options are joined. The other
-// reads ignore it.
+// ForAncestors limits ClosurePairs to the pairs whose ancestor is one of ids. An id 0 selects the
+// pairs of the virtual root. Without ids it selects nothing. The ids are copied, and several
+// ForAncestors options are joined. The other reads ignore it.
 func ForAncestors(ids ...uint) ReadOption {
 	return func(c *readConfig) {
 		c.hasAncestors = true
@@ -139,8 +139,9 @@ func ForAncestors(ids ...uint) ReadOption {
 	}
 }
 
-// IncludeVirtualRoot makes ClosurePairs include the pairs of the virtual root (ancestor 0), which
-// it leaves out otherwise. The other reads ignore it.
+// IncludeVirtualRoot makes ClosurePairs without ForAncestors include the pairs of the virtual root
+// (ancestor 0), which it leaves out otherwise. With ForAncestors it has no effect: the virtual root
+// is included when ForAncestors names id 0. The other reads ignore it.
 func IncludeVirtualRoot() ReadOption { return func(c *readConfig) { c.virtualRoot = true } }
 
 // Relation names the field of the leaf model that holds the relation to the nodes, for GetLeaves

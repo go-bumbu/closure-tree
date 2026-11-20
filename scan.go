@@ -38,17 +38,13 @@ func validateItems(items any) error {
 	return nil
 }
 
-// scanEach runs the query and passes every row to add twice: as the scanned *Model and as a new
-// *T, where T is elemType. Rows are scanned with gorm's scanner into the Tree's model, which gorm
-// parsed in New; when T is another type, the model's fields are then copied into T (see
-// modelToElem). gorm skips the result columns the model has no field for, such as cte_depth. An
-// element type that cannot take the model's fields fails before the query runs. errLabel starts the
-// error of a failed query ("<errLabel>: <cause>").
-func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemType reflect.Type, errLabel string, add func(elem, row reflect.Value)) (err error) {
-	toElem, err := ct.modelToElem(ctx, elemType)
-	if err != nil {
-		return err
-	}
+// scanEach runs the query and passes every row to add twice: as the scanned *Model and as the new
+// *T that toElem, built by modelToElem, makes of it. Rows are scanned with gorm's scanner into the
+// Tree's model, which gorm parsed in New. gorm skips the result columns the model has no field
+// for, such as cte_depth. The caller builds toElem before any query, so an element type that
+// cannot take the model's fields fails first. errLabel starts the error of a failed query
+// ("<errLabel>: <cause>").
+func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, toElem func(row reflect.Value) reflect.Value, errLabel string, add func(elem, row reflect.Value)) (err error) {
 	db := ct.db.WithContext(ctx)
 	rows, err := db.Raw(sqlstr, args...).Rows()
 	if err != nil {

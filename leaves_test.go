@@ -124,6 +124,9 @@ func TestGetLeavesWithoutLeaf(t *testing.T) {
 			active := closuretree.Filter(closuretree.IsNull("archived_at"))
 			check("the filter prunes the subtree of the non-matching node", leafNames(t, ct, id["a"], 0, active), "on-a", "on-a1-x1")
 			check("per node", leafNames(t, ct, id["a"], 0, active, closuretree.PerNode()), "on-a", "on-a1-x1", "on-x21")
+			check("the whole forest, filtered", leafNames(t, ct, 0, 0, active), "on-a", "on-a1-x1", "on-b1")
+			check("the whole forest, per node", leafNames(t, ct, 0, 0, active, closuretree.PerNode()),
+				"on-a", "on-a1-x1", "on-x21", "on-b1")
 			ftree, err := ct.WithFilter(closuretree.IsNull("archived_at"))
 			if err != nil {
 				t.Fatal(err)

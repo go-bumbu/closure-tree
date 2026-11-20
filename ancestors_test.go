@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	closuretree "github.com/go-bumbu/closure-tree"
@@ -84,6 +85,16 @@ func checkItemsShape(t *testing.T, ct *closuretree.Tree, node uint) {
 	}
 	if err := ct.Ancestors(ctx, node, tenantF, &one); !errors.Is(err, closuretree.ErrItemsNotPointerToSlice) {
 		t.Errorf("a pointer to a struct: %v", err)
+	}
+	// the element type is checked before any query: a query fails on the cancelled context, and an
+	// unknown node would be ErrNodeNotFound
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := ct.Ancestors(cancelled, node, tenantF, &[]int{}); err == nil || !strings.Contains(err.Error(), "must be a struct") {
+		t.Errorf("a slice of non-structs, cancelled context: %v", err)
+	}
+	if err := ct.Ancestors(ctx, 99999, tenantF, &[]int{}); err == nil || !strings.Contains(err.Error(), "must be a struct") {
+		t.Errorf("a slice of non-structs, unknown node: %v", err)
 	}
 }
 

@@ -64,6 +64,9 @@ func TestChildCounts(t *testing.T) {
 			if got := countsByName(t, ftree, id, closuretree.Unfiltered()); got["b"] != 1 {
 				t.Errorf("Unfiltered: %v", got)
 			}
+			if diff := cmp.Diff(countsByName(t, ct, id), countsByName(t, ftree, id, closuretree.Unfiltered())); diff != "" {
+				t.Errorf("Unfiltered gives the counts of the unfiltered Tree (-want +got):\n%s", diff)
+			}
 		})
 	}
 }

@@ -118,8 +118,12 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
 	}
+	toElem, err := ct.modelToElem(ctx, structType)
+	if err != nil {
+		return err
+	}
 	sqlstr, args := ct.descendantsSQL(p, false, parent, maxDepth, tenant)
-	return ct.scanEach(ctx, sqlstr, args, structType, "failed to execute query", add)
+	return ct.scanEach(ctx, sqlstr, args, toElem, "failed to execute query", add)
 }
 
 // appendTarget checks that items is a pointer to a slice and returns the struct type each row is
@@ -231,9 +235,13 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 		maxDepth = absMaxDepth
 	}
 
+	toElem, err := ct.modelToElem(ctx, elemType.Elem())
+	if err != nil {
+		return err
+	}
 	sqlstr, args := ct.treeDescendantsSQL(p, false, parent, maxDepth, tenant)
 	var entries []treeEntry
-	err = ct.scanEach(ctx, sqlstr, args, elemType.Elem(), "failed to fetch tree descendants", func(elem, row reflect.Value) {
+	err = ct.scanEach(ctx, sqlstr, args, toElem, "failed to fetch tree descendants", func(elem, row reflect.Value) {
 		entries = append(entries, treeEntry{elem: elem, node: nodeOf(row)})
 	})
 	if err != nil {

@@ -316,9 +316,10 @@ err = db.Table("(?) AS cp", pairs).
   subquery that selects one column of node ids. It must be a subquery that gorm can render on its
   own, built with `Table`, `Model` or `Raw`; the builder renders it once and returns an error when
   that fails. A subquery whose `Error` is set returns that error.
-* `ClosurePairs` leaves the pairs of the virtual root (ancestor 0) out unless you pass
-  `IncludeVirtualRoot()`. `ForAncestors(ids...)` limits the ancestors; without ids it selects
-  nothing, and it binds one value per id, with the limits above.
+* `ForAncestors(ids...)` limits the ancestors of `ClosurePairs`; an id 0 includes the pairs of the
+  virtual root. Without ids it selects nothing, and it binds one value per id, with the limits
+  above. Without `ForAncestors`, `ClosurePairs` leaves the virtual root out unless you pass
+  `IncludeVirtualRoot()`.
 * MySQL, error 1093: with a filter the subquery reads the node table, and MySQL rejects it inside an
   `UPDATE` or `DELETE` on the node table. Wrap it in a derived table:
   `db.Table("tags").Where("node_id IN (SELECT descendant_id FROM (?) AS sub)", sub).Update("name", "renamed")`.
