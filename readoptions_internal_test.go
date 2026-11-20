@@ -207,6 +207,7 @@ func TestFilterRejectsValuesThatAreNotOneValue(t *testing.T) {
 		"Eq with an array":              Eq("name", [2]string{"a", "b"}),
 		"Eq with a pointer to a slice":  Eq("name", &words),
 		"In with a slice":               In("name", "a", []any{"b"}),
+		"In with a pointer to a slice":  In("name", &words),
 		"Eq with an expression":         Eq("name", clause.Expr{SQL: "name"}),
 		"In with an expression":         In("name", clause.Expr{SQL: "name"}),
 		"Eq with a column":              Eq("name", clause.Column{Name: "kind"}),

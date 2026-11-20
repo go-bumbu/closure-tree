@@ -1307,3 +1307,123 @@ func TestReadsRejectUnusableElementTypes(t *testing.T) {
 		})
 	}
 }
+
+// Audit is embedded by pointer in the models below.
+type Audit struct {
+	Author string
+}
+
+// ptrModel is an unexported model with a pointer-embedded struct. gorm marks the fields of such a
+// struct with negative entries in their index.
+type ptrModel struct {
+	closuretree.Node
+	Name   string
+	*Audit `gorm:"embedded"`
+}
+
+type ptrWrapper struct {
+	ptrModel
+	Children []*ptrWrapper
+}
+
+// ptrRefWrapper embeds the unexported model through a pointer. Reflection cannot allocate that
+// pointer, so its fields stay zero; the read must not fail.
+type ptrRefWrapper struct {
+	*ptrModel
+	Children []*ptrRefWrapper
+}
+
+// PtrModel is ptrModel with an exported type, so that an element type can embed it by pointer.
+type PtrModel struct {
+	closuretree.Node
+	Name   string
+	*Audit `gorm:"embedded"`
+}
+
+type exportedPtrRefWrapper struct {
+	*PtrModel
+	Children []*exportedPtrRefWrapper
+}
+
+// The fields of a pointer-embedded struct of the model are copied into the element type, also
+// when the element type embeds a model of an unexported type, or embeds the model by pointer.
+func TestReadIntoWrapperOfUnexportedModel(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, ptrModel{})
+			ct, err := newTestTree(gdb, ptrModel{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			root := &ptrModel{Name: "root", Audit: &Audit{Author: "ann"}}
+			if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			if err := ct.Add(ctx, &ptrModel{Name: "child", Audit: &Audit{Author: "bob"}}, up(root.NodeId), nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			check := func(what, name string, a *Audit, want string) {
+				t.Helper()
+				if a == nil || a.Author != want {
+					t.Errorf("%s, %s: want author %q, got %+v", what, name, want, a)
+				}
+			}
+
+			var models []ptrModel
+			if err := ct.Descendants(ctx, 0, 0, tenant1, &models); err != nil || len(models) != 2 || models[0].Name != "root" {
+				t.Fatalf("Descendants into the model: %+v, %v", models, err)
+			}
+			check("Descendants into the model", "root", models[0].Audit, "ann")
+			check("Descendants into the model", "child", models[1].Audit, "bob")
+
+			var wrapped []ptrWrapper
+			if err := ct.Descendants(ctx, 0, 0, tenant1, &wrapped); err != nil || len(wrapped) != 2 || wrapped[0].Name != "root" || wrapped[1].Name != "child" {
+				t.Fatalf("Descendants into a wrapper: %+v, %v", wrapped, err)
+			}
+			check("Descendants into a wrapper", "root", wrapped[0].Audit, "ann")
+			check("Descendants into a wrapper", "child", wrapped[1].Audit, "bob")
+
+			var tree []*ptrWrapper
+			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &tree); err != nil || len(tree) != 1 || len(tree[0].Children) != 1 {
+				t.Fatalf("TreeDescendants into a wrapper: %d roots, %v", len(tree), err)
+			}
+			if tree[0].Name != "root" || tree[0].Children[0].Name != "child" {
+				t.Errorf("TreeDescendants into a wrapper: names %q, %q", tree[0].Name, tree[0].Children[0].Name)
+			}
+			check("TreeDescendants into a wrapper", "root", tree[0].Audit, "ann")
+			check("TreeDescendants into a wrapper", "child", tree[0].Children[0].Audit, "bob")
+
+			var refs []*ptrRefWrapper
+			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &refs); err != nil {
+				t.Errorf("TreeDescendants into a wrapper of an unexported model pointer: %v", err)
+			}
+
+			readIntoExportedPointerWrapper(t, gdb)
+		})
+	}
+}
+
+// readIntoExportedPointerWrapper checks that an element type that embeds the model by pointer gets
+// the model's fields, those of its pointer-embedded struct included.
+func readIntoExportedPointerWrapper(t *testing.T, gdb *gorm.DB) {
+	t.Helper()
+	dropTreeTables(gdb, PtrModel{})
+	ct, err := newTestTree(gdb, PtrModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	root := &PtrModel{Name: "root", Audit: &Audit{Author: "ann"}}
+	if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
+		t.Fatal(err)
+	}
+	var tree []*exportedPtrRefWrapper
+	if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &tree); err != nil || len(tree) != 1 {
+		t.Fatalf("TreeDescendants into a pointer wrapper: %d roots, %v", len(tree), err)
+	}
+	if r := tree[0]; r.PtrModel == nil || r.Name != "root" || r.NodeId != root.NodeId || r.Audit == nil || r.Author != "ann" {
+		t.Errorf("TreeDescendants into a pointer wrapper: %+v", r.PtrModel)
+	}
+}

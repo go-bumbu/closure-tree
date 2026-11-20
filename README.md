@@ -95,7 +95,7 @@ type Book struct {
 
 parentId := 2
 maxDepth := 0
-tennant := "user1"
+tenant := "user1"
 
 var books []Book // will be populated 
 err = tree.GetLeaves(ctx, &books, parentId, maxDepth, tenant)

@@ -146,7 +146,7 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 		switch c.op {
 		case opEq:
 			v := c.values[0]
-			if err := checkFilterValue(c.column, v); err != nil { // a *gorm.DB is caught before the dereference
+			if err := checkFilterValue(c.column, v); err != nil {
 				return nil, err
 			}
 			if rv := reflect.ValueOf(v); v != nil && rv.Kind() == reflect.Pointer {
@@ -155,9 +155,6 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 				} else {
 					v = rv.Elem().Interface()
 				}
-			}
-			if err := checkFilterValue(c.column, v); err != nil {
-				return nil, err
 			}
 			if v == nil {
 				rc.op = opIsNull
@@ -181,7 +178,7 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 
 // checkFilterValue rejects a value that gorm would not bind as one value: a list, which gorm
 // expands into several placeholders, and a gorm expression or *gorm.DB, which gorm renders as SQL.
-// A byte slice and a driver.Valuer are bound as one value.
+// A byte slice and a driver.Valuer are bound as one value. A non-nil pointer is checked through.
 func checkFilterValue(column string, v any) error {
 	switch v.(type) {
 	case nil:
@@ -190,6 +187,12 @@ func checkFilterValue(column string, v any) error {
 		return fmt.Errorf("filter on %q: a value of type %T is rendered as SQL, not bound", column, v)
 	case driver.Valuer:
 		return nil
+	}
+	if rv := reflect.ValueOf(v); rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return nil
+		}
+		return checkFilterValue(column, rv.Elem().Interface())
 	}
 	t := reflect.TypeOf(v)
 	if t.Kind() == reflect.Array || (t.Kind() == reflect.Slice && t.Elem() != reflect.TypeFor[byte]()) {

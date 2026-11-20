@@ -96,7 +96,7 @@ type fieldCopy struct {
 //
 // A value whose type differs is assigned when it is assignable and converted when it is
 // convertible; a pointer field is dereferenced first, and a nil pointer leaves the element field
-// zero. A slice is never converted to an array or to a pointer to an array, although Go allows it:
+// zero. A nil pointer to an embedded struct on the way to an element field is allocated. A slice is never converted to an array or to a pointer to an array, although Go allows it:
 // the conversion panics when the slice is shorter. Any other type difference returns an error, and
 // so does a T that is not a struct.
 func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) (func(row reflect.Value) reflect.Value, error) {
@@ -121,8 +121,8 @@ func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) (func(ro
 	return func(row reflect.Value) reflect.Value {
 		elem := reflect.New(elemType)
 		for _, c := range copies {
-			dst, err := elem.Elem().FieldByIndexErr(c.dst)
-			if err != nil {
+			dst, ok := settableField(elem.Elem(), c.dst)
+			if !ok {
 				continue
 			}
 			v := c.src.ReflectValueOf(ctx, row.Elem())
@@ -154,10 +154,16 @@ func (ct *Tree) planCopies(elemType reflect.Type) ([]fieldCopy, error) {
 	}
 	if embedded, ok := embeddedField(elemType, ct.schema.ModelType); ok {
 		// The embedded model's type is not exported, so the field cannot be set as a whole; its
-		// exported fields can. Each one goes to its own index below the embedded model.
+		// exported fields can. Each one goes to the same path of Go names below the embedded
+		// model, which has the same type. gorm's own index of a field is not used: it marks a
+		// pointer-embedded struct with negative entries.
 		copies := make([]fieldCopy, 0, len(fields))
 		for _, f := range fields {
-			copies = append(copies, fieldCopy{src: f, dst: append([]int{embedded}, f.StructField.Index...)})
+			dst, ok := fieldByPath(ct.schema.ModelType, f.BindNames)
+			if !ok {
+				continue
+			}
+			copies = append(copies, fieldCopy{src: f, dst: append([]int{embedded}, dst.Index...)})
 		}
 		return copies, nil
 	}
@@ -213,6 +219,25 @@ func fieldByPath(t reflect.Type, names []string) (reflect.StructField, bool) {
 	}
 	found.Index = index
 	return found, len(names) > 0
+}
+
+// settableField returns the field of the struct v at index, a path of field indexes, allocating
+// every nil pointer to a struct on the way, as gorm does when it scans into such a field. It
+// reports false when a nil pointer cannot be set, as one embedded through an unexported type.
+func settableField(v reflect.Value, index []int) (reflect.Value, bool) {
+	for i, x := range index {
+		if i > 0 && v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				if !v.CanSet() {
+					return reflect.Value{}, false
+				}
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			v = v.Elem()
+		}
+		v = v.Field(x)
+	}
+	return v, true
 }
 
 // planFieldCopy decides how the model field src is copied into the element field dst.
