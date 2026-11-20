@@ -77,7 +77,8 @@ func PerNode() ReadOption { return func(c *readConfig) { c.perNode = true } }
 func Unfiltered() ReadOption { return func(c *readConfig) { c.unfiltered = true } }
 
 // Columns limits the columns a read returns to the named ones, given as database column name or Go
-// field name. node_id, tenant and sort_order are always returned.
+// field name. node_id, tenant and sort_order are always returned, so Columns() with no names
+// returns only those three. Without Columns a read returns every column of the node table.
 func Columns(names ...string) ReadOption {
 	return func(c *readConfig) {
 		c.hasColumns = true
@@ -94,7 +95,7 @@ type resolvedCond struct {
 type readPlan struct {
 	conds   []resolvedCond // nil means no filter
 	perNode bool
-	columns []string // database column names to select; never empty
+	columns []string // database column names to select; nil means every column of the node table
 }
 
 // column resolves a column or Go field name to the database column name of a column that exists
@@ -107,18 +108,12 @@ func (ct *Tree) column(name string) (string, error) {
 	return f.DBName, nil
 }
 
-// hasColumn tells whether the field is stored in the node table.
-func hasColumn(f *schema.Field) bool { return f.DBName != "" && !f.IgnoreMigration }
-
-// modelColumnsOf lists the columns of the node table that the model maps, in field order.
-func modelColumnsOf(s *schema.Schema) []string {
-	var cols []string
-	for _, f := range s.Fields {
-		if hasColumn(f) {
-			cols = append(cols, f.DBName)
-		}
-	}
-	return cols
+// hasColumn tells whether the field can be named in a read option: it has a column name and is not
+// both read-only and excluded from migration. A writable field excluded from migration is written
+// by Add and Update, so its column exists; a read-only one excluded from migration, as
+// Node.ParentId, is a computed value.
+func hasColumn(f *schema.Field) bool {
+	return f.DBName != "" && (!f.IgnoreMigration || f.Creatable || f.Updatable)
 }
 
 func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
@@ -180,7 +175,6 @@ func (ct *Tree) planRead(opts []ReadOption) (*readPlan, error) {
 	}
 
 	if !cfg.hasColumns {
-		p.columns = ct.modelColumns
 		return p, nil
 	}
 	p.columns = []string{colNodeID, colTenant, colSortOrder}
@@ -198,10 +192,10 @@ func (ct *Tree) planRead(opts []ReadOption) (*readPlan, error) {
 	return p, nil
 }
 
-// plainPlan is the plan of a read without options and without the default filter: every model
-// column. It is for writes that read.
+// plainPlan is the plan of a read without options and without the default filter: every column of
+// the node table. It is for writes that read.
 func (ct *Tree) plainPlan() *readPlan {
-	return &readPlan{columns: ct.modelColumns}
+	return &readPlan{}
 }
 
 // WithFilter returns a copy of the Tree whose reads apply conds by default. It replaces any default

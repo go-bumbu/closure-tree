@@ -302,6 +302,148 @@ func TestStaleParentIDColumnIsIgnored(t *testing.T) {
 			if found, err := ct.FindChild(ctx, id["x"], tenantF, &filterNode{Name: "x1"}, []string{"Name"}, &out); err != nil || !found || out.ParentId != id["x"] {
 				t.Errorf("FindChild: found=%v parent=%d err=%v", found, out.ParentId, err)
 			}
+			staleParentWithColumns(t, ct, id)
+		})
+	}
+}
+
+// staleParentWithColumns checks that GetNode and TreeDescendants with Columns also return the
+// computed parent, not the leftover physical parent_id column.
+func staleParentWithColumns(t *testing.T, ct *closuretree.Tree, id map[string]uint) {
+	t.Helper()
+	ctx := context.Background()
+	cols := closuretree.Columns("name")
+	var x1 filterNode
+	if err := ct.GetNode(ctx, id["x1"], tenantF, &x1, cols); err != nil || x1.ParentId != id["x"] {
+		t.Errorf("GetNode with Columns: parent %d, %v", x1.ParentId, err)
+	}
+	var under []*filterNode
+	if err := ct.TreeDescendants(ctx, id["x"], 1, tenantF, &under, cols); err != nil || len(under) != 2 || under[0].ParentId != id["x"] {
+		t.Errorf("TreeDescendants with Columns: %+v, %v", under, err)
+	}
+}
+
+// unmigratedNode has a writable field that is excluded from migration; the application adds its
+// column itself.
+type unmigratedNode struct {
+	closuretree.Node
+	Name     string
+	Extra    string            `gorm:"-:migration"`
+	Children []*unmigratedNode `gorm:"-"`
+}
+
+// A writable field excluded from migration whose column exists is read by every read, so a read
+// followed by Update keeps its value, and it can be named in Filter and Columns.
+//
+//nolint:gocyclo // test function covers many assertion branches
+func TestReadsReturnUnmigratedColumns(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, unmigratedNode{})
+			ct, err := newTestTree(gdb, unmigratedNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := gdb.Exec("ALTER TABLE " + ct.NodeTableName() + " ADD COLUMN extra VARCHAR(50)").Error; err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			root := &unmigratedNode{Name: "r", Extra: "written"}
+			if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			child := &unmigratedNode{Name: "c", Extra: "written"}
+			if err := ct.Add(ctx, child, up(root.NodeId), nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			var one unmigratedNode
+			if err := ct.GetNode(ctx, child.NodeId, tenant1, &one); err != nil || one.Extra != "written" {
+				t.Errorf("GetNode: %+v, %v", one, err)
+			}
+			var out unmigratedNode
+			if found, err := ct.FindChild(ctx, root.NodeId, tenant1, &unmigratedNode{Name: "c"}, []string{"Name"}, &out); err != nil || !found || out.Extra != "written" {
+				t.Errorf("FindChild: found=%v %+v, %v", found, out, err)
+			}
+			var flat []unmigratedNode
+			if err := ct.Descendants(ctx, 0, 0, tenant1, &flat); err != nil || len(flat) != 2 || flat[0].Extra != "written" || flat[1].Extra != "written" {
+				t.Errorf("Descendants: %+v, %v", flat, err)
+			}
+			var tree []*unmigratedNode
+			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &tree); err != nil || len(tree) != 1 || tree[0].Extra != "written" ||
+				len(tree[0].Children) != 1 || tree[0].Children[0].Extra != "written" {
+				t.Errorf("TreeDescendants: %+v, %v", tree, err)
+			}
+
+			// a read followed by Update keeps the value
+			one.Name = "c2"
+			if err := ct.Update(ctx, child.NodeId, &one, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			var again unmigratedNode
+			if err := ct.GetNode(ctx, child.NodeId, tenant1, &again); err != nil || again.Extra != "written" || again.Name != "c2" {
+				t.Errorf("GetNode after Update: %+v, %v", again, err)
+			}
+
+			var named []unmigratedNode
+			err = ct.Descendants(ctx, 0, 0, tenant1, &named, closuretree.Filter(closuretree.Eq("extra", "written")), closuretree.Columns("extra"))
+			if err != nil || len(named) != 2 || named[0].Extra != "written" || named[0].Name != "" {
+				t.Errorf("Filter and Columns on the column: %+v, %v", named, err)
+			}
+		})
+	}
+}
+
+// WideBase is the Tree's model; WideNode embeds it and adds a column the application created. Both
+// are exported because gorm skips an embedded struct of an unexported type.
+type WideBase struct {
+	closuretree.Node
+	Name string
+}
+
+type WideNode struct {
+	WideBase
+	Color string
+}
+
+// GetNode and FindChild into a struct with more columns than the Tree's model fill the extra
+// columns, so a read followed by Update keeps them.
+func TestSingleReadsFillWiderStruct(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, WideBase{})
+			ct, err := newTestTree(gdb, WideBase{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := gdb.Exec("ALTER TABLE " + ct.NodeTableName() + " ADD COLUMN color VARCHAR(50)").Error; err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			n := &WideNode{WideBase: WideBase{Name: "a"}, Color: "red"}
+			if err := ct.Add(ctx, n, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			var one WideNode
+			if err := ct.GetNode(ctx, n.NodeId, tenant1, &one); err != nil || one.Color != "red" {
+				t.Errorf("GetNode: %+v, %v", one, err)
+			}
+			var out WideNode
+			if found, err := ct.FindChild(ctx, 0, tenant1, &WideBase{Name: "a"}, []string{"Name"}, &out); err != nil || !found || out.Color != "red" {
+				t.Errorf("FindChild: found=%v %+v, %v", found, out, err)
+			}
+
+			one.Name = "b"
+			if err := ct.Update(ctx, n.NodeId, &one, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			var again WideNode
+			if err := ct.GetNode(ctx, n.NodeId, tenant1, &again); err != nil || again.Color != "red" || again.Name != "b" {
+				t.Errorf("GetNode after Update: %+v, %v", again, err)
+			}
 		})
 	}
 }

@@ -71,7 +71,6 @@ type Tree struct {
 	model        any // node model retained so Migrate can AutoMigrate it
 
 	schema        *schema.Schema // the parsed model schema
-	modelColumns  []string       // the columns a read selects by default
 	defaultFilter []resolvedCond // set by WithFilter
 }
 
@@ -133,7 +132,6 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		dialect:      dialectOf(db),
 		model:        item,
 		schema:       stmt.Schema,
-		modelColumns: modelColumnsOf(stmt.Schema),
 	}
 
 	return ct, nil

@@ -21,8 +21,11 @@ func (ct *Tree) quoteCol(alias, column string) string {
 }
 
 // selectList returns the quoted, comma-separated columns qualified by alias,
-// e.g. `"nodes"."node_id", "nodes"."name"`.
+// e.g. `"nodes"."node_id", "nodes"."name"`, or `<alias>.*` when columns is nil.
 func (ct *Tree) selectList(alias string, columns []string) string {
+	if columns == nil {
+		return alias + ".*"
+	}
 	parts := make([]string, len(columns))
 	for i, c := range columns {
 		parts[i] = ct.quoteCol(alias, c)
@@ -69,7 +72,8 @@ func (ct *Tree) notMatchSQL(alias string, conds []resolvedCond) (string, []any) 
 	return "CASE WHEN " + sql + " THEN 0 ELSE 1 END = 1", args
 }
 
-// getNodeSQL selects one node by id, with its parent computed from the closure rows.
+// getNodeSQL selects one node by id, with its parent computed from the closure rows. The computed
+// parent is the last column, so it wins over a leftover physical parent_id column when gorm scans.
 func (ct *Tree) getNodeSQL(p *readPlan, nodeID uint, tenant string) (string, []any) {
 	var s sqlBuf
 	s.add("SELECT " + ct.selectList("nodes", p.columns) + ", parent_rel.ancestor_id AS parent_id\n")
@@ -107,8 +111,8 @@ func (ct *Tree) findChildSQL(p *readPlan, parentID uint, tenant, matchSQL string
 }
 
 // descendantsSQL selects the descendants of parent down to maxDepth levels, ordered by depth, then
-// sort_order and node id. With idsOnly it selects only node_id; otherwise the plan's columns and
-// the parent computed from the closure rows.
+// sort_order and node id. With idsOnly it selects only node_id; otherwise the plan's columns and,
+// last, the parent computed from the closure rows.
 func (ct *Tree) descendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDepth int, tenant string) (string, []any) {
 	var s sqlBuf
 	if idsOnly {
@@ -148,19 +152,23 @@ func (ct *Tree) descendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDepth 
 }
 
 // treeDescendantsSQL walks the subtree under parent with a recursive query, one level per step,
-// down to maxDepth levels. Each row carries its direct parent: as parent_id, so gorm fills
-// Node.ParentId, or as ancestor_id with idsOnly, which selects only node_id and sort_order. The
-// level counter is cte_depth, not depth, so it cannot shadow a depth column of the model.
+// down to maxDepth levels. Each row carries its direct parent as ancestor_id. With idsOnly the
+// query selects node_id, ancestor_id and sort_order; otherwise every column of the recursive query
+// and, last, ancestor_id again as parent_id, so gorm fills Node.ParentId. The parent is not named
+// parent_id inside the recursive query because a leftover physical parent_id column would make
+// that a duplicate column name, which MySQL rejects there; in the final select a duplicate is
+// allowed and the later column wins when gorm scans. The level counter is cte_depth, not depth, so
+// it cannot shadow a depth column of the model.
 func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDepth int, tenant string) (string, []any) {
-	cols, parentAlias := "nodes.node_id,\n\t\tnodes.sort_order", "ancestor_id"
+	cols := "nodes.node_id,\n\t\tnodes.sort_order"
 	if !idsOnly {
-		cols, parentAlias = ct.selectList("nodes", p.columns), colParentID
+		cols = ct.selectList("nodes", p.columns)
 	}
 	var s sqlBuf
 	s.add("WITH RECURSIVE Tree AS (\n")
 	s.add("\t-- Base case: Start with direct children of the parent node\n")
 	s.add("\tSELECT\n\t\t" + cols + ",\n")
-	s.add("\t\tct.ancestor_id AS " + parentAlias + ",\n")
+	s.add("\t\tct.ancestor_id AS ancestor_id,\n")
 	s.add("\t\t1 AS cte_depth\n")
 	s.add("\tFROM " + ct.nodesTbl + " AS nodes\n")
 	s.add("\tJOIN " + ct.relationsTbl + " AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant\n")
@@ -178,7 +186,7 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 	s.add("\n\n\tUNION ALL\n\n")
 	s.add("\t-- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree\n")
 	s.add("\tSELECT\n\t\t" + cols + ",\n")
-	s.add("\t\tt.node_id AS " + parentAlias + ",\n")
+	s.add("\t\tt.node_id AS ancestor_id,\n")
 	s.add("\t\tt.cte_depth + 1 AS cte_depth\n")
 	s.add("\tFROM Tree AS t\n")
 	s.add("\tJOIN "+ct.relationsTbl+" AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?\n", tenant)
@@ -191,7 +199,7 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 	if idsOnly {
 		s.add("\tSELECT Tree.node_id, Tree.ancestor_id, Tree.sort_order FROM Tree ORDER BY cte_depth;")
 	} else {
-		s.add("\tSELECT * FROM Tree ORDER BY cte_depth;")
+		s.add("\tSELECT Tree.*, Tree.ancestor_id AS parent_id FROM Tree ORDER BY cte_depth;")
 	}
 	return s.b.String(), s.args
 }

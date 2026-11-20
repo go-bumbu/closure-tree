@@ -18,6 +18,9 @@ func TestReadSQLFragments(t *testing.T) {
 	if got, want := ct.selectList("nodes", []string{"node_id", "name"}), q("nodes.node_id")+", "+q("nodes.name"); got != want {
 		t.Errorf("selectList: want %q, got %q", want, got)
 	}
+	if got := ct.selectList("nodes", nil); got != "nodes.*" {
+		t.Errorf("selectList without columns: want every column, got %q", got)
+	}
 
 	conds := []resolvedCond{
 		{"kind", opEq, []any{"doc"}},

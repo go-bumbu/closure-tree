@@ -28,7 +28,7 @@ func TestPlanReadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := &readPlan{columns: []string{"node_id", "tenant", "sort_order", "name", "kind", "hidden", "note", "archived_at"}}
+	want := &readPlan{} // nil columns: every column of the node table
 	if diff := cmp.Diff(want, p, cmp.AllowUnexported(readPlan{}, resolvedCond{})); diff != "" {
 		t.Errorf("default plan (-want +got):\n%s", diff)
 	}
