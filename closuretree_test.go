@@ -107,12 +107,16 @@ func up(v uint) *uint { return &v }
 
 // connAndClose creates a database connection for the test and disables idle connection
 // pooling so connections are released immediately after each operation, preventing
-// PostgreSQL connection exhaustion when many tests accumulate open pools.
+// PostgreSQL connection exhaustion when many tests accumulate open pools. On PostgreSQL it also
+// frees the connections the harness itself leaks; see freeLeakedPostgresConns.
 func connAndClose(t *testing.T, db testdbs.TargetDb) *gorm.DB {
 	t.Helper()
 	gdb := db.ConnDbName(t.Name())
 	if sqlDB, err := gdb.DB(); err == nil {
 		sqlDB.SetMaxIdleConns(0)
+	}
+	if db.DbType() == testdbs.DBTypePostgres {
+		freeLeakedPostgresConns(t, gdb)
 	}
 	return gdb
 }
