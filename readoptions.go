@@ -1,11 +1,14 @@
 package closuretree
 
 import (
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"reflect"
 	"slices"
 
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
 
@@ -130,6 +133,9 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 		switch c.op {
 		case opEq:
 			v := c.values[0]
+			if err := checkFilterValue(c.column, v); err != nil { // a *gorm.DB is caught before the dereference
+				return nil, err
+			}
 			if rv := reflect.ValueOf(v); v != nil && rv.Kind() == reflect.Pointer {
 				if rv.IsNil() {
 					v = nil
@@ -137,12 +143,20 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 					v = rv.Elem().Interface()
 				}
 			}
+			if err := checkFilterValue(c.column, v); err != nil {
+				return nil, err
+			}
 			if v == nil {
 				rc.op = opIsNull
 			} else {
 				rc.values = []any{v}
 			}
 		case opIn:
+			for _, v := range c.values {
+				if err := checkFilterValue(c.column, v); err != nil {
+					return nil, err
+				}
+			}
 			if len(c.values) > 0 {
 				rc.values = c.values
 			}
@@ -150,6 +164,25 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 		out = append(out, rc)
 	}
 	return out, nil
+}
+
+// checkFilterValue rejects a value that gorm would not bind as one value: a list, which gorm
+// expands into several placeholders, and a gorm expression or *gorm.DB, which gorm renders as SQL.
+// A byte slice and a driver.Valuer are bound as one value.
+func checkFilterValue(column string, v any) error {
+	switch v.(type) {
+	case nil:
+		return nil
+	case *gorm.DB, clause.Expression, clause.Column, clause.Table:
+		return fmt.Errorf("filter on %q: a value of type %T is rendered as SQL, not bound", column, v)
+	case driver.Valuer:
+		return nil
+	}
+	t := reflect.TypeOf(v)
+	if t.Kind() == reflect.Array || (t.Kind() == reflect.Slice && t.Elem() != reflect.TypeFor[byte]()) {
+		return fmt.Errorf("filter on %q: a value of type %T is a list; pass the values one by one", column, v)
+	}
+	return nil
 }
 
 // planRead applies the options and validates them against the model. Every read runs it, so an
@@ -204,11 +237,14 @@ func (ct *Tree) plainPlan() *readPlan {
 // with Unfiltered. Writes are never filtered. The original Tree is not changed. It returns
 // ErrUnknownColumn when a condition names an unknown column.
 func (ct *Tree) WithFilter(conds ...Cond) (*Tree, error) {
+	cp := *ct
+	if len(conds) == 0 {
+		return &cp, nil
+	}
 	resolved, err := ct.resolveConds(conds)
 	if err != nil {
 		return nil, err
 	}
-	cp := *ct
 	cp.defaultFilter = resolved
 	return &cp, nil
 }

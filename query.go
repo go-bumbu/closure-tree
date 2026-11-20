@@ -199,6 +199,9 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 
 	sliceVal := reflect.ValueOf(items).Elem()
 	elemType := sliceVal.Type().Elem()
+	if f, ok := elemType.Elem().FieldByName("Children"); ok && f.Type != reflect.SliceOf(elemType) {
+		return fmt.Errorf("cannot read a tree into %s: its field Children is %s, not %s", elemType.Elem(), f.Type, reflect.SliceOf(elemType))
+	}
 
 	tenant, err = validateTenant(tenant)
 	if err != nil {

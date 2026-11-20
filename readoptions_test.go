@@ -955,6 +955,14 @@ func TestWithFilterOnEveryRead(t *testing.T) {
 			if err != nil || len(ids) != 4 {
 				t.Errorf("DescendantIds: %d, %v", len(ids), err)
 			}
+			nameOf := map[uint]string{}
+			for name, nodeID := range id {
+				nameOf[nodeID] = name
+			}
+			treeIDs, err := ftree.TreeDescendantsIds(ctx, 0, 0, tenantF)
+			if err != nil || renderIDs(treeIDs, nameOf) != "a(a1) b(b1)" {
+				t.Errorf("TreeDescendantsIds: %q, %v", renderIDs(treeIDs, nameOf), err)
+			}
 			if _, err := ct.WithFilter(closuretree.Eq("nope", 1)); !errors.Is(err, closuretree.ErrUnknownColumn) {
 				t.Errorf("WithFilter on an unknown column: %v", err)
 			}
@@ -1194,6 +1202,106 @@ func TestFilteredReadsOnLargeTree(t *testing.T) {
 					tree, err := ct.TreeDescendantsIds(ctx, parent.id, 0, tenantF, docs)
 					return countTree(tree), err
 				})
+			}
+		})
+	}
+}
+
+type prefixAddr struct {
+	City string
+	Name string // the same Go name as the model's own Name
+}
+
+// prefixNode has a struct embedded with a column prefix whose field Name has the same Go name as
+// a field of the model itself.
+type prefixNode struct {
+	closuretree.Node
+	Name string
+	Addr prefixAddr `gorm:"embedded;embeddedPrefix:addr_"`
+}
+
+type prefixWrapper struct {
+	prefixNode
+	Children []*prefixWrapper
+}
+
+type prefixFlat struct {
+	NodeId uint
+	Name   string
+}
+
+// Each model field is copied to the field at the same path in the element type, so the model's
+// own Name is never confused with the Name of the embedded Addr.
+func TestReadIntoWrapperWithEmbeddedPrefix(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, prefixNode{})
+			ct, err := newTestTree(gdb, prefixNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			n := &prefixNode{Name: "own", Addr: prefixAddr{City: "city", Name: "addr-name"}}
+			if err := ct.Add(ctx, n, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			wantAddr := prefixAddr{City: "city", Name: "addr-name"}
+
+			var models []prefixNode
+			if err := ct.Descendants(ctx, 0, 0, tenant1, &models); err != nil || len(models) != 1 ||
+				models[0].Name != "own" || models[0].Addr != wantAddr {
+				t.Errorf("Descendants into the model: %+v, %v", models, err)
+			}
+			var tree []*prefixWrapper
+			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &tree); err != nil || len(tree) != 1 {
+				t.Errorf("TreeDescendants into a wrapper: %d roots, %v", len(tree), err)
+			} else if w := tree[0]; w.Name != "own" || w.Addr != wantAddr || w.NodeId != n.NodeId {
+				t.Errorf("TreeDescendants into a wrapper: %+v", *w)
+			}
+			var flat []prefixFlat
+			if err := ct.Descendants(ctx, 0, 0, tenant1, &flat); err != nil || len(flat) != 1 ||
+				flat[0].Name != "own" || flat[0].NodeId != n.NodeId {
+				t.Errorf("Descendants into a flat struct: %+v, %v", flat, err)
+			}
+		})
+	}
+}
+
+type uintChildren struct {
+	closuretree.Node
+	Name     string
+	Children []uint
+}
+
+// Descendants into a slice of non-struct elements, and a tree read into an element whose
+// Children field has another type than []*T, fail before the query runs.
+func TestReadsRejectUnusableElementTypes(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cancelled, cancel := context.WithCancel(context.Background())
+			cancel() // a query would fail with context.Canceled, so the check must come first
+
+			var ids []uint
+			err = ct.Descendants(cancelled, 0, 0, tenantF, &ids)
+			if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "uint") {
+				t.Errorf("Descendants into []uint: want an error naming the type, got %v", err)
+			}
+			var ptrs []**filterNode
+			err = ct.Descendants(cancelled, 0, 0, tenantF, &ptrs)
+			if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "filterNode") {
+				t.Errorf("Descendants into []**T: want an error naming the type, got %v", err)
+			}
+			var tree []*uintChildren
+			err = ct.TreeDescendants(cancelled, 0, 0, tenantF, &tree)
+			if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Children") || !strings.Contains(err.Error(), "uintChildren") {
+				t.Errorf("TreeDescendants with Children []uint: want an error naming the field and type, got %v", err)
 			}
 		})
 	}

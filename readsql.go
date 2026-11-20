@@ -1,6 +1,9 @@
 package closuretree
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // sqlBuf collects SQL text and its bound arguments in the order they appear.
 type sqlBuf struct {
@@ -59,6 +62,8 @@ func (ct *Tree) matchSQL(alias string, conds []resolvedCond) (string, []any) {
 				continue
 			}
 			s.add(col+" IN ?", c.values)
+		default:
+			panic(fmt.Sprintf("closuretree: unknown filter operator %d", c.op))
 		}
 	}
 	s.b.WriteString(")")
@@ -90,10 +95,10 @@ func (ct *Tree) getNodeSQL(p *readPlan, nodeID uint, tenant string) (string, []a
 	return s.b.String(), s.args
 }
 
-// findChildSQL selects the first direct child (depth 1) of parentID that satisfies matchSQL, the
+// findChildSQL selects the first direct child (depth 1) of parentID that satisfies whereSQL, the
 // caller's match conditions over the alias nodes. child_rel.ancestor_id is the direct parent id (0
 // for a root node), named parent_id so the read-only Node.ParentId is filled as in GetNode.
-func (ct *Tree) findChildSQL(p *readPlan, parentID uint, tenant, matchSQL string, matchArgs []any) (string, []any) {
+func (ct *Tree) findChildSQL(p *readPlan, parentID uint, tenant, whereSQL string, whereArgs []any) (string, []any) {
 	var s sqlBuf
 	s.add("SELECT " + ct.selectList("nodes", p.columns) + ", child_rel.ancestor_id AS parent_id\n")
 	s.add("FROM " + ct.nodesTbl + " AS nodes\n")
@@ -102,7 +107,7 @@ func (ct *Tree) findChildSQL(p *readPlan, parentID uint, tenant, matchSQL string
 	s.add("  AND child_rel.depth = 1\n")
 	s.add("  AND child_rel.tenant = nodes.tenant\n")
 	s.add("WHERE child_rel.ancestor_id = ? AND nodes.tenant = ?", parentID, tenant)
-	s.add(" AND "+matchSQL, matchArgs...)
+	s.add(" AND "+whereSQL, whereArgs...)
 	if filter, fargs := ct.matchSQL("nodes", p.conds); filter != "" {
 		s.add(" AND "+filter, fargs...)
 	}

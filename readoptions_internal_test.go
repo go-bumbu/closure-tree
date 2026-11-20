@@ -1,12 +1,16 @@
 package closuretree
 
 import (
+	"database/sql/driver"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
 )
 
 type optNode struct {
@@ -152,7 +156,7 @@ func TestWithFilterPrecedence(t *testing.T) {
 }
 
 // withFilterReplaces checks that WithFilter on a Tree that has a default replaces it, and that
-// without conds it leaves none.
+// without conds it keeps it.
 func withFilterReplaces(t *testing.T, ft *Tree, own []resolvedCond, opt cmp.Option) {
 	t.Helper()
 	wf, err := ft.WithFilter(Eq("hidden", true))
@@ -166,8 +170,8 @@ func withFilterReplaces(t *testing.T, ft *Tree, own []resolvedCond, opt cmp.Opti
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p, err := wf.planRead(nil); err != nil || p.conds != nil {
-		t.Errorf("WithFilter() must leave no default filter: %v", err)
+	if p, err := wf.planRead(nil); err != nil || !cmp.Equal([]resolvedCond{{"archived_at", opIsNull, nil}}, p.conds, opt) {
+		t.Errorf("WithFilter() must keep the default filter: %v", err)
 	}
 }
 
@@ -185,5 +189,113 @@ func TestInCopiesValues(t *testing.T) {
 	}
 	if len(p.conds) != 1 || p.conds[0].values[0] != "a" {
 		t.Errorf("In must copy its values, got %v", p.conds)
+	}
+}
+
+// valuerList is a slice type that binds as one value through driver.Valuer.
+type valuerList []string
+
+func (v valuerList) Value() (driver.Value, error) { return strings.Join(v, ","), nil }
+
+// A filter value that gorm would expand into several placeholders, or render as SQL, is rejected
+// before querying; a byte slice and a driver.Valuer bind as one value and are accepted.
+func TestFilterRejectsValuesThatAreNotOneValue(t *testing.T) {
+	ct := newInternalTree(t, optNode{})
+	words := []string{"a"}
+	bad := map[string]Cond{
+		"Eq with a slice":               Eq("name", []string{"a"}),
+		"Eq with an array":              Eq("name", [2]string{"a", "b"}),
+		"Eq with a pointer to a slice":  Eq("name", &words),
+		"In with a slice":               In("name", "a", []any{"b"}),
+		"Eq with an expression":         Eq("name", clause.Expr{SQL: "name"}),
+		"In with an expression":         In("name", clause.Expr{SQL: "name"}),
+		"Eq with a column":              Eq("name", clause.Column{Name: "kind"}),
+		"Eq with a *gorm.DB":            Eq("name", ct.db),
+		"In with a *gorm.DB":            In("name", ct.db.Table("x")),
+		"Eq with a gorm expression ptr": Eq("name", &clause.Expr{SQL: "name"}),
+	}
+	for what, c := range bad {
+		if _, err := ct.planRead([]ReadOption{Filter(c)}); err == nil || !strings.Contains(err.Error(), "name") {
+			t.Errorf("%s: want an error naming the column, got %v", what, err)
+		}
+		if _, err := ct.WithFilter(c); err == nil {
+			t.Errorf("%s: WithFilter must reject it too", what)
+		}
+	}
+	for what, c := range map[string]Cond{
+		"Eq with []byte":         Eq("name", []byte("a")),
+		"In with []byte":         In("name", []byte("a"), []byte("b")),
+		"Eq with a Valuer slice": Eq("name", valuerList{"a"}),
+	} {
+		if _, err := ct.planRead([]ReadOption{Filter(c)}); err != nil {
+			t.Errorf("%s: %v", what, err)
+		}
+	}
+}
+
+// The copy plan never converts a slice to an array or to a pointer to an array: both conversions
+// panic at run time when the slice is shorter than the array.
+func TestPlanFieldCopyRejectsSliceToArray(t *testing.T) {
+	src := func(v any) *schema.Field {
+		return &schema.Field{Name: "Raw", StructField: reflect.StructField{Name: "Raw", Type: reflect.TypeOf(v)}}
+	}
+	dst := func(v any) reflect.StructField {
+		return reflect.StructField{Name: "Raw", Type: reflect.TypeOf(v), Index: []int{0}}
+	}
+	cases := map[string]struct {
+		from *schema.Field
+		to   reflect.StructField
+	}{
+		"[]byte to [4]byte":   {src([]byte(nil)), dst([4]byte{})},
+		"*[]byte to [4]byte":  {src((*[]byte)(nil)), dst([4]byte{})},
+		"[]byte to *[4]byte":  {src([]byte(nil)), dst((*[4]byte)(nil))},
+		"*[]byte to *[4]byte": {src((*[]byte)(nil)), dst((*[4]byte)(nil))},
+	}
+	for what, c := range cases {
+		if _, err := planFieldCopy(c.from, c.to); err == nil || !strings.Contains(err.Error(), "cannot assign type") {
+			t.Errorf("%s: want a cannot assign type error, got %v", what, err)
+		}
+	}
+}
+
+// matchSQL panics on an operator it does not know, which only a bug in the package can produce.
+func TestMatchSQLPanicsOnUnknownOperator(t *testing.T) {
+	ct := newInternalTree(t, optNode{})
+	defer func() {
+		if msg, _ := recover().(string); !strings.Contains(msg, "99") {
+			t.Errorf("want a panic naming the operator, got %q", msg)
+		}
+	}()
+	ct.matchSQL("n", []resolvedCond{{"name", condOp(99), nil}})
+}
+
+// ExportedModel is exported so that a wrapper can set the embedded model as a whole.
+type ExportedModel struct {
+	Node
+	Name string
+}
+
+type exportedWrapper struct {
+	ExportedModel
+	Children []*exportedWrapper
+}
+
+// An element type that embeds an exported model gets the scanned row as a whole.
+func TestReadIntoWrapperOfExportedModel(t *testing.T) {
+	ct := newInternalTree(t, ExportedModel{})
+	ctx := t.Context()
+	root := &ExportedModel{Name: "root"}
+	if err := ct.Add(ctx, root, nil, nil, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ct.Add(ctx, &ExportedModel{Name: "child"}, &root.NodeId, nil, "t"); err != nil {
+		t.Fatal(err)
+	}
+	var tree []*exportedWrapper
+	if err := ct.TreeDescendants(ctx, 0, 0, "t", &tree); err != nil || len(tree) != 1 {
+		t.Fatalf("TreeDescendants: %d roots, %v", len(tree), err)
+	}
+	if r := tree[0]; r.Name != "root" || r.NodeId != root.NodeId || len(r.Children) != 1 || r.Children[0].Name != "child" || r.Children[0].ParentId != root.NodeId {
+		t.Errorf("TreeDescendants into a wrapper of an exported model: %+v", *r)
 	}
 }
