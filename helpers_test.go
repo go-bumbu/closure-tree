@@ -224,3 +224,12 @@ func childNames(t *testing.T, ct *closuretree.Tree, parent uint, tenant string) 
 	}
 	return names
 }
+
+// seq returns the ids from..to, both inclusive.
+func seq(from, to uint) []uint {
+	ids := make([]uint, 0, to-from+1)
+	for id := from; id <= to; id++ {
+		ids = append(ids, id)
+	}
+	return ids
+}
