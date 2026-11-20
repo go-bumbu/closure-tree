@@ -359,8 +359,9 @@ func TestReadsQuoteReservedColumnNames(t *testing.T) {
 			if err := ct.Descendants(ctx, 0, 0, tenant1, &second, byOrder, closuretree.PerNode()); err != nil || len(second) != 1 {
 				t.Errorf("filter on a reserved-word column: %d, %v", len(second), err)
 			}
-			if err := ct.Descendants(ctx, 0, 0, tenant1, &second, byOrder); err != nil { // prune: the root has order 1
-				t.Errorf("prune on a reserved-word column: %v", err)
+			var pruned []reservedNode
+			if err := ct.Descendants(ctx, 0, 0, tenant1, &pruned, byOrder); err != nil || len(pruned) != 0 { // prune: the root has order 1
+				t.Errorf("prune on a reserved-word column: %d, %v", len(pruned), err)
 			}
 		})
 	}
@@ -744,6 +745,13 @@ func TestFilterOnTreeReads(t *testing.T) {
 				both(name+": PerNode changes nothing here", "a(a1) b(b1)", "", 0, f, closuretree.PerNode())
 			}
 			both("a leaf is pruned", "a(a1 x(x1 x2(x21))) b", "", 0, closuretree.Filter(closuretree.Eq("hidden", false)))
+			// a column filtered on but not selected stays empty in the result
+			var folders []*filterNode
+			err = ct.TreeDescendants(ctx, 0, 0, tenantF, &folders, closuretree.Columns("name"),
+				closuretree.Filter(closuretree.Eq("kind", "folder")))
+			if err != nil || render(folders) != "b" || len(folders) != 1 || folders[0].Kind != "" {
+				t.Errorf("Columns with a filter on another column: %q, %v", render(folders), err)
+			}
 		})
 	}
 }
