@@ -86,27 +86,30 @@ type depthRange struct{ min, max int }
 // ReadOption changes how a read selects its nodes or which columns it returns.
 type ReadOption func(*readConfig)
 
-// Filter keeps only the nodes that match every condition. For this call it replaces the Tree's
-// default filter (see WithFilter); several Filter options are joined. An empty Filter has no
-// effect, so the default filter still applies.
+// Filter keeps only the nodes that match every condition. Every read that takes options honours it;
+// what a non-matching node does differs per read and is described on each. For this call it replaces the Tree's default filter (see WithFilter);
+// several Filter options are joined. An empty Filter has no effect, so the default filter still
+// applies.
 func Filter(conds ...Cond) ReadOption {
 	return func(c *readConfig) {
 		c.filter = append(c.filter, conds...)
 	}
 }
 
-// PerNode changes how Descendants and DescendantIds apply the filter. By default they prune: a node
-// is returned only if it and every node between the requested parent and it match. With PerNode a
-// node is returned when it matches itself, whatever its ancestors do. Other reads ignore it.
+// PerNode changes how Descendants, DescendantIds, SubtreeIDs, SubtreeIDsOf and GetLeaves apply the
+// filter. By default they prune: a node counts only if it and every node between the requested
+// parent and it match. With PerNode a node counts when it matches itself, whatever its ancestors do.
+// The other reads ignore it.
 func PerNode() ReadOption { return func(c *readConfig) { c.perNode = true } }
 
-// Unfiltered switches the Tree's default filter off for this call.
+// Unfiltered switches the Tree's default filter off for this call, in every read that takes options.
 func Unfiltered() ReadOption { return func(c *readConfig) { c.unfiltered = true } }
 
 // Columns limits the columns a read returns to node_id, tenant, sort_order and the named ones,
 // given as database column name or Go field name, so Columns() with no names returns only those
 // three. Without Columns a read returns every column of the node table. The parent is always
-// computed from the closure rows. Fields that are not selected stay zero, so do not pass the item
+// computed from the closure rows. GetNode, FindChild, Descendants, TreeDescendants and Ancestors
+// honour it; the other reads ignore it. Fields that are not selected stay zero, so do not pass the item
 // to Update: Update writes every field, and the columns that were not selected would be
 // overwritten with zero values.
 func Columns(names ...string) ReadOption {
@@ -311,8 +314,9 @@ func (ct *Tree) plainPlan() *readPlan {
 }
 
 // WithFilter returns a copy of the Tree with a default filter. GetNode, FindChild, Descendants,
-// DescendantIds, TreeDescendants and TreeDescendantsIds apply it; GetLeaves, IsDescendant and
-// IsChildOf take no read options and are not filtered, and writes are never filtered. conds
+// DescendantIds, TreeDescendants, TreeDescendantsIds, Ancestors, AncestorIds, ChildCounts,
+// SubtreeIDs, SubtreeIDsOf, ClosurePairs and GetLeaves apply it; IsDescendant and IsChildOf take no
+// read options and are not filtered, and writes are never filtered. conds
 // replace any default filter the Tree already has; with no conds the copy keeps the same default
 // filter. A read can replace the default with its own Filter that has conditions, or switch it off
 // with Unfiltered. The original Tree is not changed. It returns ErrUnknownColumn when a condition

@@ -18,7 +18,8 @@ var ErrNoAncestors = errors.New("no ancestors given")
 //
 //	db.Where("fk IN (?)", sub)
 //
-// By default the subtree of each ancestor includes the ancestor itself (depth 0 and below). Ancestor
+// By default the subtree of each ancestor includes the ancestor itself (from depth 0, with no upper
+// limit). Ancestor
 // 0 is the virtual root and stands for every node of the tenant. Duplicate and overlapping ancestors
 // are fine; the subquery is meant for IN and does not remove duplicate ids itself.
 //
@@ -46,9 +47,9 @@ func (ct *Tree) SubtreeIDs(tenant string, ancestors []uint, opts ...ReadOption) 
 
 // SubtreeIDsOf is SubtreeIDs with the ancestors given as a subquery that selects a single column of
 // node ids. A nil subquery is ErrNoAncestors, and a subquery whose Error is set returns that error,
-// because gorm would render it as nothing and the statement would read IN (). A subquery that only
-// fails when rendered is rejected too. Everything else is as
-// in SubtreeIDs.
+// because gorm would render it as nothing and the statement would read IN (). The subquery must be
+// one that gorm can render on its own, built with Table, Model or Raw: the builder renders it once
+// in a dry run and returns an error when that fails. Everything else is as in SubtreeIDs.
 func (ct *Tree) SubtreeIDsOf(tenant string, ancestors *gorm.DB, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {
@@ -112,8 +113,8 @@ func (ct *Tree) subquery(sql string, args []any) *gorm.DB {
 // are ignored. With a filter the descendant and the ancestor must both match; nodes in between are
 // not checked, and the virtual root always matches. ForAncestors restricts the ancestors and binds
 // one value per id; ForAncestors without ids selects nothing. The virtual root (ancestor 0) appears
-// only with IncludeVirtualRoot, also when ForAncestors names it. The depth range defaults to 0 and
-// below.
+// only with IncludeVirtualRoot, also when ForAncestors names it. The depth range defaults to
+// from depth 0 (the node itself), with no upper limit.
 func (ct *Tree) ClosurePairs(tenant string, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

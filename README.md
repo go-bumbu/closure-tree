@@ -79,54 +79,51 @@ descendantsIds, err := tree.DescendantIds(ctx, parentId, 0, "user1")
 This will return a flat list of all children to the passed parent id, in this case 0 is all.
 
 
-### Querying leaves 
-with the basic implementation you have now an efficient way to store and manage items in a tree structure,
+### Querying leaves
 
-For convenience Closure tree also allows to manage many 2 many relationships between _leaves_ and _nodes_
+With the basic implementation you have an efficient way to store and manage items in a tree
+structure. Closure tree can also read many-to-many relations between _leaves_ and _nodes_.
 
 ```GO
-// define your leave data structs, e.g. Book
-// important to add the many2many annotation
+// your own model, e.g. Book, with a many2many relation to the node type
 type Book struct {
     ID     uint `gorm:"primarykey"`
     Name   string
     Tags []Tag `gorm:"many2many:books_tags;"` // Tag is the item stored in the tree
 }
 
-parentId := 2
+parentId := uint(2)
 maxDepth := 0
 tenant := "user1"
 
-var books []Book // will be populated 
+var books []Book // will be populated
 err = tree.GetLeaves(ctx, &books, parentId, maxDepth, tenant)
 if err != nil {
-fmt.Print(err)
+    fmt.Print(err)
 }
-
-
 ```
 
-Alternative if you need more advanced queries here is an example on how to use GORM with a many2many relationships table
-```GO
-// define your leave data structs, e.g. Book
-// important to add the many2many annotation
-type Book struct {
-    ID     uint `gorm:"primarykey"`
-    Name   string
-    Tags []Tag `gorm:"many2many:books_tags;"` // Tag is the item stored in the tree
-}
-
-// get all the ids of a specific type
-tags, _ := tree.DescendantIds(ctx, 2, 0, tenant)
-
-// use Gorm pn your leaves 
-var gotBooks []Book
-db.Model(&Book{}).InnerJoins("INNER JOIN books_tags ON books.id = books_tags.book_id").
-  Preload("Tags").
-  Where("books_tags.tag_node_id IN ?", spaceOperaIds).
-  Distinct().
-  Find(&gotBooks)
-```
+* The target is a pointer to `[]T` or `[]*T`, where `T` is any model with one primary key column
+  and a many2many relation to the node model. Rows come ordered by the primary key, each once, also
+  when it is attached to several nodes of the subtree.
+* `maxDepth` limits how far below the parent a node may be; the parent itself is included, and 0 or
+  less means no limit. Parent 0 is the whole tenant.
+* The relation is loaded into the result unless you pass `ct.NoPreload()`. The loaded nodes are not
+  checked against the tenant or the filter. It binds one value per returned row, so use
+  `NoPreload` for results of many thousands of rows.
+* When the model has several relations to the node model, name one with `ct.Relation("Tags")`;
+  without it `GetLeaves` returns `ErrAmbiguousRelation`. A model with no relation to the node
+  table, or a `Relation` that is not one, returns `ErrLeafMissingM2M`.
+* `ct.DepthRange(min, max)` replaces `maxDepth` (see "Subtree subqueries").
+* The filter and the Tree's default filter apply to the node side, with the meaning they have in
+  `SubtreeIDs`: a row is returned when it is attached to a node that counts.
+* Only the node side is scoped to the tenant. A model that embeds `ct.Leaf` (by value or by pointer)
+  also gets the tenant condition on its own table. `Leaf` is optional and deprecated; a caller who
+  needs conditions on the model's own table writes the query with `SubtreeIDs` instead.
+* `GetLeaves` returns an error before it queries for a relation whose node side does not reference
+  `node_id`, for a relation with more than one join column on a side, and for a model that embeds
+  `Leaf` but has no tenant column.
+* For ordering, paging or counting, use `SubtreeIDs`.
 
 
 ### Get-or-create for derived data
@@ -164,9 +161,24 @@ A new node is placed first among its siblings; pass `closuretree.PlaceLast()` to
 
 ### Narrowing reads
 
-`GetNode`, `FindChild`, `Descendants`, `DescendantIds`, `TreeDescendants` and `TreeDescendantsIds`
-take trailing options that choose which nodes they return and which columns they fill. `GetLeaves`,
-`IsDescendant` and `IsChildOf` take no read options and are not filtered.
+The reads in the table below take trailing options that choose which nodes they return and which
+columns they fill. `IsDescendant` and `IsChildOf` take no read options and are not filtered.
+
+| Call | `Filter` / `Unfiltered` | `PerNode` | `Columns` | `DepthRange` | Others |
+|---|:-:|:-:|:-:|:-:|---|
+| `GetNode`, `FindChild` | yes | - | yes | - | |
+| `Descendants` | yes | yes | yes | - | |
+| `DescendantIds` | yes | yes | - | - | |
+| `TreeDescendants` | yes | - | yes | - | |
+| `TreeDescendantsIds` | yes | - | - | - | |
+| `Ancestors` | yes | - | yes | - | |
+| `AncestorIds`, `ChildCounts` | yes | - | - | - | |
+| `SubtreeIDs`, `SubtreeIDsOf` | yes | yes | - | yes | |
+| `ClosurePairs` | yes | - | - | yes | `ForAncestors`, `IncludeVirtualRoot` |
+| `GetLeaves` | yes | yes | - | yes | `Relation`, `NoPreload` |
+
+An option that a call does not honour has no effect there. Column names and the depth range of
+every option are still validated by every call.
 
 ```GO
 // Tag also has the field `Hidden bool`
@@ -202,24 +214,115 @@ err = visible.Descendants(ctx, 0, 1, "user1", &all, ct.Unfiltered()) // hidden t
 | `GetNode` | A node that does not match returns `ErrNodeNotFound`. |
 | `FindChild` | A child that does not match is not found. The parent's own match is not checked. |
 
+The other reads state their meaning in their own sections: "Ancestors and child counts", "Subtree
+subqueries" and "Querying leaves".
+
 * A requested parent that is a real node and does not match gives an empty result in the prune and
   tree reads; parent 0 always matches. With `PerNode()` the parent is not checked.
 * Without `Columns` a read selects every column of the node table. `Columns(names ...string)`
-  selects `node_id`, `tenant`, `sort_order` and the named columns, in `GetNode`, `FindChild`,
-  `Descendants` and `TreeDescendants`. Fields that are not selected stay zero. A filter may name a
+  selects `node_id`, `tenant`, `sort_order` and the named columns. Fields that are not selected stay
+  zero. A filter may name a
   column that is not selected. The parent is always computed from the closure rows and overrides a
   leftover physical `parent_id` column.
 * Do not pass a struct that was read with `Columns` to `Update`: `Update` writes every field of the
   item, so the columns that were not selected would be overwritten with zero values.
-* `WithFilter(conds ...Cond)` returns a copy of the Tree with a default filter for the reads above.
+* `WithFilter(conds ...Cond)` returns a copy of the Tree with a default filter for every read in the
+  table, `GetLeaves` included.
   It replaces any default the Tree already has; with no conds the copy keeps the same default. A
   `Filter` with at least one cond replaces the default for one call; `Unfiltered()` switches it off
   for one call; an empty `Filter()` has no effect.
 * Writes are never filtered, also on a filtered Tree. `GetOrAdd` therefore returns an existing child
   that `FindChild` on the same Tree does not see. `afterNodeID` may name a sibling the filter hides,
   and the placement of a new or moved node counts hidden siblings.
-* An option that a read does not honour has no effect there. `PerNode` only changes `Descendants`
-  and `DescendantIds`; `Columns` is ignored by the id reads.
+
+### Ancestors and child counts
+
+```GO
+var path []*Tag
+err := tree.Ancestors(ctx, warmColor.Id(), "user1", &path) // [colors]: root first, the node itself left out
+// handle error
+
+ids, err := tree.AncestorIds(ctx, warmColor.Id(), "user1") // the same, ids only
+
+counts, err := tree.ChildCounts(ctx, []uint{0, colorTag.Id()}, "user1")
+// counts[0] is the number of root nodes, counts[colorTag.Id()] the number of children of "colors"
+```
+
+* `Ancestors` and `AncestorIds` return the ancestors root first and the direct parent last. The node
+  itself and the virtual root are left out, so a root node gives an empty result. An unknown node,
+  or a node of another tenant, is `ErrNodeNotFound`. `Ancestors` fills the parent of each ancestor
+  and appends to the slice like `Descendants`.
+* With a filter, an ancestor that does not match is left out and the path continues above it. A
+  start node that does not match is `ErrNodeNotFound`.
+* `ChildCounts` returns the number of direct children for each id. An id without counted children
+  is absent from the map: a leaf, an unknown id and an id of another tenant. Id 0 counts the root
+  nodes. Duplicate ids count once, and any number of ids is fine.
+* With a filter, `ChildCounts` counts only the matching children and does not check the parent.
+
+### Subtree subqueries
+
+`SubtreeIDs`, `SubtreeIDsOf` and `ClosurePairs` build a `*gorm.DB` subquery. They execute nothing:
+you embed the result in your own query, which runs on your connection and in your transaction, so
+it also sees the uncommitted rows of that transaction. The output columns are stable:
+`descendant_id` for `SubtreeIDs` and `SubtreeIDsOf`; `ancestor_id`, `descendant_id` and `depth`
+for `ClosurePairs`.
+
+`SubtreeIDs` as a semi-join, with your own ordering, limit and count. A book attached to two nodes
+of the subtree comes once:
+
+```GO
+sub, err := tree.SubtreeIDs("user1", []uint{colorTag.Id()})
+// handle error
+
+under := func() *gorm.DB {
+    return db.Model(&Book{}).
+        Where("id IN (SELECT book_id FROM books_tags WHERE tag_node_id IN (?))", sub)
+}
+var total int64
+err = under().Count(&total).Error
+var page []Book
+err = under().Order("name").Limit(20).Offset(40).Find(&page).Error
+```
+
+`ClosurePairs` as a derived table, here the number of descendants of each node:
+
+```GO
+pairs, err := tree.ClosurePairs("user1", ct.DepthRange(1, -1))
+// handle error
+
+var sizes []struct {
+    AncestorID uint
+    N          int64
+}
+err = db.Table("(?) AS cp", pairs).
+    Select("cp.ancestor_id AS ancestor_id, COUNT(*) AS n").
+    Group("cp.ancestor_id").Scan(&sizes).Error
+```
+
+* `DepthRange(min, max)` limits the distance from the ancestor: 0 is the node itself, 1 its direct
+  children. A `max` below 0 means no upper limit. The default is 0 to unlimited, so the ancestor
+  itself is included. `DepthRange(0, 0)` is the node only, `DepthRange(1, -1)` everything strictly
+  below it, `DepthRange(1, 1)` the direct children. A negative `min`, or a `max` that is not
+  negative and is below `min`, returns `ErrInvalidDepthRange` from every read.
+* The filter in `SubtreeIDs` prunes relative to each requested ancestor: a node is left out when it
+  or a node between it and the ancestor does not match. The requested ancestor must match too, also
+  when the depth range leaves it out. `PerNode()` tests only the node itself.
+* The filter in `ClosurePairs` requires the descendant and the ancestor to match. It does not check
+  the nodes in between, and `PerNode` does not apply. The virtual root always matches.
+* Ancestor 0 in `SubtreeIDs` stands for every node of the tenant. No ancestors, an empty slice or a
+  nil subquery, is `ErrNoAncestors`.
+* `SubtreeIDs` binds one value per ancestor (SQLite 32766, PostgreSQL and MySQL 65535 per
+  statement). For a large or computed set of ancestors use `SubtreeIDsOf`, which takes them as a
+  subquery that selects one column of node ids. It must be a subquery that gorm can render on its
+  own, built with `Table`, `Model` or `Raw`; the builder renders it once and returns an error when
+  that fails. A subquery whose `Error` is set returns that error.
+* `ClosurePairs` leaves the pairs of the virtual root (ancestor 0) out unless you pass
+  `IncludeVirtualRoot()`. `ForAncestors(ids...)` limits the ancestors; without ids it selects
+  nothing, and it binds one value per id, with the limits above.
+* MySQL, error 1093: with a filter the subquery reads the node table, and MySQL rejects it inside an
+  `UPDATE` or `DELETE` on the node table. Wrap it in a derived table:
+  `db.Table("tags").Where("node_id IN (SELECT descendant_id FROM (?) AS sub)", sub).Update("name", "renamed")`.
+* MySQL, error 1235: a `LIMIT` is not allowed inside an `IN` subquery. Page in the outer query.
 
 ### Sort order
 
@@ -398,7 +501,7 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 * `BuildFromParents(ctx, tenant, links, opts ...BuildOption) error` — Build the closure rows and `sort_order` of node rows that already exist from one `ParentLink` per node (see "Adopting an existing table"); options `Rebuild()` and `OrphansToRoot()`
 
 **Read operations**
-Every read below except `IsDescendant`, `IsChildOf` and `GetLeaves` takes trailing `opts ...ReadOption` (see "Narrowing reads").
+Every read below except `IsDescendant` and `IsChildOf` takes trailing `opts ...ReadOption` (see "Narrowing reads").
 `Descendants` and `TreeDescendants` scan each row into the tree's model and copy it into the element type: as a whole when the element type is the model or embeds it directly; otherwise each field goes to the field at the same path of Go names (`Name`, `Addr.Name`), or, when there is none, to the field with its Go name if no other model field has that name. A slice whose element is not a struct or a pointer to a struct, and a tree element whose `Children` field is not a `[]*T`, return an error before any query runs; a tree element without `Children` comes back unlinked.
 * `GetNode(ctx, nodeID, tenant, item, opts ...ReadOption)` — Load a single node into `item`
 * `FindChild(ctx, parentID, tenant, match, matchFields, out, opts ...ReadOption) (found bool, err error)` — Find a direct child whose fields named in `matchFields` equal those of `match` (zero values included), tenant-scoped; populates `out` like `GetNode`
@@ -408,7 +511,13 @@ Every read below except `IsDescendant`, `IsChildOf` and `GetLeaves` takes traili
 * `DescendantIds(ctx, parent, maxDepth, tenant, opts ...ReadOption) ([]uint, error)` — Same, IDs only
 * `TreeDescendants(ctx, parent, maxDepth, tenant, items, opts ...ReadOption)` — Nested tree via `Children []*T` field
 * `TreeDescendantsIds(ctx, parent, maxDepth, tenant, opts ...ReadOption) ([]*TreeNode, error)` — Nested `TreeNode` structs
-* `GetLeaves(ctx, items, parentId, maxDepth, tenant)` — Many-to-many leaves via GORM `many2many:` tag
+* `Ancestors(ctx, nodeID, tenant, items, opts ...ReadOption) error` — Ancestors of a node, root first, into `[]T` or `[]*T`
+* `AncestorIds(ctx, nodeID, tenant, opts ...ReadOption) ([]uint, error)` — Same, IDs only
+* `ChildCounts(ctx, ids, tenant, opts ...ReadOption) (map[uint]int64, error)` — Number of direct children per id; ids without counted children are absent
+* `SubtreeIDs(tenant, ancestors []uint, opts ...ReadOption) (*gorm.DB, error)` — Subquery of the node ids in the subtrees of the ancestors, to embed in your own query
+* `SubtreeIDsOf(tenant, ancestors *gorm.DB, opts ...ReadOption) (*gorm.DB, error)` — Same, with the ancestors given as a subquery
+* `ClosurePairs(tenant, opts ...ReadOption) (*gorm.DB, error)` — Subquery of `ancestor_id`, `descendant_id`, `depth`, for per-ancestor aggregates
+* `GetLeaves(ctx, items, parentId, maxDepth, tenant, opts ...ReadOption)` — Rows of any model with a many2many relation to the nodes (see "Querying leaves")
 * `WithFilter(conds ...Cond) (*Tree, error)` — Return a copy of the tree with a default read filter
 
 **Sort-order maintenance**
