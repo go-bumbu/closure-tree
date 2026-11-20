@@ -61,6 +61,52 @@ func TestWriteTxPanicRollsBackToSavepoint(t *testing.T) {
 	}
 }
 
+// A write whose context is cancelled before it fails is still rolled back to its savepoint: the
+// partial write must not stay in the caller's transaction, which remains usable.
+func TestWriteTxCancelledContextRollsBackToSavepoint(t *testing.T) {
+	ct := newInternalTree(t, txSample{})
+	const tenant = "t1"
+	errWrite := errors.New("write failed")
+	countName := func(db *gorm.DB, name string) int64 {
+		t.Helper()
+		var n int64
+		if err := db.Table(ct.nodesTbl).Where("tenant = ? AND name = ?", tenant, name).Count(&n).Error; err != nil {
+			t.Fatalf("count %q: %v", name, err)
+		}
+		return n
+	}
+
+	err := ct.db.Transaction(func(tx *gorm.DB) error {
+		tt := ct.WithTx(tx)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		err := tt.writeTx(ctx, tenant, func(tx *gorm.DB) error {
+			if err := tx.Exec("INSERT INTO "+ct.nodesTbl+" (tenant, name, sort_order) VALUES (?, ?, 0)",
+				tenant, "cancelled").Error; err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+			cancel()
+			return errWrite
+		})
+		if !errors.Is(err, errWrite) {
+			t.Errorf("want the write's error, got %v", err)
+		}
+		if n := countName(tx, "cancelled"); n != 0 {
+			t.Errorf("the cancelled write left %d rows in the transaction", n)
+		}
+		return tt.Add(context.Background(), &txSample{Name: "after"}, nil, nil, tenant)
+	})
+	if err != nil {
+		t.Fatalf("outer transaction after the cancelled write: %v", err)
+	}
+	if n := countName(ct.db, "cancelled"); n != 0 {
+		t.Errorf("the cancelled write was committed: %d rows", n)
+	}
+	if n := countName(ct.db, "after"); n != 1 {
+		t.Errorf("want the later write committed, got %d rows", n)
+	}
+}
+
 // When the rollback to the savepoint fails (here the outer transaction is already gone), the caller
 // still receives the write's own error.
 func TestWriteTxFailedRollbackKeepsOriginalError(t *testing.T) {
