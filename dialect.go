@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -138,6 +139,19 @@ func (d dialect) ensureLockRow(tx *gorm.DB, lockTbl, tenant string) error {
 	}
 	if err := tx.Exec(fmt.Sprintf(stmt, lockTbl), tenant).Error; err != nil {
 		return fmt.Errorf("unable to ensure tenant lock row: %w", err)
+	}
+	return nil
+}
+
+// txOptions returns the options for the transactions the library opens itself (see writeTx). On
+// PostgreSQL they run at READ COMMITTED whatever the connection's default is: at REPEATABLE READ
+// the snapshot is fixed at the transaction's first statement, which is the lock statement, before
+// it waits for the lock, so the guards after the lock would not see the writes committed while it
+// waited. The other dialects use the connection's default (nil): MySQL is safe at REPEATABLE READ
+// because the lock is the first statement, and SQLite serializes writers.
+func (d dialect) txOptions() []*sql.TxOptions {
+	if d == dialectPostgres {
+		return []*sql.TxOptions{{Isolation: sql.LevelReadCommitted}}
 	}
 	return nil
 }

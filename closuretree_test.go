@@ -3011,53 +3011,7 @@ func TestConcurrentConflictingMovesNoCycle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx := context.Background()
-			rel := ct.ClosureTableName()
-
-			move := func(id, under uint) error {
-				var e error
-				for attempt := 0; attempt < 50; attempt++ {
-					e = ct.Update(ctx, id, nil, up(under), nil, tenant1)
-					if e == nil || errors.Is(e, closuretree.ErrInvalidMove) || !isTransientDBErr(e) {
-						return e
-					}
-					runtime.Gosched()
-					time.Sleep(time.Millisecond)
-				}
-				return e
-			}
-
-			const iterations = 40
-			for i := 0; i < iterations; i++ {
-				a := &TestPayload{Name: "A"}
-				if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
-					t.Fatal(err)
-				}
-				b := &TestPayload{Name: "B"}
-				if err := ct.Add(ctx, b, nil, nil, tenant1); err != nil {
-					t.Fatal(err)
-				}
-
-				start := make(chan struct{})
-				var wg sync.WaitGroup
-				errs := make([]error, 2)
-				wg.Add(2)
-				go func() { defer wg.Done(); <-start; errs[0] = move(a.NodeId, b.NodeId) }()
-				go func() { defer wg.Done(); <-start; errs[1] = move(b.NodeId, a.NodeId) }()
-				close(start)
-				wg.Wait()
-
-				for _, e := range errs {
-					if e != nil && !errors.Is(e, closuretree.ErrInvalidMove) {
-						t.Fatalf("iteration %d: unexpected move error: %v", i, e)
-					}
-				}
-
-				if relCount(t, gdb, rel, b.NodeId, a.NodeId, tenant1) > 0 &&
-					relCount(t, gdb, rel, a.NodeId, b.NodeId, tenant1) > 0 {
-					t.Fatalf("iteration %d: cycle formed — A(%d) and B(%d) are mutual ancestors", i, a.NodeId, b.NodeId)
-				}
-			}
+			raceConflictingMoves(t, gdb, ct, 40)
 		})
 	}
 }

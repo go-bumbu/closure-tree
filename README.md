@@ -191,6 +191,59 @@ collision — roughly 36 insertions before true exhaustion at the tightest gap. 
 `NeedsRenormalizeAny` periodically (e.g. after each write batch) and `RenormalizeAll`
 when it returns `true`.
 
+### Using closure-tree inside your own transaction
+
+`WithTx` binds the tree to a transaction you opened, so tree writes and your own writes commit or
+roll back together:
+
+```GO
+err := db.Transaction(func(tx *gorm.DB) error {
+    t := tree.WithTx(tx)
+    if err := t.LockTenant(ctx, "user1"); err != nil { // first statement of the transaction
+        return err
+    }
+    tag := Tag{Name: "colors"}
+    if err := t.Add(ctx, &tag, nil, nil, "user1"); err != nil {
+        return err
+    }
+    return tx.Create(&AuditEntry{Action: "add tag", NodeID: tag.Id()}).Error // your own write
+})
+```
+
+* `WithTx` returns a cheap copy of the tree bound to the transaction; create one per transaction.
+  Reads on the copy see the transaction's uncommitted rows.
+* Inside the transaction, use the copy returned by `WithTx` for that tenant: calling the original
+  tree for the same tenant from inside the transaction waits on the transaction's own lock (a
+  deadlock on PostgreSQL and MySQL, a busy error on SQLite).
+* A tree error rolls back only the tree's own work (to a savepoint the tree takes) and leaves your
+  transaction usable; you decide whether to commit or roll back.
+* After a successful tree write the tenant lock is held until your transaction ends, so do not hold
+  the transaction across slow work. After a failed tree write the lock may already be released;
+  `LockTenant` holds it for the whole transaction.
+* A transaction that writes to several trees or tenants must take their locks in one fixed order,
+  everywhere, to avoid deadlocks. `LockTenant` lets it take them all up front.
+* Call `Migrate` on the base tree, not on a copy bound to a transaction: it runs DDL, and MySQL
+  commits the transaction implicitly on DDL.
+
+The guards inside tree writes (cycle check, sibling order, duplicate check) are plain reads, so what
+they see depends on the database and the isolation level of your transaction:
+
+| Database | Isolation level | Safe? |
+|---|---|---|
+| PostgreSQL | READ COMMITTED (the default) | Yes. |
+| PostgreSQL | REPEATABLE READ | No, and `LockTenant` does not help: the snapshot is fixed at the transaction's first statement, the lock statement itself, before it waits for the lock. |
+| MySQL | REPEATABLE READ (the default) | Only when `LockTenant` is the first statement: the snapshot is fixed at the first plain read, so a read before the lock makes it stale. |
+| MySQL | READ COMMITTED | Yes. |
+| SQLite | any | Yes, with immediate write transactions and a busy timeout. |
+
+On SQLite open write transactions as immediate and set a busy timeout (DSN options `_txlock=immediate`
+and `_busy_timeout=5000` for `gorm.io/driver/sqlite`, `_txlock=immediate` and
+`_pragma=busy_timeout(5000)` for `github.com/glebarez/sqlite`). A deferred transaction that reads
+first and then writes fails with a busy error that the timeout does not retry.
+
+On PostgreSQL the transactions the library opens itself (any write on a tree not bound to a
+transaction) run at READ COMMITTED, whatever the connection's default level is.
+
 ---
 
 For detailed usage check out the examples in [example_test.go]

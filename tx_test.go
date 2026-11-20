@@ -355,6 +355,11 @@ func TestLockTenantFirstSerializesConflictingMoves(t *testing.T) {
 					time.Sleep(5 * time.Millisecond)
 				}
 			}()
+			// B starts once A holds the lock. releaseB closes locked once only: it is called again
+			// after A returns, so an A that fails before the lock (or cannot begin) fails the test
+			// instead of leaving B blocked on <-locked.
+			var releaseOnce sync.Once
+			releaseB := func() { releaseOnce.Do(func() { close(locked) }) }
 			errA := gdb.Transaction(func(tx *gorm.DB) error {
 				tt := ct.WithTx(tx)
 				if err := tt.LockTenant(ctx, tenant1); err != nil {
@@ -364,10 +369,11 @@ func TestLockTenantFirstSerializesConflictingMoves(t *testing.T) {
 				if err := tt.GetNode(ctx, x.NodeId, tenant1, &probe); err != nil { // a plain read after the lock
 					return err
 				}
-				close(locked)
+				releaseB()
 				time.Sleep(200 * time.Millisecond) // let B reach the lock
 				return tt.Update(ctx, x.NodeId, nil, up(y.NodeId), nil, tenant1)
 			})
+			releaseB()
 			wg.Wait()
 			if errA != nil {
 				t.Fatalf("A: %v", errA)
@@ -379,6 +385,47 @@ func TestLockTenantFirstSerializesConflictingMoves(t *testing.T) {
 			if relCount(t, gdb, rel, y.NodeId, x.NodeId, tenant1) != 1 || relCount(t, gdb, rel, x.NodeId, y.NodeId, tenant1) != 0 {
 				t.Fatal("want x under y and no cycle")
 			}
+		})
+	}
+}
+
+// The transactions the library opens itself must stay safe when the database defaults to
+// REPEATABLE READ: there the snapshot is fixed at the first statement, the lock statement, before
+// it waits for the lock, so the cycle guard of a move could read a stale tree.
+func TestPostgresOwnTransactionsUnderRepeatableReadDefault(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			if db.DbType() != testdbs.DBTypePostgres {
+				t.Skip("PostgreSQL only")
+			}
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// connAndClose keeps no idle connections, so every statement opens a new session and the
+			// database default set below applies to it.
+			var name string
+			if err := gdb.Raw("SELECT current_database()").Scan(&name).Error; err != nil {
+				t.Fatal(err)
+			}
+			setDefault := func(level string) {
+				stmt := fmt.Sprintf("ALTER DATABASE %q SET default_transaction_isolation TO '%s'", name, level)
+				if err := gdb.Exec(stmt).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			setDefault("repeatable read")
+			t.Cleanup(func() { setDefault("read committed") })
+			var level string
+			if err := gdb.Raw("SHOW default_transaction_isolation").Scan(&level).Error; err != nil {
+				t.Fatal(err)
+			}
+			if level != "repeatable read" {
+				t.Fatalf("precondition: the default level is %q", level)
+			}
+			raceConflictingMoves(t, gdb, ct, 40)
 		})
 	}
 }

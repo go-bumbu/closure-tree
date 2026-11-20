@@ -21,6 +21,12 @@ var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; us
 // and the outer transaction stays usable. A successful write keeps the tenant lock until the outer
 // transaction ends (PostgreSQL and MySQL).
 //
+// Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
+// the transaction waits on the transaction's own lock (a deadlock on PostgreSQL and MySQL, a busy
+// error on SQLite). A transaction that writes to several trees or tenants must take their locks in
+// one fixed order everywhere, for example with LockTenant up front. Call Migrate on ct, not on the
+// copy: it runs DDL, and MySQL commits the transaction implicitly on DDL.
+//
 // If tx is not a transaction, the copy behaves like a Tree built on tx: each write opens its own.
 // WithTx panics if tx is nil.
 func (ct *Tree) WithTx(tx *gorm.DB) *Tree {

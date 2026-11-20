@@ -16,6 +16,7 @@ var savepointSeq atomic.Uint64
 // for a tenant serialize instead of racing on the lock-free guards in Add/Update/moveInTx. Every
 // mutating operation (Add, Update, DeleteRecurse, GetOrAdd, Renormalize) goes through here. The
 // dialect-specific lock acquisition lives in dialect.lockTenant; see the concurrency note on Tree.
+// The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL).
 //
 // When the Tree is bound to a caller's transaction (WithTx), writeTx opens no transaction of its
 // own: it runs the lock and fn inside a savepoint, see savepointTx.
@@ -28,7 +29,7 @@ func (ct *Tree) writeTx(ctx context.Context, tenant string, fn func(tx *gorm.DB)
 			return err
 		}
 		return fn(tx)
-	})
+	}, ct.dialect.txOptions()...)
 }
 
 // savepointTx runs the tenant lock and fn inside a savepoint of the caller's transaction tx. It
