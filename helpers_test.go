@@ -12,6 +12,7 @@ import (
 	"time"
 
 	closuretree "github.com/go-bumbu/closure-tree"
+	"github.com/go-bumbu/testdbs"
 	"gorm.io/gorm"
 )
 
@@ -232,4 +233,31 @@ func seq(from, to uint) []uint {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+type seed struct {
+	ID   uint
+	Name string
+}
+
+// seedNodes inserts node rows of TestPayload with explicit ids for the tenant, 1000 per
+// statement, without any closure rows. On PostgreSQL it then advances the id sequence past the
+// highest node_id, as the README tells callers to do:
+//
+//	SELECT setval(pg_get_serial_sequence('test_payloads', 'node_id'), (SELECT MAX(node_id) FROM test_payloads))
+func seedNodes(t *testing.T, gdb *gorm.DB, db testdbs.TargetDb, tenant string, nodes []seed) {
+	t.Helper()
+	rows := make([]TestPayload, len(nodes))
+	for i, n := range nodes {
+		rows[i] = TestPayload{Node: closuretree.Node{NodeId: n.ID, Tenant: tenant}, Name: n.Name}
+	}
+	if err := gdb.CreateInBatches(&rows, 1000).Error; err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+	if db.DbType() == testdbs.DBTypePostgres {
+		if err := gdb.Exec(`SELECT setval(pg_get_serial_sequence('test_payloads', 'node_id'),
+			(SELECT MAX(node_id) FROM test_payloads))`).Error; err != nil {
+			t.Fatalf("advance the node id sequence: %v", err)
+		}
+	}
 }

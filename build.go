@@ -1,10 +1,14 @@
 package closuretree
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+
+	"gorm.io/gorm"
 )
 
 // ParentLink is one node's place in the tree. ParentID 0 means a root node.
@@ -121,13 +125,14 @@ func planLinks(nodeIDs []uint, links []ParentLink, orphansToRoot bool) (*buildPl
 	}
 
 	if cyclic := findCycleNodes(nodeIDs, plan.parent); len(cyclic) > 0 {
-		return nil, idsError(ErrLinkCycle, "nodes on a cycle", cyclic)
+		return nil, idsError(ErrLinkCycle, "one node of each cycle", cyclic)
 	}
 	return plan, nil
 }
 
 // findCycleNodes walks up from each node with a three-state mark (unseen, in progress, done).
-// Meeting an in-progress node means that node is on a cycle; every such node is returned once.
+// Meeting an in-progress node means that node is on a cycle. A cycle is met only by the first walk
+// that enters it, so one node of each cycle is returned.
 func findCycleNodes(nodeIDs []uint, parent map[uint]uint) []uint {
 	const (
 		inProgress = 1
@@ -151,4 +156,173 @@ func findCycleNodes(nodeIDs []uint, parent map[uint]uint) []uint {
 		}
 	}
 	return cyclic
+}
+
+// closureBatchRows is the number of closure rows BuildFromParents inserts per statement, with four
+// bound values each.
+const closureBatchRows = 1000
+
+// sortBatchRows is the number of nodes whose sort_order one statement of BuildFromParents sets,
+// with three bound values each: two in the CASE and one in the IN list.
+const sortBatchRows = 500
+
+// BuildFromParents writes the closure rows of the tenant's existing node rows from one ParentLink
+// per node, and sets their sort_order. It is meant for adopting a table whose rows were written
+// without closure-tree; it never inserts or deletes node rows.
+//
+// links must hold exactly one link per node of the tenant; otherwise it returns ErrLinksMismatch
+// naming the offending ids. Siblings are ordered as their links appear in links: their sort_order
+// becomes 10, 20, 30, ... A parent that is not a node of the tenant returns ErrOrphanLink, unless
+// OrphansToRoot makes such a node a root. A cycle, including a node that is its own parent, returns
+// ErrLinkCycle. If the tenant already has closure rows it returns ErrClosureExists, unless Rebuild
+// is given, which deletes them first. Every check runs before the first write, so an error leaves
+// the tables as they were. The tenant's sort-order meta rows are deleted, the state Renormalize
+// leaves; the next insertion recreates them. A nil option is ignored.
+//
+// It runs under the tenant lock in one transaction, or inside the caller's through WithTx. It
+// returns ErrEmptyTenant if tenant is empty.
+func (ct *Tree) BuildFromParents(ctx context.Context, tenant string, links []ParentLink, opts ...BuildOption) error {
+	tenant, err := validateTenant(tenant)
+	if err != nil {
+		return err
+	}
+	var cfg buildConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
+		var nodeIDs []uint
+		if err := tx.Table(ct.nodesTbl).Where("tenant = ?", tenant).Order("node_id").
+			Pluck("node_id", &nodeIDs).Error; err != nil {
+			return fmt.Errorf("buildFromParents: failed to read the node ids: %w", err)
+		}
+		plan, err := planLinks(nodeIDs, links, cfg.orphansToRoot)
+		if err != nil {
+			return err
+		}
+
+		var found []int
+		if err := tx.Raw(fmt.Sprintf("SELECT 1 FROM %s WHERE tenant = ? LIMIT 1", ct.relationsTbl), tenant).
+			Scan(&found).Error; err != nil {
+			return fmt.Errorf("buildFromParents: failed to look for closure rows: %w", err)
+		}
+		if len(found) > 0 && !cfg.rebuild {
+			return ErrClosureExists
+		}
+		for _, tbl := range []string{ct.relationsTbl, ct.metaTbl} {
+			if err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE tenant = ?", tbl), tenant).Error; err != nil {
+				return fmt.Errorf("buildFromParents: failed to delete from %s: %w", tbl, err)
+			}
+		}
+		if err := ct.writeClosure(tx, tenant, plan); err != nil {
+			return err
+		}
+		return ct.writeSortOrders(tx, tenant, plan)
+	})
+}
+
+// writeClosure walks plan from the roots, depth first and without recursion, and inserts each
+// node's closure rows: its depth-0 self row, one row per ancestor, and the virtual-root row. The
+// rows are inserted closureBatchRows per statement, so they are never all in memory. path holds the
+// ids from the current node's root down to the node itself, so path[i] is its ancestor at distance
+// len(path)-1-i.
+func (ct *Tree) writeClosure(tx *gorm.DB, tenant string, plan *buildPlan) error {
+	type step struct {
+		id    uint
+		level int // 1 for a root
+	}
+	push := func(stack []step, children []uint, level int) []step {
+		// pushed last to first, so the nodes are popped in input order
+		for i := len(children) - 1; i >= 0; i-- {
+			stack = append(stack, step{id: children[i], level: level})
+		}
+		return stack
+	}
+
+	rels := make([]closureTree, 0, closureBatchRows)
+	flush := func() error {
+		if len(rels) == 0 {
+			return nil
+		}
+		if err := tx.Table(ct.relationsTbl).Create(&rels).Error; err != nil {
+			return fmt.Errorf("buildFromParents: failed to insert closure rows: %w", err)
+		}
+		rels = rels[:0]
+		return nil
+	}
+	add := func(ancestor, descendant uint, depth int) error {
+		rels = append(rels, closureTree{AncestorID: ancestor, DescendantID: descendant, Tenant: tenant, Depth: depth})
+		if len(rels) < closureBatchRows {
+			return nil
+		}
+		return flush()
+	}
+
+	stack := push(nil, plan.children[0], 1)
+	var path []uint
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		path = append(path[:cur.level-1], cur.id)
+		for i, ancestor := range path {
+			if err := add(ancestor, cur.id, len(path)-1-i); err != nil {
+				return err
+			}
+		}
+		if err := add(0, cur.id, cur.level); err != nil {
+			return err
+		}
+		stack = push(stack, plan.children[cur.id], cur.level+1)
+	}
+	return flush()
+}
+
+// writeSortOrders sets sort_order to 10, 20, 30, ... in each sibling group of plan, sortBatchRows
+// nodes per statement:
+//
+//	UPDATE nodes SET sort_order = CASE node_id WHEN ? THEN ? + 0.0 ... END
+//	WHERE tenant = ? AND node_id BETWEEN ? AND ? AND node_id IN ?
+//
+// Each result is written "? + 0.0": PostgreSQL gives a bare bound CASE result the type text, which
+// it does not assign to the numeric column; the addition makes it numeric. SQLite and MySQL accept
+// the same form.
+//
+// The nodes are written in id order and the BETWEEN bound, implied by the IN list, is the batch's
+// id range. Right after a bulk load PostgreSQL has no statistics for the node table, estimates
+// "tenant = ?" as a few rows, and scans all the tenant's rows testing each against the IN list,
+// which makes the whole build quadratic. The bound lets it scan only the batch's range of the
+// (tenant, node_id) index.
+func (ct *Tree) writeSortOrders(tx *gorm.DB, tenant string, plan *buildPlan) error {
+	type sortOrder struct {
+		id    uint
+		order float64
+	}
+	orders := make([]sortOrder, 0, len(plan.parent))
+	for _, children := range plan.children {
+		for i, id := range children {
+			orders = append(orders, sortOrder{id: id, order: float64((i + 1) * 10)})
+		}
+	}
+	sort.Slice(orders, func(i, j int) bool { return orders[i].id < orders[j].id })
+
+	for start := 0; start < len(orders); start += sortBatchRows {
+		batch := orders[start:min(start+sortBatchRows, len(orders))]
+		var b strings.Builder
+		args := make([]any, 0, 2*len(batch)+4)
+		ids := make([]uint, len(batch))
+		fmt.Fprintf(&b, "UPDATE %s SET sort_order = CASE node_id", ct.nodesTbl)
+		for i, o := range batch {
+			b.WriteString(" WHEN ? THEN ? + 0.0")
+			args = append(args, o.id, o.order)
+			ids[i] = o.id
+		}
+		b.WriteString(" END WHERE tenant = ? AND node_id BETWEEN ? AND ? AND node_id IN ?")
+		args = append(args, tenant, ids[0], ids[len(ids)-1], ids)
+		if err := tx.Exec(b.String(), args...).Error; err != nil {
+			return fmt.Errorf("buildFromParents: failed to set sort_order: %w", err)
+		}
+	}
+	return nil
 }

@@ -255,6 +255,49 @@ first and then writes fails with a busy error that the timeout does not retry.
 On PostgreSQL the transactions the library opens itself (any write on a tree not bound to a
 transaction) run at READ COMMITTED, whatever the connection's default level is.
 
+### Adopting an existing table
+
+`BuildFromParents` turns node rows that already exist, each knowing its parent, into a tree. It
+writes the closure rows and `sort_order`; it never inserts, deletes or otherwise changes the node
+rows.
+
+The node table needs `node_id` as an auto-increment primary key, `tenant` and `sort_order`, which
+is what embedding `Node` gives it. No other field of the model may map to the `parent_id` column:
+the parent lives in the closure table from now on.
+
+```GO
+// your own query: one row per node of the tenant, siblings in the order you want them
+var rows []struct{ ID, OldParentID uint }
+err := db.Table("categories").Select("node_id AS id, old_parent_id").
+    Where("tenant = ?", "user1").Order("old_parent_id, position").Scan(&rows).Error
+if err != nil {
+    return err
+}
+links := make([]closuretree.ParentLink, len(rows))
+for i, r := range rows {
+    links[i] = closuretree.ParentLink{NodeID: r.ID, ParentID: r.OldParentID} // ParentID 0: a root
+}
+err = tree.BuildFromParents(ctx, "user1", links)
+```
+
+* The links must name every node of the tenant exactly once. Siblings are ordered as their links
+  appear in the slice; their `sort_order` becomes 10, 20, 30, … The sort-order metadata of the
+  tenant is cleared, as `Renormalize` does.
+* The four errors, each returned before anything is written:
+  * `ErrLinksMismatch`: a node of the tenant has no link, a link names a node that does not exist,
+    a node is linked twice, or a link has node id 0. The message lists the ids.
+  * `ErrOrphanLink`: a parent is not a node of the tenant. With the `OrphansToRoot()` option such a
+    node becomes a root instead.
+  * `ErrLinkCycle`: the links form a cycle, including a node that is its own parent. The message
+    names one node of each cycle.
+  * `ErrClosureExists`: the tenant already has closure rows. With the `Rebuild()` option they are
+    deleted first, and the tree is built again.
+* It runs under the tenant lock. Through `WithTx` it runs inside your transaction, so a migration
+  can build the tree and drop its old parent column atomically.
+* PostgreSQL: rows copied with explicit ids leave the id sequence behind, and the next `Add` fails
+  with a duplicate key. Advance the sequence after copying:
+  `SELECT setval(pg_get_serial_sequence('categories', 'node_id'), (SELECT MAX(node_id) FROM categories))`.
+
 ---
 
 For detailed usage check out the examples in [example_test.go]
@@ -278,6 +321,7 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 * `DeleteRecurse(ctx, nodeId, tenant)` — Delete a node and all its descendants
 * `DeleteRecurseMany(ctx, ids, tenant) (int64, error)` — Delete several nodes and their subtrees in one transaction; set semantics (duplicates and nested ids count once), returns the number of nodes deleted, never `ErrNodeNotFound` (unknown ids are ignored), id 0 returns `ErrVirtualRoot`
 * `DeleteTenant(ctx, tenant) error` — The supported way to drop a tenant's whole tree: deletes its nodes, closure rows and metadata in one transaction; the tenant's lock row is kept, and an unknown tenant is not an error
+* `BuildFromParents(ctx, tenant, links, opts ...BuildOption) error` — Build the closure rows and `sort_order` of node rows that already exist from one `ParentLink` per node (see "Adopting an existing table"); options `Rebuild()` and `OrphansToRoot()`
 
 **Read operations**
 * `GetNode(ctx, nodeID, tenant, item)` — Load a single node into `item`

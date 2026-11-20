@@ -78,3 +78,72 @@ func TestPlanLinks(t *testing.T) {
 		}
 	})
 }
+
+// reportedIDs returns the ids an idsError lists after its last ": ".
+func reportedIDs(err error) []string {
+	msg := err.Error()
+	return strings.Split(msg[strings.LastIndex(msg, ": ")+2:], ", ")
+}
+
+func TestPlanLinksCycles(t *testing.T) {
+	t.Run("a chain leading into a cycle names a node of the cycle, not the chain's start", func(t *testing.T) {
+		// 1 -> 2 -> 3 -> 2: node 1 leads into the cycle 2, 3 but is not on it
+		_, err := planLinks([]uint{1, 2, 3}, []ParentLink{{1, 2}, {2, 3}, {3, 2}}, false)
+		if !errors.Is(err, ErrLinkCycle) {
+			t.Fatalf("want ErrLinkCycle, got %v", err)
+		}
+		if got := reportedIDs(err); len(got) != 1 || (got[0] != "2" && got[0] != "3") {
+			t.Errorf("want one id, 2 or 3, got %v in %q", got, err.Error())
+		}
+	})
+
+	t.Run("two disjoint cycles are each named once", func(t *testing.T) {
+		// 1 <-> 2 and 3 -> 4 -> 5 -> 3, plus a valid root 6
+		links := []ParentLink{{1, 2}, {2, 1}, {3, 5}, {4, 3}, {5, 4}, {6, 0}}
+		_, err := planLinks([]uint{1, 2, 3, 4, 5, 6}, links, false)
+		if !errors.Is(err, ErrLinkCycle) {
+			t.Fatalf("want ErrLinkCycle, got %v", err)
+		}
+		got := reportedIDs(err)
+		inFirst := func(s string) bool { return s == "1" || s == "2" }
+		inSecond := func(s string) bool { return s == "3" || s == "4" || s == "5" }
+		oneOfEach := len(got) == 2 && (inFirst(got[0]) && inSecond(got[1]) || inSecond(got[0]) && inFirst(got[1]))
+		if !oneOfEach {
+			t.Errorf("want one id of each cycle, got %v in %q", got, err.Error())
+		}
+	})
+}
+
+func TestPlanLinksOrphanRootKeepsItsChildren(t *testing.T) {
+	// node 1's parent 99 does not exist; 2 is under 1 and 3 under 2
+	plan, err := planLinks([]uint{1, 2, 3}, []ParentLink{{1, 99}, {2, 1}, {3, 2}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[uint][]uint{0: {1}, 1: {2}, 2: {3}}
+	if diff := cmp.Diff(want, plan.children); diff != "" {
+		t.Errorf("children (-want +got):\n%s", diff)
+	}
+	if plan.parent[1] != 0 || plan.parent[2] != 1 || plan.parent[3] != 2 {
+		t.Errorf("parents: %v", plan.parent)
+	}
+}
+
+func TestPlanLinksLongChain(t *testing.T) {
+	// a chain of 100,000 nodes, deepest first so the first walk climbs the whole chain; the walk
+	// must not recurse
+	const n = 100000
+	ids := make([]uint, 0, n)
+	links := make([]ParentLink, 0, n)
+	for id := uint(n); id >= 1; id-- {
+		ids = append(ids, id)
+		links = append(links, ParentLink{NodeID: id, ParentID: id - 1})
+	}
+	plan, err := planLinks(ids, links, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.children[0]) != 1 || plan.parent[n] != n-1 {
+		t.Errorf("want one root and node %d under %d, got roots %v, parent %d", n, n-1, plan.children[0], plan.parent[n])
+	}
+}
