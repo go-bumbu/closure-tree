@@ -12,8 +12,10 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// ErrUnknownColumn is returned when a read option names a column the model does not have in its
-// table. The name may be the database column name or the Go field name.
+// ErrUnknownColumn is returned when a read option names a column that cannot be named. The name
+// may be the database column name or the Go field name. A column can be named when its field has a
+// column name and is not both read-only and excluded from migration; the computed parent cannot be
+// named.
 var ErrUnknownColumn = errors.New("unknown column")
 
 type condOp uint8
@@ -34,7 +36,9 @@ type Cond struct {
 }
 
 // Eq matches the nodes whose column equals value. A nil value, or a nil pointer, matches NULL
-// instead; a non-nil pointer is dereferenced.
+// instead; a non-nil pointer is dereferenced. The value is bound as one value: a slice or an array
+// (other than a byte slice or a driver.Valuer), a gorm expression or a *gorm.DB is rejected with
+// an error before the read queries.
 func Eq(column string, value any) Cond {
 	return Cond{column: column, op: opEq, values: []any{value}}
 }
@@ -46,7 +50,12 @@ func IsNull(column string) Cond { return Cond{column: column, op: opIsNull} }
 func NotNull(column string) Cond { return Cond{column: column, op: opNotNull} }
 
 // In matches the nodes whose column equals one of the values. Without values it matches nothing.
-// The values are copied, so changing the slice afterwards does not change the condition.
+// It never matches NULL, so In(column, nil) matches nothing; use IsNull. The values are copied, so
+// changing the slice afterwards does not change the condition. Pass the values one by one: a value
+// that is itself a slice or an array (other than a byte slice or a driver.Valuer), a gorm
+// expression or a *gorm.DB is rejected with an error before the read queries. A tree read binds
+// the values up to three times, so a very long list reaches the database's limit of bound values
+// sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per statement).
 func In(column string, values ...any) Cond {
 	return Cond{column: column, op: opIn, values: slices.Clone(values)}
 }
@@ -72,16 +81,20 @@ func Filter(conds ...Cond) ReadOption {
 	}
 }
 
-// PerNode makes the filter apply to every node on the path between the root of the read and each
-// result, instead of to the result only.
+// PerNode changes how Descendants and DescendantIds apply the filter. By default they prune: a node
+// is returned only if it and every node between the requested parent and it match. With PerNode a
+// node is returned when it matches itself, whatever its ancestors do. Other reads ignore it.
 func PerNode() ReadOption { return func(c *readConfig) { c.perNode = true } }
 
 // Unfiltered switches the Tree's default filter off for this call.
 func Unfiltered() ReadOption { return func(c *readConfig) { c.unfiltered = true } }
 
-// Columns limits the columns a read returns to the named ones, given as database column name or Go
-// field name. node_id, tenant and sort_order are always returned, so Columns() with no names
-// returns only those three. Without Columns a read returns every column of the node table.
+// Columns limits the columns a read returns to node_id, tenant, sort_order and the named ones,
+// given as database column name or Go field name, so Columns() with no names returns only those
+// three. Without Columns a read returns every column of the node table. The parent is always
+// computed from the closure rows. Fields that are not selected stay zero, so do not pass the item
+// to Update: Update writes every field, and the columns that were not selected would be
+// overwritten with zero values.
 func Columns(names ...string) ReadOption {
 	return func(c *readConfig) {
 		c.hasColumns = true
@@ -231,11 +244,13 @@ func (ct *Tree) plainPlan() *readPlan {
 	return &readPlan{}
 }
 
-// WithFilter returns a copy of the Tree whose reads apply conds by default. It replaces any default
-// filter the Tree already has; with no conds the copy has no default filter. A read can replace the
-// default with its own Filter that has conditions (an empty Filter has no effect), or switch it off
-// with Unfiltered. Writes are never filtered. The original Tree is not changed. It returns
-// ErrUnknownColumn when a condition names an unknown column.
+// WithFilter returns a copy of the Tree with a default filter. GetNode, FindChild, Descendants,
+// DescendantIds, TreeDescendants and TreeDescendantsIds apply it; GetLeaves, IsDescendant and
+// IsChildOf take no read options and are not filtered, and writes are never filtered. conds
+// replace any default filter the Tree already has; with no conds the copy keeps the same default
+// filter. A read can replace the default with its own Filter that has conditions, or switch it off
+// with Unfiltered. The original Tree is not changed. It returns ErrUnknownColumn when a condition
+// names an unknown column, and an error for a value that Eq or In rejects.
 func (ct *Tree) WithFilter(conds ...Cond) (*Tree, error) {
 	cp := *ct
 	if len(conds) == 0 {

@@ -39,7 +39,7 @@ func TestPlanReadDefaults(t *testing.T) {
 	if diff := cmp.Diff(want, ct.plainPlan(), cmp.AllowUnexported(readPlan{}, resolvedCond{})); diff != "" {
 		t.Errorf("plain plan (-want +got):\n%s", diff)
 	}
-	// review focus 5: a nil option is ignored
+	// a nil option is ignored
 	if _, err := ct.planRead([]ReadOption{nil, PerNode(), nil}); err != nil {
 		t.Errorf("nil options: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestPlanReadFilter(t *testing.T) {
 	eq([]resolvedCond{{"name", opIn, nil}}, conds(Filter(In("name"))))
 	eq([]resolvedCond{{"kind", opEq, []any{"doc"}}, {"hidden", opEq, []any{false}}}, // two Filter options are joined
 		conds(Filter(Eq("kind", "doc")), Filter(Eq("hidden", false))))
-	eq(nil, conds(Filter())) // review focus 4: an empty Filter is no filter
+	eq(nil, conds(Filter())) // an empty Filter is no filter
 	if p, _ := ct.planRead([]ReadOption{PerNode()}); !p.perNode {
 		t.Error("PerNode not recorded")
 	}

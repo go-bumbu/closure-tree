@@ -98,7 +98,7 @@ maxDepth := 0
 tennant := "user1"
 
 var books []Book // will be populated 
-err = tree.GetLeaves(&books, parentId, maxDepth, tenant)
+err = tree.GetLeaves(ctx, &books, parentId, maxDepth, tenant)
 if err != nil {
 fmt.Print(err)
 }
@@ -164,46 +164,60 @@ A new node is placed first among its siblings; pass `closuretree.PlaceLast()` to
 
 ### Narrowing reads
 
-Every read takes trailing options that choose which nodes it returns and which columns it fills.
+`GetNode`, `FindChild`, `Descendants`, `DescendantIds`, `TreeDescendants` and `TreeDescendantsIds`
+take trailing options that choose which nodes they return and which columns they fill. `GetLeaves`,
+`IsDescendant` and `IsChildOf` take no read options and are not filtered.
 
 ```GO
 // Tag also has the field `Hidden bool`
 visible, err := tree.WithFilter(ct.Eq("Hidden", false)) // a Tree whose reads skip hidden tags
 // handle error
 
-var tags []*Tag
-err = visible.Descendants(ctx, 0, 1, "user1", &tags, ct.Columns("Name")) // one level, only Name filled
+var names []*Tag
+err = visible.Descendants(ctx, 0, 1, "user1", &names, ct.Columns("Name")) // one level, only Name filled
 // handle error
 
-err = visible.Descendants(ctx, 0, 1, "user1", &tags, ct.Unfiltered()) // hidden tags too
+var all []*Tag // flat reads append to the slice, so use a new one for each read
+err = visible.Descendants(ctx, 0, 1, "user1", &all, ct.Unfiltered()) // hidden tags too
 ```
 
 * `Filter(conds ...Cond)` keeps the nodes that match every cond. The conds are `Eq`, `IsNull`,
-  `NotNull` and `In`. `Eq` with `nil` means `IsNull`; `In` with no values matches nothing.
-* A column is named by its column name or its Go field name. An unknown name returns
-  `ErrUnknownColumn` before any query runs, from every read, also one that ignores the option.
+  `NotNull` and `In`. `Eq` with `nil` means `IsNull`, and `Eq` dereferences a non-nil pointer. `In`
+  with no values matches nothing, and `In` never matches NULL: `In("note", nil)` matches nothing,
+  use `IsNull`. Values are passed one by one; a slice or an array (other than a byte slice or a
+  `driver.Valuer`) or a gorm expression is rejected with an error before any query runs. A tree
+  read binds the values of `In` up to three times, so a very long list reaches the database's limit
+  of bound values sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per statement).
+* A column is named by its column name or its Go field name. A column can be named when its field
+  has a column name and is not both read-only and excluded from migration; the computed parent
+  cannot be named. An unknown name returns `ErrUnknownColumn` before any query runs, from every
+  read, also one that ignores the option.
 * A node does not match when the predicate is not true, which includes NULL.
 * Meaning of the filter per read:
 
 | Read | Meaning |
 |---|---|
-| `Descendants`, `DescendantIds` | A node is returned only if it and every node between the requested parent and it match. `PerNode()` turns this off: a node is returned when it matches. |
+| `Descendants`, `DescendantIds` | A node is returned only if it and every node between the requested parent and it match. With `PerNode()` a node is returned when it matches itself, whatever its ancestors do. |
 | `TreeDescendants`, `TreeDescendantsIds` | A node that does not match is left out with its whole subtree. Its children are never re-parented. |
 | `GetNode` | A node that does not match returns `ErrNodeNotFound`. |
 | `FindChild` | A child that does not match is not found. The parent's own match is not checked. |
 
 * A requested parent that is a real node and does not match gives an empty result in the prune and
   tree reads; parent 0 always matches. With `PerNode()` the parent is not checked.
-* `Columns(names ...string)` selects only the named columns, in `GetNode`, `FindChild`,
-  `Descendants` and `TreeDescendants`. `node_id`, `tenant` and `sort_order` are always included, and
-  the parent is always computed. Fields that are not selected stay zero. A filter may name a column
-  that is not selected.
-* `WithFilter(conds ...Cond)` returns a copy of the Tree with a default filter for every read. It
-  replaces any default the Tree already has; with no conds the copy has none. A `Filter` with at
-  least one cond replaces the default for one call; `Unfiltered()` switches it off for one call. An
-  empty `Filter()` has no effect.
+* Without `Columns` a read selects every column of the node table. `Columns(names ...string)`
+  selects `node_id`, `tenant`, `sort_order` and the named columns, in `GetNode`, `FindChild`,
+  `Descendants` and `TreeDescendants`. Fields that are not selected stay zero. A filter may name a
+  column that is not selected. The parent is always computed from the closure rows and overrides a
+  leftover physical `parent_id` column.
+* Do not pass a struct that was read with `Columns` to `Update`: `Update` writes every field of the
+  item, so the columns that were not selected would be overwritten with zero values.
+* `WithFilter(conds ...Cond)` returns a copy of the Tree with a default filter for the reads above.
+  It replaces any default the Tree already has; with no conds the copy keeps the same default. A
+  `Filter` with at least one cond replaces the default for one call; `Unfiltered()` switches it off
+  for one call; an empty `Filter()` has no effect.
 * Writes are never filtered, also on a filtered Tree. `GetOrAdd` therefore returns an existing child
-  that `FindChild` on the same Tree does not see.
+  that `FindChild` on the same Tree does not see. `afterNodeID` may name a sibling the filter hides,
+  and the placement of a new or moved node counts hidden siblings.
 * An option that a read does not honour has no effect there. `PerNode` only changes `Descendants`
   and `DescendantIds`; `Columns` is ignored by the id reads.
 
@@ -385,6 +399,7 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 
 **Read operations**
 Every read below except `IsDescendant`, `IsChildOf` and `GetLeaves` takes trailing `opts ...ReadOption` (see "Narrowing reads").
+`Descendants` and `TreeDescendants` scan each row into the tree's model and copy it into the element type: as a whole when the element type is the model or embeds it directly; otherwise each field goes to the field at the same path of Go names (`Name`, `Addr.Name`), or, when there is none, to the field with its Go name if no other model field has that name. A slice whose element is not a struct or a pointer to a struct, and a tree element whose `Children` field is not a `[]*T`, return an error before any query runs; a tree element without `Children` comes back unlinked.
 * `GetNode(ctx, nodeID, tenant, item, opts ...ReadOption)` — Load a single node into `item`
 * `FindChild(ctx, parentID, tenant, match, matchFields, out, opts ...ReadOption) (found bool, err error)` — Find a direct child whose fields named in `matchFields` equal those of `match` (zero values included), tenant-scoped; populates `out` like `GetNode`
 * `IsDescendant(ctx, ancestorID, descendantID, tenant) (bool, error)` — Check ancestry

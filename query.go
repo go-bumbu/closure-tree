@@ -87,9 +87,13 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 // tenant determines the tenant to be used
 //
 // Each row is scanned with gorm's scanner into the Tree's model and then copied into the element
-// type by Go field name. The element type may be the model, a smaller struct, or a struct that
-// wraps the model. A same-named field of another type is assigned, converted or dereferenced; if
-// that is not possible the read returns "cannot assign type ... to field ..." before querying.
+// type, which may be the model, a smaller struct, or a struct that wraps the model. An element type
+// that embeds the model directly gets the whole row there. Otherwise each field goes to the
+// element field at the same path of Go names (Name, or Addr.Name for a field of an embedded
+// struct); when there is none, to the field with its Go name, if no other model field has that
+// name. A field of another type is assigned, converted or dereferenced; if that is not possible
+// the read returns "cannot assign type ... to field ..." before querying. An element that is
+// neither a struct nor a pointer to a struct returns an error before querying.
 //
 // Descendants honours the read options Filter, Unfiltered, PerNode and Columns. By default a node
 // is returned only if it and every node between parent and it match the filter; with PerNode it
@@ -179,8 +183,9 @@ const absMaxDepth = 2147483647
 // tenant determines the tenant to be used
 //
 // Each row is scanned with gorm's scanner into the Tree's model and then copied into the element
-// type by Go field name, as in Descendants. Children are linked through the node id and parent id
-// of the scanned row, so the element type does not have to embed Node.
+// type as in Descendants. Children are linked through the node id and parent id of the scanned
+// row, so the element type does not have to embed Node. An element type without a Children field
+// comes back unlinked; one whose Children field is not a []*T returns an error before querying.
 //
 // TreeDescendants honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A
 // node that does not match the filter is left out with its whole subtree; its children are never

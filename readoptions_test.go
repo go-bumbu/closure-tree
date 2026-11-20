@@ -448,7 +448,8 @@ func TestSingleReadsFillWiderStruct(t *testing.T) {
 	}
 }
 
-// Review focus 1 and 2.
+// reservedNode has columns named with reserved words, which every read must quote, and a
+// read-only field that has no column in the table.
 type reservedNode struct {
 	closuretree.Node
 	Order    int
@@ -509,7 +510,7 @@ func TestReadsQuoteReservedColumnNames(t *testing.T) {
 	}
 }
 
-// Review focus 3.
+// slimNode is smaller than filterNode; reads into it fill only its fields.
 type slimNode struct {
 	closuretree.Node
 	Name string
@@ -806,7 +807,7 @@ func TestFilterOnFlatReads(t *testing.T) {
 				t.Errorf("a filter on a column that is not selected: %+v, %v", named, err)
 			}
 
-			// review focus 4
+			// no filter, an empty Filter and PerNode without a filter return every node
 			both("no options", everything, "", 0)
 			both("an empty Filter", everything, "", 0, closuretree.Filter())
 			both("PerNode without a filter", everything, "", 0, per)
