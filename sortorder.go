@@ -114,27 +114,35 @@ func (ct *Tree) placeAmongSiblings(tx *gorm.DB, parentID, afterID uint, tenant s
 	return sortOrder, nil
 }
 
+// lastSortOrder returns the sort_order that places a node after the current last child of
+// parentID, ignoring the child excludeID (0 excludes nothing), and the halvings that gap leaves.
+// With no other child it returns 0 and 9999 halvings; otherwise the maximum plus 10.
+// Must be called inside a transaction.
+func (ct *Tree) lastSortOrder(tx *gorm.DB, parentID, excludeID uint, tenant string) (order float64, halvings int, err error) {
+	var maxOrder *float64
+	err = tx.Raw(
+		fmt.Sprintf(`SELECT MAX(n.sort_order) FROM %s n
+JOIN %s r ON r.descendant_id = n.node_id AND r.depth = 1 AND r.tenant = n.tenant
+WHERE r.ancestor_id = ? AND n.tenant = ? AND n.node_id != ?`, ct.nodesTbl, ct.relationsTbl),
+		parentID, tenant, excludeID,
+	).Scan(&maxOrder).Error
+	if err != nil {
+		return 0, 0, fmt.Errorf("unable to find last sibling: %w", err)
+	}
+	if maxOrder == nil {
+		return 0.0, 9999, nil // no other siblings
+	}
+	order = *maxOrder + 10.0
+	return order, halvingsRemaining(*maxOrder, order), nil
+}
+
 // placeLastInTx gives node id a fresh sort_order after the current last child of parentID
 // (excluding id itself) and refreshes the meta. Used when a move supplies no afterNodeID, so the
 // moved node appends among its new siblings instead of keeping its old sort_order.
 func (ct *Tree) placeLastInTx(tx *gorm.DB, id, parentID uint, tenant string) error {
-	var maxOrder *float64
-	err := tx.Raw(
-		fmt.Sprintf(`SELECT MAX(n.sort_order) FROM %s n
-JOIN %s r ON r.descendant_id = n.node_id AND r.depth = 1 AND r.tenant = n.tenant
-WHERE r.ancestor_id = ? AND n.tenant = ? AND n.node_id != ?`, ct.nodesTbl, ct.relationsTbl),
-		parentID, tenant, id,
-	).Scan(&maxOrder).Error
+	newOrder, halvings, err := ct.lastSortOrder(tx, parentID, id, tenant)
 	if err != nil {
-		return fmt.Errorf("unable to find last sibling: %w", err)
-	}
-	var newOrder float64
-	var halvings int
-	if maxOrder == nil {
-		newOrder, halvings = 0.0, 9999 // no other siblings
-	} else {
-		newOrder = *maxOrder + 10.0
-		halvings = halvingsRemaining(*maxOrder, newOrder)
+		return err
 	}
 	if err := ct.upsertMetaHalvings(tx, parentID, tenant, halvings); err != nil {
 		return fmt.Errorf("unable to update sort order metadata: %w", err)

@@ -45,8 +45,8 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 
 // GetOrAdd is an idempotent get-or-create for a direct child of parentID. It looks up a direct child
 // whose fields named in matchFields equal those of item; if one exists it loads it into item and
-// returns created=false, otherwise it adds item under parentID (placed first among its siblings) and
-// returns created=true. parentID=0 operates on the root level.
+// returns created=false, otherwise it adds item under parentID (placed first among its siblings, or
+// last with the PlaceLast option) and returns created=true. parentID=0 operates on the root level.
 //
 // The match key is read from item itself (there is no separate match struct): matchFields names the
 // fields — Go field names or column names — that identify the child, matched by their actual value
@@ -64,7 +64,8 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // per-tenant write lock, so two callers racing to create the same brand-new child are serialized —
 // the first creates it and the second finds it (created=false), leaving no duplicate siblings. See
 // the concurrency note on Tree.
-func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant string, matchFields []string) (created bool, err error) {
+func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant string, matchFields []string, opts ...AddOption) (created bool, err error) {
+	cfg := newAddConfig(opts)
 	if err = checkItem(item); err != nil {
 		return false, err
 	}
@@ -90,7 +91,7 @@ func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant st
 			return nil
 		}
 		created = true
-		return ct.addInTx(tx, reflectItem, t, parentID, 0, tenant)
+		return ct.addInTx(tx, reflectItem, t, parentID, 0, cfg.last, tenant)
 	})
 	if err != nil {
 		return false, err

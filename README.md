@@ -138,36 +138,46 @@ uses query-by-example to find an existing match and chains cleanly to build a pa
 parent := uint(0)
 for _, name := range []string{"a", "b", "c"} {
     node := &Tag{Name: name}
-    created, err := tree.GetOrAdd(ctx, node, parent, "user1", Tag{Name: name})
+    created, err := tree.GetOrAdd(ctx, node, parent, "user1", []string{"Name"})
     // handle error; `created` reports whether a new node was inserted
     parent = node.NodeId // the id becomes the parent of the next level down
 }
 ```
 
-`match` is compared by its non-zero exported fields only (the embedded `Node` is ignored), scoped
-to the tenant; `parentID = 0` operates on the root level. Use `FindChild` for the lookup alone:
+`matchFields` names the fields of the item (Go field names or column names) that identify the
+child; each is matched by its actual value, including zero values, and the embedded `Node` fields
+cannot be used. The match is scoped to the tenant; `parentID = 0` operates on the root level. Use
+`FindChild` for the lookup alone:
 
 ```GO
 var out Tag
-found, err := tree.FindChild(ctx, parentID, "user1", Tag{Name: "b"}, &out)
+found, err := tree.FindChild(ctx, parentID, "user1", Tag{Name: "b"}, []string{"Name"}, &out)
 ```
 
-`GetOrAdd` wraps the find and the add in a single transaction, so a node is never left half
-created. It does **not** fully serialize two callers creating the *same brand-new* child
-concurrently (there is no row to lock until it exists), so either serialize such imports (e.g. a
-single worker) or deduplicate afterwards. Re-adding an already-existing child is race-free.
+`GetOrAdd` runs the find and the add in a single transaction under the tenant lock, so a node is
+never left half created and two callers creating the same brand-new child are serialized: the
+first creates it, the second finds it and gets `created = false`, so no duplicate is produced.
+A new node is placed first among its siblings; pass `closuretree.PlaceLast()` to append it last.
 
 ### Sort order
 
 Each node carries a `SortOrder float64` field (stored as `REAL`/`DOUBLE` in the database). The library
 manages this value automatically — callers never set it directly.
 
-**Placing nodes:** both `Add` and `Update` accept an `afterNodeID` parameter:
+**Placing nodes:** both `Add` and `Update` accept an `afterNodeID` parameter, and `Add` and
+`GetOrAdd` also accept the `PlaceLast()` option:
 
-| `afterNodeID` | Behaviour |
+| `afterNodeID` / option | Behaviour |
 |---|---|
-| `0` | Place first among siblings |
+| `0` (or `nil`) | Place first among siblings (the default for `Add` and `GetOrAdd`) |
 | `someID` | Place immediately after that sibling |
+| `closuretree.PlaceLast()` | Place after the current last sibling |
+
+```GO
+err := tree.Add(ctx, &Tag{Name: "x"}, &parentID, nil, "user1", closuretree.PlaceLast())
+```
+
+Combining `PlaceLast()` with a non-zero `afterNodeID` returns `ErrConflictingPlacement`.
 
 **Maintenance:** float64 bisection has finite precision. After many insertions between the same two nodes
 the gap eventually exhausts. Use the renormalize API to reset spacing:

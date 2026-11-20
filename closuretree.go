@@ -222,8 +222,9 @@ func derefUint(p *uint) uint {
 //
 // parentID and afterNodeID follow Update's *uint convention: a nil parentID (or &0) adds at the
 // root, &id adds under that node; a nil afterNodeID (or &0) places first among the siblings, &id
-// places after that sibling.
-func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *uint, tenant string) error {
+// places after that sibling. The PlaceLast option places the node last instead of first; combined
+// with a non-zero afterNodeID it returns ErrConflictingPlacement.
+func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *uint, tenant string, opts ...AddOption) error {
 	if err := checkItem(item); err != nil {
 		return err
 	}
@@ -234,10 +235,14 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *
 	}
 
 	pid, aid := derefUint(parentID), derefUint(afterNodeID)
+	cfg := newAddConfig(opts)
+	if cfg.last && aid != 0 {
+		return ErrConflictingPlacement
+	}
 	reflectItem, t, itemIsPointer := stripNodeCopy(item)
 
 	err = ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
-		return ct.addInTx(tx, reflectItem, t, pid, aid, tenant)
+		return ct.addInTx(tx, reflectItem, t, pid, aid, cfg.last, tenant)
 	})
 	if err != nil {
 		return err
@@ -286,8 +291,9 @@ func copyNodeBack(dst, src any, t reflect.Type) {
 // the parent and afterNodeID, computes the sort order, creates the node row and its closure
 // relationships. reflectItem must be a fresh (Node-stripped) copy of the caller's item and t
 // its type; on success reflectItem holds the newly assigned NodeId. tenant must already be
-// validated. Must be called inside a transaction.
-func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, afterNodeID uint, tenant string) error {
+// validated. With last set the node goes after the current last sibling and afterNodeID must be 0.
+// Must be called inside a transaction.
+func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, afterNodeID uint, last bool, tenant string) error {
 	// Check if the parent node exists and the tenant is the same (inside tx to avoid TOCTOU)
 	if parentID != 0 {
 		var parent Node
@@ -309,7 +315,17 @@ func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, 
 		}
 	}
 	// Compute the sort order for the new node
-	sortOrder, err := ct.placeAmongSiblings(tx, parentID, afterNodeID, tenant)
+	var sortOrder float64
+	var err error
+	if last {
+		var halvings int
+		sortOrder, halvings, err = ct.lastSortOrder(tx, parentID, 0, tenant)
+		if err == nil {
+			err = ct.upsertMetaHalvings(tx, parentID, tenant, halvings)
+		}
+	} else {
+		sortOrder, err = ct.placeAmongSiblings(tx, parentID, afterNodeID, tenant)
+	}
 	if err != nil {
 		return err
 	}

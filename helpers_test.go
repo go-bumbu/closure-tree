@@ -210,3 +210,17 @@ func raceConflictingMoves(t *testing.T, gdb *gorm.DB, ct *closuretree.Tree, iter
 		}
 	}
 }
+
+// childNames returns the names of the direct children of parent, in the order Descendants returns them.
+func childNames(t *testing.T, ct *closuretree.Tree, parent uint, tenant string) []string {
+	t.Helper()
+	var kids []TestPayload
+	if err := ct.Descendants(context.Background(), parent, 1, tenant, &kids); err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(kids))
+	for _, k := range kids {
+		names = append(names, k.Name)
+	}
+	return names
+}
