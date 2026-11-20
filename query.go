@@ -88,7 +88,7 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 	}
 	// Descendants intentionally accepts both value ([]T) and pointer ([]*T) element slices;
 	// TreeDescendants, by contrast, requires []*T because it links child pointers into a tree.
-	// Every row is scanned into a new T.
+	// Every row becomes a new T (see scanEach).
 	elemType := sliceVal.Type().Elem()
 	elemIsPtr := elemType.Kind() == reflect.Pointer
 	structType := elemType
@@ -109,7 +109,7 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 		maxDepth = absMaxDepth
 	}
 	sqlstr, args := ct.descendantsSQL(p, false, parent, maxDepth, tenant)
-	return ct.scanEach(ctx, sqlstr, args, structType, func(elem reflect.Value) {
+	return ct.scanEach(ctx, sqlstr, args, structType, func(elem, _ reflect.Value) {
 		if !elemIsPtr {
 			elem = elem.Elem()
 		}
@@ -185,15 +185,15 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 	}
 
 	sqlstr, args := ct.treeDescendantsSQL(p, false, parent, maxDepth, tenant)
-	var nodes []reflect.Value
-	err = ct.scanEach(ctx, sqlstr, args, elemType.Elem(), func(elem reflect.Value) {
-		nodes = append(nodes, elem)
+	var entries []treeEntry
+	err = ct.scanEach(ctx, sqlstr, args, elemType.Elem(), func(elem, row reflect.Value) {
+		entries = append(entries, treeEntry{elem: elem, node: nodeOf(row)})
 	})
 	if err != nil {
 		return err
 	}
 
-	for _, node := range linkTree(nodes) {
+	for _, node := range linkTree(entries) {
 		sliceVal.Set(reflect.Append(sliceVal, node))
 	}
 	return nil

@@ -3,6 +3,7 @@ package closuretree_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +72,7 @@ func buildFilterTree(t *testing.T, ct *closuretree.Tree) map[string]uint {
 
 // Descendants and TreeDescendants must read booleans, nullable strings and nullable timestamps,
 // as GetNode already does.
+//
 //nolint:gocyclo // test function covers many assertion branches
 func TestReadsScanEveryColumnType(t *testing.T) {
 	for _, db := range testdbs.DBs() {
@@ -377,6 +379,100 @@ func TestReadIntoSmallerStruct(t *testing.T) {
 			var one slimNode
 			if err := ct.GetNode(ctx, id["a"], tenantF, &one); err != nil || one.Name != "a" {
 				t.Errorf("GetNode into a smaller struct: %+v, %v", one, err)
+			}
+		})
+	}
+}
+
+type bareNode struct {
+	Name     string
+	Children []*bareNode
+}
+
+// An element type that does not embed Node is still linked through the scanned rows.
+func TestTreeDescendantsLinksElementsWithoutNode(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			buildFilterTree(t, ct)
+			ctx := context.Background()
+
+			var roots []*bareNode
+			if err := ct.TreeDescendants(ctx, 0, 0, tenantF, &roots); err != nil {
+				t.Fatal(err)
+			}
+			if len(roots) != 2 {
+				t.Fatalf("want 2 roots, got %d", len(roots))
+			}
+			for _, r := range roots {
+				if r.Name == "a" && len(r.Children) != 2 {
+					t.Errorf("a: want 2 children, got %d", len(r.Children))
+				}
+			}
+		})
+	}
+}
+
+type kindName string
+
+type convertedNode struct {
+	closuretree.Node
+	Name string
+	Kind kindName
+	Note string
+}
+
+type wrongTypeNode struct {
+	closuretree.Node
+	Name     int
+	Children []*wrongTypeNode
+}
+
+// A field whose type differs from the model's is converted when it can be, and fails the read
+// before the query when it cannot.
+func TestReadIntoDifferentFieldTypes(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			buildFilterTree(t, ct)
+			ctx := context.Background()
+
+			var converted []convertedNode
+			if err := ct.Descendants(ctx, 0, 0, tenantF, &converted); err != nil || len(converted) != 8 {
+				t.Fatalf("Descendants: %d, %v", len(converted), err)
+			}
+			byName := map[string]convertedNode{}
+			for _, n := range converted {
+				byName[n.Name] = n
+			}
+			if byName["b"].Kind != "folder" || byName["a"].Note != "keep" || byName["x"].Note != "" {
+				t.Errorf("converted fields: b=%+v a=%+v x=%+v", byName["b"], byName["a"], byName["x"])
+			}
+
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel() // a query would fail with context.Canceled, so the type check must come first
+			for _, c := range []context.Context{ctx, cancelled} {
+				var flat []wrongTypeNode
+				var tree []*wrongTypeNode
+				errs := map[string]error{
+					"Descendants":     ct.Descendants(c, 0, 0, tenantF, &flat),
+					"TreeDescendants": ct.TreeDescendants(c, 0, 0, tenantF, &tree),
+				}
+				for read, err := range errs {
+					if err == nil || !strings.Contains(err.Error(), "cannot assign") || !strings.Contains(err.Error(), "Name") {
+						t.Errorf("%s: want a cannot assign error on Name, got %v", read, err)
+					}
+				}
 			}
 		})
 	}

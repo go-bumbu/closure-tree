@@ -38,12 +38,16 @@ func validateItems(items any) error {
 	return nil
 }
 
-// scanEach runs the query and passes every row to add as a new *T, where T is elemType. Rows are
-// scanned with gorm's scanner into the Tree's model, which gorm parsed in New; when T is another
-// type, the model's fields are then copied into T (see modelToElem). gorm skips the result columns
-// the model has no field for, such as cte_depth.
-func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemType reflect.Type, add func(elem reflect.Value)) (err error) {
-	toElem := ct.modelToElem(ctx, elemType)
+// scanEach runs the query and passes every row to add twice: as the scanned *Model and as a new
+// *T, where T is elemType. Rows are scanned with gorm's scanner into the Tree's model, which gorm
+// parsed in New; when T is another type, the model's fields are then copied into T (see
+// modelToElem). gorm skips the result columns the model has no field for, such as cte_depth. An
+// element type that cannot take the model's fields fails before the query runs.
+func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemType reflect.Type, add func(elem, row reflect.Value)) (err error) {
+	toElem, err := ct.modelToElem(ctx, elemType)
+	if err != nil {
+		return err
+	}
 	db := ct.db.WithContext(ctx)
 	rows, err := db.Raw(sqlstr, args...).Rows()
 	if err != nil {
@@ -61,7 +65,7 @@ func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemTyp
 		if err := db.ScanRows(rows, row.Interface()); err != nil {
 			return fmt.Errorf("failed to scan row: %w", err)
 		}
-		add(toElem(row))
+		add(toElem(row), row)
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("row iteration error: %w", err)
@@ -69,19 +73,25 @@ func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemTyp
 	return nil
 }
 
+// fieldCopy copies one model field into the element field at dst.
+type fieldCopy struct {
+	src   *schema.Field
+	dst   []int
+	deref bool // src is a pointer: nil leaves dst zero, otherwise the pointed-to value is copied
+	conv  bool // the value is converted to the type of dst
+}
+
 // modelToElem returns the conversion of a scanned *Model into a *T, where T is elemType: the
-// identity when T is the model, otherwise a copy of every model field into the field of T that
-// has the same Go name and type. T is often not a type gorm can parse: the element of a
+// identity when T is the model, otherwise a copy of every model field into the exported field of
+// T that has the same Go name. T is often not a type gorm can parse: the element of a
 // TreeDescendants read typically wraps the model and adds an untagged Children []*T field, which
-// gorm takes for a relation without a foreign key. A field T lacks is not copied, so T may be
-// smaller than the model.
-func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) func(row reflect.Value) reflect.Value {
+// gorm takes for a relation without a foreign key. A field T lacks, or has unexported, is not
+// copied, so T may be smaller than the model. A value whose type differs is assigned when it is
+// assignable and converted when it is convertible; a pointer field is dereferenced first, and a
+// nil pointer leaves the element field zero. Any other type difference returns an error.
+func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) (func(row reflect.Value) reflect.Value, error) {
 	if elemType == ct.schema.ModelType {
-		return func(row reflect.Value) reflect.Value { return row }
-	}
-	type fieldCopy struct {
-		src *schema.Field
-		dst []int
+		return func(row reflect.Value) reflect.Value { return row }, nil
 	}
 	var copies []fieldCopy
 	if elemType.Kind() == reflect.Struct {
@@ -90,53 +100,82 @@ func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) func(row
 				continue
 			}
 			dst, ok := elemType.FieldByName(f.Name)
-			if ok && dst.IsExported() && dst.Type == f.StructField.Type {
-				copies = append(copies, fieldCopy{src: f, dst: dst.Index})
+			if !ok || !dst.IsExported() {
+				continue
 			}
+			c, err := planFieldCopy(f, dst)
+			if err != nil {
+				return nil, err
+			}
+			copies = append(copies, c)
 		}
 	}
 	return func(row reflect.Value) reflect.Value {
 		elem := reflect.New(elemType)
 		for _, c := range copies {
-			if dst, err := elem.Elem().FieldByIndexErr(c.dst); err == nil {
-				dst.Set(c.src.ReflectValueOf(ctx, row.Elem()))
+			dst, err := elem.Elem().FieldByIndexErr(c.dst)
+			if err != nil {
+				continue
 			}
+			v := c.src.ReflectValueOf(ctx, row.Elem())
+			if c.deref {
+				if v.IsNil() {
+					continue
+				}
+				v = v.Elem()
+			}
+			if c.conv {
+				v = v.Convert(dst.Type())
+			}
+			dst.Set(v)
 		}
 		return elem
+	}, nil
+}
+
+// planFieldCopy decides how the model field src is copied into the element field dst.
+func planFieldCopy(src *schema.Field, dst reflect.StructField) (fieldCopy, error) {
+	c := fieldCopy{src: src, dst: dst.Index}
+	from := src.StructField.Type
+	switch {
+	case from.AssignableTo(dst.Type):
+	case from.ConvertibleTo(dst.Type):
+		c.conv = true
+	case from.Kind() == reflect.Pointer && from.Elem().AssignableTo(dst.Type):
+		c.deref = true
+	case from.Kind() == reflect.Pointer && from.Elem().ConvertibleTo(dst.Type):
+		c.deref, c.conv = true, true
+	default:
+		return fieldCopy{}, fmt.Errorf("cannot assign type %s to field %s", from, src.Name)
 	}
+	return c, nil
 }
 
 // nodeOf returns the Node of v, a pointer to a struct that is or embeds Node.
-func nodeOf(v reflect.Value) (Node, bool) {
+func nodeOf(v reflect.Value) Node {
 	t, sv := v.Type().Elem(), v.Elem()
 	if t == reflect.TypeOf(Node{}) {
-		return sv.Interface().(Node), true
+		return sv.Interface().(Node)
 	}
-	nv, ok := findNodeValue(t, sv)
-	if !ok {
-		return Node{}, false
-	}
-	return nv.Interface().(Node), true
+	nv, _ := findNodeValue(t, sv)
+	return nv.Interface().(Node)
 }
 
-// linkTree appends every node to the Children field of its parent, found through Node.ParentId,
-// and returns the nodes whose parent is not among them. nodes are pointers to structs that embed
-// Node; a node without Node, or whose parent has no Children field of type []*T, is left unlinked.
-// Siblings, and the returned roots, are ordered by sort_order, then node id.
-func linkTree(nodes []reflect.Value) []reflect.Value {
-	type entry struct {
-		v       reflect.Value
-		node    Node
-		hasNode bool
-	}
-	entries := make([]entry, 0, len(nodes))
-	byID := make(map[uint]reflect.Value, len(nodes))
-	for _, v := range nodes {
-		n, ok := nodeOf(v)
-		entries = append(entries, entry{v: v, node: n, hasNode: ok})
-		if ok {
-			byID[n.NodeId] = v
-		}
+// treeEntry is one node of a tree read: the element handed to the caller and the Node of the
+// scanned model row it came from.
+type treeEntry struct {
+	elem reflect.Value
+	node Node
+}
+
+// linkTree appends every element to the Children field of its parent, found through the Node of
+// the scanned rows, and returns the elements whose parent is not among them. An element whose
+// parent has no Children field of type []*T is left unlinked. Siblings, and the returned roots,
+// are ordered by sort_order, then node id.
+func linkTree(entries []treeEntry) []reflect.Value {
+	byID := make(map[uint]reflect.Value, len(entries))
+	for _, e := range entries {
+		byID[e.node.NodeId] = e.elem
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].node.SortOrder != entries[j].node.SortOrder {
@@ -148,13 +187,13 @@ func linkTree(nodes []reflect.Value) []reflect.Value {
 	var roots []reflect.Value
 	for _, e := range entries {
 		parent, found := byID[e.node.ParentId]
-		if !e.hasNode || !found {
-			roots = append(roots, e.v)
+		if !found {
+			roots = append(roots, e.elem)
 			continue
 		}
 		children := parent.Elem().FieldByName("Children")
-		if children.IsValid() && children.CanSet() && children.Type() == reflect.SliceOf(e.v.Type()) {
-			children.Set(reflect.Append(children, e.v))
+		if children.IsValid() && children.CanSet() && children.Type() == reflect.SliceOf(e.elem.Type()) {
+			children.Set(reflect.Append(children, e.elem))
 		}
 	}
 	return roots
