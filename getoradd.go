@@ -142,7 +142,6 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 	}
 
 	rv := reflect.Indirect(reflect.ValueOf(match))
-	nodeType := reflect.TypeOf(Node{})
 	var conds []string
 	var args []any
 	for _, name := range matchFields {
@@ -150,7 +149,7 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 		if f == nil || f.DBName == "" { // unknown field, or gorm:"-" (no column)
 			return "", nil, fmt.Errorf("%w: %q on %T", ErrUnknownMatchField, name, match)
 		}
-		if f.OwnerSchema != nil && f.OwnerSchema.ModelType == nodeType {
+		if nodeOwned(stmt.Schema.ModelType, f) {
 			return "", nil, fmt.Errorf("%w: %q is a Node-owned field", ErrUnknownMatchField, name)
 		}
 		var b strings.Builder

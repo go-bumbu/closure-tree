@@ -35,6 +35,7 @@ var (
 	ErrNoOp                   = errors.New("update called with no item, no new parent, and no new sort order")
 	ErrInvalidAfterNode       = errors.New("afterNodeID is not a sibling of the target parent")
 	ErrAfterNodeIsSelf        = errors.New("afterNodeID cannot be the node itself")
+	ErrParentIDColumn         = errors.New("the model maps a field other than Node.ParentId to column parent_id")
 
 	ErrItemsNil                    = errors.New("items cannot be nil")
 	ErrItemsNotPointerToSlice      = errors.New("items must be a pointer to a slice")
@@ -92,6 +93,11 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 	err := stmt.Parse(item)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing schema: %w", err)
+	}
+	for _, f := range stmt.Schema.Fields {
+		if f.DBName == colParentID && !nodeOwned(stmt.Schema.ModelType, f) {
+			return nil, fmt.Errorf("%w: field %s", ErrParentIDColumn, f.Name)
+		}
 	}
 	name := stmt.Schema.Table
 	relTbl := strings.ToLower(fmt.Sprintf("%s_%s", closureTblName, name))

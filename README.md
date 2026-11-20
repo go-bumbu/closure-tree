@@ -37,26 +37,34 @@ type Tag struct {
 Now we can create a tree instance:
 ```GO
 tree, err := ct.New(db, Tag{})
+// handle error
+err = tree.Migrate() // creates or updates the tables; call it once at application start up
+// handle error
 ```
-instantiating a tree will run the gorm automigration under the hood and create the needed tables,
-this should only be done at application start up.
+`New` only parses and validates the model, it does not touch the schema. `Migrate` creates the
+tables and should be called once at application start up.
+
+A model must not declare its own field mapped to the column `parent_id` (the embedded `Node` already
+owns it as `ParentId`); `New` returns `ErrParentIDColumn` in that case.
 
 To populate the tree we do as follows:
 ```GO
 ctx := context.Background()
 
 colorTag := Tag{Name: "colors"}
-err := tree.Add(ctx, &colorTag, 0, 0, "user1") // add a node to the root (afterNodeID=0 → place first)
+err := tree.Add(ctx, &colorTag, nil, nil, "user1") // add a node at the root, first among its siblings
 // handle error
 
 warmColor := Tag{Name: "warm"}
-err = tree.Add(ctx, &warmColor, colorTag.Id(), 0, "user1") // add a node below "colors"
+parent := colorTag.Id()
+err = tree.Add(ctx, &warmColor, &parent, nil, "user1") // add a node below "colors"
 // handle error
 
 ```
 Note that the `Id()` method returns the node ID once the struct has been passed as a pointer to `Add`.
-Id `0` is the root node. The `afterNodeID` parameter controls sort order among siblings — pass `0` to
-place the node first, or pass a sibling's ID to insert immediately after it.
+`Add` takes `*uint` for `parentID` and `afterNodeID`: a `nil` `parentID` means "at the root" and a
+`nil` `afterNodeID` means "first among the siblings". Pass a sibling's ID as `afterNodeID` to insert
+immediately after it.
 
 Once populated we can query the tree (get all descendants)
 

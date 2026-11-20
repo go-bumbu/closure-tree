@@ -194,7 +194,7 @@ func (ct *Tree) buildUpdateMap(item any, id uint, tenant string) (map[string]any
 		if f.DBName == "" || !f.Updatable {
 			continue
 		}
-		if f.OwnerSchema != nil && f.OwnerSchema.ModelType == reflect.TypeOf(Node{}) {
+		if nodeOwned(updateStmt.Schema.ModelType, f) {
 			continue
 		}
 		fieldVal := reflect.ValueOf(reflectItem).Elem().FieldByName(f.Name)
