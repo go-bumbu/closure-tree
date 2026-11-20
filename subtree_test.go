@@ -3,9 +3,13 @@ package closuretree_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 
 	closuretree "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
@@ -401,6 +405,229 @@ func TestSubtreeIDsOnLargeTree(t *testing.T) {
 			count("prune", largeRealSubtree-largeHiddenSubtree, docs)
 			count("per node", largeRealSubtree-1, docs, closuretree.PerNode())
 			count("direct children", 4, closuretree.DepthRange(1, 1))
+		})
+	}
+}
+
+// pairCounts counts the pairs per ancestor through a derived table, FROM (?) AS cp GROUP BY
+// cp.ancestor_id, and returns the counts by ancestor name; the virtual root is named "root". The
+// map is never nil, so it compares equal to an empty map literal.
+func pairCounts(t *testing.T, gdb *gorm.DB, id map[string]uint, pairs *gorm.DB) map[string]int64 {
+	t.Helper()
+	names := map[uint]string{0: "root"}
+	for name, nodeID := range id {
+		names[nodeID] = name
+	}
+	var rows []struct {
+		AncestorID uint
+		N          int64
+	}
+	err := gdb.Table("(?) AS cp", pairs).Select("cp.ancestor_id AS ancestor_id, COUNT(*) AS n").
+		Group("cp.ancestor_id").Scan(&rows).Error
+	if err != nil {
+		t.Fatalf("count the pairs: %v", err)
+	}
+	counts := map[string]int64{}
+	for _, r := range rows {
+		name, ok := names[r.AncestorID]
+		if !ok {
+			name = fmt.Sprintf("unknown id %d", r.AncestorID)
+		}
+		counts[name] = r.N
+	}
+	return counts
+}
+
+// pairChecker builds the pairs of the fixture tenant and compares the counts per ancestor.
+type pairChecker struct {
+	t   *testing.T
+	gdb *gorm.DB
+	ct  *closuretree.Tree
+	id  map[string]uint
+}
+
+func (c pairChecker) check(what string, want map[string]int64, opts ...closuretree.ReadOption) {
+	c.t.Helper()
+	pairs, err := c.ct.ClosurePairs(tenantF, opts...)
+	if err != nil {
+		c.t.Fatalf("%s: %v", what, err)
+	}
+	if diff := cmp.Diff(want, pairCounts(c.t, c.gdb, c.id, pairs)); diff != "" {
+		c.t.Errorf("%s (-want +got):\n%s", what, diff)
+	}
+}
+
+func TestClosurePairs(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, id := filterTree(t, db)
+			c := pairChecker{t, gdb, ct, id}
+			// every node is paired with itself (depth 0) and with each of its descendants
+			all := map[string]int64{"a": 6, "a1": 1, "x": 4, "x1": 1, "x2": 2, "x21": 1, "b": 2, "b1": 1}
+			c.check("no options", all)
+			withRoot := maps.Clone(all)
+			withRoot["root"] = 8
+			c.check("with the virtual root", withRoot, closuretree.IncludeVirtualRoot())
+			c.check("strictly below", map[string]int64{"a": 5, "x": 3, "x2": 1, "b": 1}, closuretree.DepthRange(1, -1))
+			c.check("direct children", map[string]int64{"a": 2, "x": 2, "x2": 1, "b": 1}, closuretree.DepthRange(1, 1))
+			c.check("two ancestors", map[string]int64{"a": 6, "b": 2}, closuretree.ForAncestors(id["a"], id["b"]))
+			c.check("an empty ancestor set selects nothing", map[string]int64{}, closuretree.ForAncestors())
+			c.check("the virtual root is only included when asked for", map[string]int64{"a": 6},
+				closuretree.ForAncestors(id["a"], 0))
+			c.check("the virtual root named and asked for", map[string]int64{"a": 6, "root": 8},
+				closuretree.ForAncestors(id["a"], 0), closuretree.IncludeVirtualRoot())
+		})
+	}
+}
+
+func TestClosurePairsFiltered(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, id := filterTree(t, db)
+			c := pairChecker{t, gdb, ct, id}
+			// with a filter the descendant and the ancestor must match; nodes in between are not
+			// checked, so a still counts x1, x2 and x21 below the non-matching x
+			active := closuretree.Filter(closuretree.IsNull("archived_at"))
+			filtered := map[string]int64{"a": 5, "a1": 1, "x1": 1, "x2": 2, "x21": 1, "b": 2, "b1": 1}
+			c.check("filter", filtered, active)
+			c.check("a NULL comparison counts as no match", filtered, closuretree.Filter(closuretree.Eq("note", "keep")))
+			c.check("PerNode changes nothing", filtered, active, closuretree.PerNode())
+			filteredRoot := maps.Clone(filtered)
+			filteredRoot["root"] = 7 // the virtual root always matches
+			c.check("filter with the virtual root", filteredRoot, active, closuretree.IncludeVirtualRoot())
+		})
+	}
+}
+
+func TestClosurePairsErrors(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			_, ct, _ := filterTree(t, db)
+			var cases []errCase
+			add := func(what string, want error, sub *gorm.DB, err error) {
+				cases = append(cases, errCase{what, sub, err, want})
+			}
+			p, err := ct.ClosurePairs("")
+			add("empty tenant", closuretree.ErrEmptyTenant, p, err)
+			p, err = ct.ClosurePairs(tenantF, closuretree.Filter(closuretree.Eq("nope", 1)))
+			add("unknown column", closuretree.ErrUnknownColumn, p, err)
+			p, err = ct.ClosurePairs(tenantF, closuretree.DepthRange(-1, 2))
+			add("invalid range", closuretree.ErrInvalidDepthRange, p, err)
+			for _, e := range cases {
+				e.verify(t)
+			}
+		})
+	}
+}
+
+// A node of another tenant is paired only in that tenant, and the pairs of the fixture tenant do
+// not change.
+func TestClosurePairsTenants(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, id := filterTree(t, db)
+			item := &filterNode{Name: "o1", Kind: "doc"}
+			if err := ct.Add(context.Background(), item, nil, nil, "other"); err != nil {
+				t.Fatal(err)
+			}
+			id["o1"] = item.NodeId
+			c := pairChecker{t, gdb, ct, id}
+			c.check("the fixture tenant keeps its pairs", map[string]int64{
+				"a": 6, "a1": 1, "x": 4, "x1": 1, "x2": 2, "x21": 1, "b": 2, "b1": 1, "root": 8,
+			}, closuretree.IncludeVirtualRoot())
+			other, err := ct.ClosurePairs("other", closuretree.IncludeVirtualRoot())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// the node with itself, and with the virtual root
+			want := map[string]int64{"o1": 1, "root": 1}
+			if diff := cmp.Diff(want, pairCounts(t, gdb, id, other)); diff != "" {
+				t.Errorf("pairs of the other tenant (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// The three output columns, joined in a caller's query inside a transaction, see the uncommitted
+// rows although the Tree is not bound to it.
+func TestClosurePairsInsideATransaction(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, id := filterTree(t, db)
+			ctx := context.Background()
+			pairs, err := ct.ClosurePairs(tenantF, closuretree.ForAncestors(id["x"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = gdb.Transaction(func(tx *gorm.DB) error {
+				if err := ct.WithTx(tx).Add(ctx, &filterNode{Name: "new", Kind: "doc"}, up(id["x1"]), nil, tenantF); err != nil {
+					return err
+				}
+				var rows []struct {
+					AncestorID   uint
+					DescendantID uint
+					Depth        int
+					Name         string
+				}
+				q := tx.Table(ct.NodeTableName()+" AS n").
+					Select("cp.ancestor_id, cp.descendant_id, cp.depth, n.name").
+					Joins("JOIN (?) AS cp ON cp.descendant_id = n.node_id", pairs).
+					Order("cp.depth, n.name")
+				if err := q.Scan(&rows).Error; err != nil {
+					return err
+				}
+				// x at depth 0; x1 and x2 at depth 1; "new" and x21 at depth 2
+				if len(rows) != 5 || rows[0].Name != "x" || rows[0].Depth != 0 || rows[3].Name != "new" || rows[3].Depth != 2 || rows[3].AncestorID != id["x"] {
+					t.Errorf("pairs of x with the uncommitted node: %+v", rows)
+				}
+				return errRollback
+			})
+			if !errors.Is(err, errRollback) {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Node 5 has 1365 nodes in its subtree, node 21 has 341 (itself included in both).
+func TestClosurePairsOnLargeTree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large tree")
+	}
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct := largeTree(t, db)
+			counts := func(what string, want5, want21 int64, opts ...closuretree.ReadOption) {
+				t.Helper()
+				pairs, err := ct.ClosurePairs(tenantF, append(opts, closuretree.ForAncestors(5, 21))...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				within(t, what, func() error {
+					var rows []struct {
+						AncestorID uint
+						N          int64
+					}
+					err := gdb.Table(ct.NodeTableName()+" AS n").Select("cp.ancestor_id AS ancestor_id, COUNT(*) AS n").
+						Joins("JOIN (?) AS cp ON cp.descendant_id = n.node_id", pairs).
+						Group("cp.ancestor_id").Order("cp.ancestor_id").Scan(&rows).Error
+					if err == nil && (len(rows) != 2 || rows[0].N != want5 || rows[1].N != want21) {
+						t.Errorf("%s: %+v", what, rows)
+					}
+					return err
+				})
+			}
+			counts("unfiltered", 1365, 341)
+			// node 85 does not match; its 84 descendants do, and nodes in between are not checked
+			counts("filtered", 1364, 340, closuretree.Filter(closuretree.Eq("kind", "doc")))
+			within(t, "every pair of the tenant", func() error {
+				pairs, err := ct.ClosurePairs(tenantF)
+				if err != nil {
+					return err
+				}
+				var n int64
+				return gdb.Table("(?) AS cp", pairs).Count(&n).Error
+			})
 		})
 	}
 }

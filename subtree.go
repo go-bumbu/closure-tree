@@ -99,3 +99,34 @@ func (ct *Tree) subtree(tenant string, ancestors any, opts []ReadOption) (*gorm.
 func (ct *Tree) subquery(sql string, args []any) *gorm.DB {
 	return ct.db.Session(&gorm.Session{NewDB: true}).Raw(sql, args...)
 }
+
+// ClosurePairs returns a subquery that selects the closure rows of the tenant as the columns
+// ancestor_id, descendant_id and depth, for the caller to join or aggregate. It executes nothing.
+// The three column names are public API and stay stable. It is meant as a derived table, for
+// aggregates per ancestor, for example the number of nodes in each subtree:
+//
+//	db.Table("(?) AS cp", pairs).Select("cp.ancestor_id, COUNT(*)").Group("cp.ancestor_id")
+//
+// Every node is paired with itself at depth 0 and with each of its descendants. ClosurePairs honours
+// the read options Filter, Unfiltered, DepthRange, ForAncestors and IncludeVirtualRoot; the others
+// are ignored. With a filter the descendant and the ancestor must both match; nodes in between are
+// not checked, and the virtual root always matches. ForAncestors restricts the ancestors and binds
+// one value per id; ForAncestors without ids selects nothing. The virtual root (ancestor 0) appears
+// only with IncludeVirtualRoot, also when ForAncestors names it. The depth range defaults to 0 and
+// below.
+func (ct *Tree) ClosurePairs(tenant string, opts ...ReadOption) (*gorm.DB, error) {
+	tenant, err := validateTenant(tenant)
+	if err != nil {
+		return nil, err
+	}
+	p, err := ct.planRead(opts)
+	if err != nil {
+		return nil, err
+	}
+	depth := depthRange{min: 0, max: -1}
+	if p.depth != nil {
+		depth = *p.depth
+	}
+	sqlstr, args := ct.pairsSQL(p, tenant, depth)
+	return ct.subquery(sqlstr, args), nil
+}

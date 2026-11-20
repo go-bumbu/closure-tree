@@ -325,3 +325,38 @@ func (ct *Tree) subtreeSQL(p *readPlan, tenant string, ancestors any, depth dept
 	s.add("      AND "+notMatch+"\n  )", nargs...)
 	return s.b.String(), s.args
 }
+
+// pairsSQL selects ancestor_id, descendant_id and depth of the closure rows within the depth range.
+// The virtual root (ancestor 0) is left out unless the plan asks for it, and ForAncestors restricts
+// the ancestors; ForAncestors without ids selects nothing. With conditions the node table is joined
+// twice: the descendant must match, and so must the ancestor, except the virtual root, which has no
+// node row and always matches. Nodes in between are not checked, and PerNode is not used.
+func (ct *Tree) pairsSQL(p *readPlan, tenant string, depth depthRange) (string, []any) {
+	var s sqlBuf
+	s.add("SELECT r.ancestor_id, r.descendant_id, r.depth\n")
+	s.add("FROM " + ct.relationsTbl + " AS r\n")
+	descMatch, dargs := ct.matchSQL("d", p.conds)
+	ancMatch, aargs := ct.matchSQL("a", p.conds)
+	if descMatch != "" {
+		s.add(ct.orderedJoin() + " " + ct.nodesTbl + " AS d ON d.node_id = r.descendant_id AND d.tenant = r.tenant\n")
+		s.add("LEFT JOIN " + ct.nodesTbl + " AS a ON a.node_id = r.ancestor_id AND a.tenant = r.tenant\n")
+	}
+	s.add("WHERE r.tenant = ? AND r.depth >= ?", tenant, depth.min)
+	if depth.max >= 0 {
+		s.add(" AND r.depth <= ?", depth.max)
+	}
+	if !p.virtualRoot {
+		s.add(" AND r.ancestor_id <> 0")
+	}
+	switch {
+	case p.hasAncestors && len(p.ancestors) == 0:
+		s.add(" AND 1 = 0")
+	case p.hasAncestors:
+		s.add(" AND r.ancestor_id IN ?", p.ancestors)
+	}
+	if descMatch != "" {
+		s.add("\n  AND "+descMatch, dargs...)
+		s.add(" AND (r.ancestor_id = 0 OR "+ancMatch+")", aargs...)
+	}
+	return s.b.String(), s.args
+}
