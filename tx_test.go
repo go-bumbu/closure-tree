@@ -256,7 +256,7 @@ func TestWithTxPreparedStatements(t *testing.T) {
 	}
 }
 
-// Review focus 1: a handle that is not a transaction.
+// A handle that is not a transaction: the copy behaves like the base Tree and LockTenant refuses.
 func TestWithTxPlainHandle(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -276,7 +276,7 @@ func TestWithTxPlainHandle(t *testing.T) {
 	}
 }
 
-// Review focus 5.
+// WithTx(nil) panics at the call with a message that names WithTx.
 func TestWithTxNilPanics(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -312,7 +312,7 @@ func TestLockTenantNeedsTransaction(t *testing.T) {
 			if err := ct.LockTenant(ctx, ""); !errors.Is(err, closuretree.ErrEmptyTenant) {
 				t.Errorf("empty tenant: want ErrEmptyTenant, got %v", err)
 			}
-			// review focus 1
+			// a handle that is not a transaction cannot hold the lock
 			plain := ct.WithTx(gdb.Session(&gorm.Session{}))
 			if err := plain.LockTenant(ctx, tenant1); !errors.Is(err, closuretree.ErrNotInTransaction) {
 				t.Errorf("plain handle: want ErrNotInTransaction, got %v", err)
@@ -417,7 +417,12 @@ func TestPostgresOwnTransactionsUnderRepeatableReadDefault(t *testing.T) {
 				}
 			}
 			setDefault("repeatable read")
-			t.Cleanup(func() { setDefault("read committed") })
+			t.Cleanup(func() {
+				reset := fmt.Sprintf("ALTER DATABASE %q RESET default_transaction_isolation", name)
+				if err := gdb.Exec(reset).Error; err != nil {
+					t.Errorf("reset default isolation: %v", err)
+				}
+			})
 			var level string
 			if err := gdb.Raw("SHOW default_transaction_isolation").Scan(&level).Error; err != nil {
 				t.Fatal(err)

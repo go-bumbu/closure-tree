@@ -164,14 +164,15 @@ A new node is placed first among its siblings; pass `closuretree.PlaceLast()` to
 Each node carries a `SortOrder float64` field (stored as `REAL`/`DOUBLE` in the database). The library
 manages this value automatically — callers never set it directly.
 
-**Placing nodes:** both `Add` and `Update` accept an `afterNodeID` parameter, and `Add` and
-`GetOrAdd` also accept the `PlaceLast()` option:
+**Placing nodes:** `Add`, `GetOrAdd` and `Update` take an `afterNodeID` parameter (a `*uint`), and
+`Add` and `GetOrAdd` also accept the `PlaceLast()` option. The meaning differs per method:
 
-| `afterNodeID` / option | Behaviour |
-|---|---|
-| `0` (or `nil`) | Place first among siblings (the default for `Add` and `GetOrAdd`) |
-| `someID` | Place immediately after that sibling |
-| `closuretree.PlaceLast()` | Place after the current last sibling |
+| `afterNodeID` / option | `Add` and `GetOrAdd` | `Update` |
+|---|---|---|
+| `nil` | Place first among siblings (the default) | No reordering; a node moved to a new parent is appended last there |
+| `0` (`&0` for `Update`) | Place first among siblings | Place first among siblings |
+| `someID` | Place immediately after that sibling | Place immediately after that sibling |
+| `closuretree.PlaceLast()` | Place after the current last sibling | Not available |
 
 ```GO
 err := tree.Add(ctx, &Tag{Name: "x"}, &parentID, nil, "user1", closuretree.PlaceLast())
@@ -223,8 +224,8 @@ err := db.Transaction(func(tx *gorm.DB) error {
 * `WithTx` returns a cheap copy of the tree bound to the transaction; create one per transaction.
   Reads on the copy see the transaction's uncommitted rows.
 * Inside the transaction, use the copy returned by `WithTx` for that tenant: calling the original
-  tree for the same tenant from inside the transaction waits on the transaction's own lock (a
-  deadlock on PostgreSQL and MySQL, a busy error on SQLite).
+  tree for the same tenant from inside the transaction waits on the transaction's own lock, so it
+  blocks: forever, or until a lock or busy timeout fails it.
 * A tree error rolls back only the tree's own work (to a savepoint the tree takes) and leaves your
   transaction usable; you decide whether to commit or roll back.
 * After a successful tree write the tenant lock is held until your transaction ends, so do not hold

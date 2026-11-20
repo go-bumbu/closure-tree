@@ -28,8 +28,10 @@ func TestDeleteRecurseMany(t *testing.T) {
 		{"an id of another tenant", []uint{7}, 0, all},
 		{"no ids", nil, 0, all},
 		{"5000 ids", seq(1, 5000), 6, []uint{}},
-		// a node and its descendant in different chunks: node 1 is in the first, its descendant 6 in the last
-		{"nested across chunks", append(append([]uint{1}, seq(20000, 20600)...), 6), 4, []uint{3, 5}},
+		// a node and its descendant in different chunks: the ancestor (1) is in the first chunk, the descendant (6) in a later one
+		{"nested across chunks, ancestor first", append(append([]uint{1}, seq(20000, 20600)...), 6), 4, []uint{3, 5}},
+		// the same pair in the other order: the descendant (6) is in the first chunk, the ancestor (1) in a later one
+		{"nested across chunks, descendant first", append(append([]uint{6}, seq(20000, 20600)...), 1), 4, []uint{3, 5}},
 	}
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {

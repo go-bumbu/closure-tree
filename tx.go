@@ -22,8 +22,8 @@ var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; us
 // transaction ends (PostgreSQL and MySQL).
 //
 // Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
-// the transaction waits on the transaction's own lock (a deadlock on PostgreSQL and MySQL, a busy
-// error on SQLite). A transaction that writes to several trees or tenants must take their locks in
+// the transaction waits on the transaction's own lock, so it blocks: forever, or until a lock or
+// busy timeout fails it. A transaction that writes to several trees or tenants must take their locks in
 // one fixed order everywhere, for example with LockTenant up front. Call Migrate on ct, not on the
 // copy: it runs DDL, and MySQL commits the transaction implicitly on DDL.
 //

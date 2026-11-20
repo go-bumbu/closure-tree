@@ -53,7 +53,7 @@ func TestAddPlaceLast(t *testing.T) {
 			if tight, err := ct.NeedsRenormalize(ctx, p.NodeId, tenant1, closuretree.DefaultHalvingsBuffer); err != nil || tight {
 				t.Errorf("gap reported as tight: %v %v", tight, err)
 			}
-			// review focus 2: a nil option is ignored
+			// a nil option is ignored
 			if n := add("nilopt", up(p.NodeId), nil); n.SortOrder != -20 {
 				t.Errorf("nil option: want the default first place at -20, got %v", n.SortOrder)
 			}
