@@ -501,3 +501,58 @@ func TestReadIntoDifferentFieldTypes(t *testing.T) {
 		})
 	}
 }
+
+func TestFilterOnSingleNodeReads(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := buildFilterTree(t, ct)
+			ctx := context.Background()
+
+			active := closuretree.Filter(closuretree.IsNull("archived_at"))
+			kept := closuretree.Filter(closuretree.Eq("note", "keep")) // note is NULL on x
+			var n filterNode
+			child := func(parent, name string, opts ...closuretree.ReadOption) bool {
+				t.Helper()
+				found, err := ct.FindChild(ctx, id[parent], tenantF, &filterNode{Name: name}, []string{"Name"}, &n, opts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return found
+			}
+			for name, f := range map[string]closuretree.ReadOption{"IsNull": active, "Eq with NULL": kept} {
+				if err := ct.GetNode(ctx, id["x"], tenantF, &n, f); !errors.Is(err, closuretree.ErrNodeNotFound) {
+					t.Errorf("%s: GetNode of the non-matching node: want ErrNodeNotFound, got %v", name, err)
+				}
+				// only the node itself is checked, not the nodes above it
+				if err := ct.GetNode(ctx, id["x1"], tenantF, &n, f); err != nil || n.Name != "x1" {
+					t.Errorf("%s: GetNode below the non-matching node: %v", name, err)
+				}
+				if child("a", "x", f) {
+					t.Errorf("%s: FindChild found the non-matching child", name)
+				}
+				if !child("a", "a1", f) {
+					t.Errorf("%s: FindChild lost a matching child", name)
+				}
+				if !child("x", "x1", f) { // the parent's own match is not checked
+					t.Errorf("%s: FindChild under the non-matching parent", name)
+				}
+			}
+			if !child("a", "x") {
+				t.Error("FindChild without options must find x")
+			}
+
+			// GetOrAdd is a write: its lookup is never filtered
+			again := &filterNode{Name: "x"}
+			created, err := ct.GetOrAdd(ctx, again, id["a"], tenantF, []string{"Name"})
+			if err != nil || created || again.NodeId != id["x"] {
+				t.Errorf("GetOrAdd: created=%v id=%d err=%v", created, again.NodeId, err)
+			}
+		})
+	}
+}

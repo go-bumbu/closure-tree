@@ -79,6 +79,9 @@ func (ct *Tree) getNodeSQL(p *readPlan, nodeID uint, tenant string) (string, []a
 	s.add("  AND parent_rel.depth = 1\n")
 	s.add("  AND parent_rel.tenant = nodes.tenant\n")
 	s.add("WHERE nodes.node_id = ? AND nodes.tenant = ?", nodeID, tenant)
+	if filter, fargs := ct.matchSQL("nodes", p.conds); filter != "" {
+		s.add(" AND "+filter, fargs...)
+	}
 	s.add("\nLIMIT 1")
 	return s.b.String(), s.args
 }
@@ -96,6 +99,9 @@ func (ct *Tree) findChildSQL(p *readPlan, parentID uint, tenant, matchSQL string
 	s.add("  AND child_rel.tenant = nodes.tenant\n")
 	s.add("WHERE child_rel.ancestor_id = ? AND nodes.tenant = ?", parentID, tenant)
 	s.add(" AND "+matchSQL, matchArgs...)
+	if filter, fargs := ct.matchSQL("nodes", p.conds); filter != "" {
+		s.add(" AND "+filter, fargs...)
+	}
 	s.add("\nORDER BY nodes.sort_order ASC, nodes.node_id ASC\nLIMIT 1")
 	return s.b.String(), s.args
 }
