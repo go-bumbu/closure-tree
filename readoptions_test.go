@@ -1427,3 +1427,34 @@ func readIntoExportedPointerWrapper(t *testing.T, gdb *gorm.DB) {
 		t.Errorf("TreeDescendants into a pointer wrapper: %+v", r.PtrModel)
 	}
 }
+
+// The reads of the earlier plans ignore the new options but still validate them.
+func TestOlderReadsIgnoreNewOptions(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			buildFilterTree(t, ct)
+			ctx := context.Background()
+
+			plain, err := ct.DescendantIds(ctx, 0, 0, tenantF)
+			if err != nil {
+				t.Fatal(err)
+			}
+			with, err := ct.DescendantIds(ctx, 0, 0, tenantF, closuretree.DepthRange(0, 0), closuretree.ForAncestors(),
+				closuretree.IncludeVirtualRoot(), closuretree.Relation("Nope"), closuretree.NoPreload())
+			if err != nil || !cmp.Equal(plain, with) {
+				t.Errorf("new options changed an older read: %v, %v", with, err)
+			}
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel() // a query would fail with context.Canceled, so validation must come first
+			if _, err := ct.DescendantIds(cancelled, 0, 0, tenantF, closuretree.DepthRange(3, 1)); !errors.Is(err, closuretree.ErrInvalidDepthRange) {
+				t.Errorf("want ErrInvalidDepthRange, got %v", err)
+			}
+		})
+	}
+}

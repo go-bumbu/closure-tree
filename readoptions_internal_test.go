@@ -300,3 +300,43 @@ func TestReadIntoWrapperOfExportedModel(t *testing.T) {
 		t.Errorf("TreeDescendants into a wrapper of an exported model: %+v", *r)
 	}
 }
+
+func TestPlanReadNewOptions(t *testing.T) {
+	ct := newInternalTree(t, optNode{})
+	plan := func(opts ...ReadOption) *readPlan {
+		t.Helper()
+		p, err := ct.planRead(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if p := plan(); p.depth != nil || p.hasAncestors || p.virtualRoot || p.relation != "" || p.noPreload {
+		t.Errorf("defaults: %+v", p)
+	}
+	for _, r := range []depthRange{{0, 0}, {1, 1}, {1, -1}, {0, -1}, {2, 5}} {
+		if p := plan(DepthRange(r.min, r.max)); p.depth == nil || *p.depth != r {
+			t.Errorf("DepthRange(%d, %d): %+v", r.min, r.max, p.depth)
+		}
+	}
+	if p := plan(DepthRange(0, 0), DepthRange(1, 3)); *p.depth != (depthRange{1, 3}) {
+		t.Errorf("the last DepthRange must win: %+v", p.depth)
+	}
+	for _, bad := range [][2]int{{-1, 3}, {3, 1}, {-2, -1}} {
+		if _, err := ct.planRead([]ReadOption{DepthRange(bad[0], bad[1])}); !errors.Is(err, ErrInvalidDepthRange) {
+			t.Errorf("DepthRange(%d, %d): want ErrInvalidDepthRange, got %v", bad[0], bad[1], err)
+		}
+	}
+	ids := []uint{1, 2}
+	p := plan(ForAncestors(ids...), ForAncestors(3))
+	ids[0] = 99 // the option keeps its own copy
+	if !p.hasAncestors || !cmp.Equal([]uint{1, 2, 3}, p.ancestors) {
+		t.Errorf("ForAncestors: %+v", p)
+	}
+	if p := plan(ForAncestors()); !p.hasAncestors || len(p.ancestors) != 0 {
+		t.Errorf("ForAncestors without ids must be recorded as an empty set: %+v", p)
+	}
+	if p := plan(IncludeVirtualRoot(), Relation("Tags"), NoPreload()); !p.virtualRoot || p.relation != "Tags" || !p.noPreload {
+		t.Errorf("flags: %+v", p)
+	}
+}

@@ -18,6 +18,10 @@ import (
 // named.
 var ErrUnknownColumn = errors.New("unknown column")
 
+// ErrInvalidDepthRange is returned by every read when DepthRange has a negative minimum, or a
+// maximum that is not negative and is smaller than the minimum.
+var ErrInvalidDepthRange = errors.New("invalid depth range")
+
 type condOp uint8
 
 const (
@@ -67,7 +71,17 @@ type readConfig struct {
 	unfiltered bool
 	columns    []string
 	hasColumns bool
+
+	depth        *depthRange
+	ancestors    []uint
+	hasAncestors bool
+	virtualRoot  bool
+	relation     string
+	noPreload    bool
 }
+
+// depthRange is the range of DepthRange; max < 0 means no upper limit.
+type depthRange struct{ min, max int }
 
 // ReadOption changes how a read selects its nodes or which columns it returns.
 type ReadOption func(*readConfig)
@@ -102,6 +116,37 @@ func Columns(names ...string) ReadOption {
 	}
 }
 
+// DepthRange limits how far from the starting node a read looks: 0 is the node itself, 1 its
+// direct children, and so on. max < 0 means no upper limit. DepthRange(0, 0) is this node only,
+// DepthRange(1, -1) is everything strictly below it, DepthRange(1, 1) is the direct children. A
+// negative min, or a max that is not negative and is smaller than min, makes every read return
+// ErrInvalidDepthRange before it queries. SubtreeIDs, SubtreeIDsOf, ClosurePairs and GetLeaves
+// honour it, each with its own default; the other reads ignore it. The last DepthRange wins.
+func DepthRange(min, max int) ReadOption {
+	return func(c *readConfig) { c.depth = &depthRange{min: min, max: max} }
+}
+
+// ForAncestors limits ClosurePairs to the pairs whose ancestor is one of ids. Without ids it
+// selects nothing. The ids are copied, and several ForAncestors options are joined. The other
+// reads ignore it.
+func ForAncestors(ids ...uint) ReadOption {
+	return func(c *readConfig) {
+		c.hasAncestors = true
+		c.ancestors = append(c.ancestors, ids...)
+	}
+}
+
+// IncludeVirtualRoot makes ClosurePairs include the pairs of the virtual root (ancestor 0), which
+// it leaves out otherwise. The other reads ignore it.
+func IncludeVirtualRoot() ReadOption { return func(c *readConfig) { c.virtualRoot = true } }
+
+// Relation names the field of the leaf model that holds the relation to the nodes, for GetLeaves
+// when the model has more than one. The other reads ignore it.
+func Relation(fieldName string) ReadOption { return func(c *readConfig) { c.relation = fieldName } }
+
+// NoPreload makes GetLeaves skip loading the relation of the leaves. The other reads ignore it.
+func NoPreload() ReadOption { return func(c *readConfig) { c.noPreload = true } }
+
 type resolvedCond struct {
 	column string // database column name
 	op     condOp
@@ -112,6 +157,13 @@ type readPlan struct {
 	conds   []resolvedCond // nil means no filter
 	perNode bool
 	columns []string // database column names to select; nil means every column of the node table
+
+	depth        *depthRange // nil: the read's own default
+	ancestors    []uint      // the ids of ForAncestors
+	hasAncestors bool        // ForAncestors was given, also with no ids
+	virtualRoot  bool
+	relation     string
+	noPreload    bool
 }
 
 // column resolves a column or Go field name to the database column name of a column that exists
@@ -210,7 +262,18 @@ func (ct *Tree) planRead(opts []ReadOption) (*readPlan, error) {
 			o(&cfg)
 		}
 	}
-	p := &readPlan{perNode: cfg.perNode}
+	p := &readPlan{
+		perNode:      cfg.perNode,
+		depth:        cfg.depth,
+		ancestors:    cfg.ancestors,
+		hasAncestors: cfg.hasAncestors,
+		virtualRoot:  cfg.virtualRoot,
+		relation:     cfg.relation,
+		noPreload:    cfg.noPreload,
+	}
+	if d := cfg.depth; d != nil && (d.min < 0 || (d.max >= 0 && d.max < d.min)) {
+		return nil, fmt.Errorf("%w: %d to %d", ErrInvalidDepthRange, d.min, d.max)
+	}
 
 	switch {
 	case len(cfg.filter) > 0:
