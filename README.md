@@ -264,15 +264,20 @@ For detailed usage check out the examples in [example_test.go]
 this is a quick overview of the exposed methods, check the actual signature/doc for details.
 
 **Tree management**
-* `New(db *gorm.DB, item any) (*Tree, error)` — Return a new tree instance (runs AutoMigrate)
-* `GetNodeTableName() string` — Return the table name of the nodes you store
-* `GetClosureTableName() string` — Return the table name of the closure tree relationship
+* `New(db *gorm.DB, item any) (*Tree, error)` — Return a new tree instance; it validates the model and table names but does not create tables
+* `Migrate() error` — Create or update the tree's four tables; call it on the base tree, not on a copy bound to a transaction
+* `WithTx(tx *gorm.DB) *Tree` — Return a copy of the tree bound to your own transaction (see "Using closure-tree inside your own transaction"); panics if `tx` is nil
+* `LockTenant(ctx context.Context, tenant string) error` — Take the tenant's write lock in the transaction the tree is bound to; returns `ErrNotInTransaction` otherwise
+* `NodeTableName() string` — Return the table name of the nodes you store
+* `ClosureTableName() string` — Return the table name of the closure tree relationship
 
 **Write operations**
-* `Add(ctx, item, parentID, afterNodeID, tenant)` — Add a new node; `afterNodeID=0` places it first among siblings
-* `GetOrAdd(ctx, item, parentID, tenant, match) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths
+* `Add(ctx, item, parentID, afterNodeID, tenant, opts ...AddOption)` — Add a new node; it is placed first among its siblings unless `afterNodeID` names a sibling or the `PlaceLast()` option is given
+* `GetOrAdd(ctx, item, parentID, tenant, matchFields, opts ...AddOption) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths; takes the same placement options as `Add`
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect
 * `DeleteRecurse(ctx, nodeId, tenant)` — Delete a node and all its descendants
+* `DeleteRecurseMany(ctx, ids, tenant) (int64, error)` — Delete several nodes and their subtrees in one transaction; set semantics (duplicates and nested ids count once), returns the number of nodes deleted, never `ErrNodeNotFound` (unknown ids are ignored), id 0 returns `ErrVirtualRoot`
+* `DeleteTenant(ctx, tenant) error` — The supported way to drop a tenant's whole tree: deletes its nodes, closure rows and metadata in one transaction; the tenant's lock row is kept, and an unknown tenant is not an error
 
 **Read operations**
 * `GetNode(ctx, nodeID, tenant, item)` — Load a single node into `item`

@@ -100,3 +100,40 @@ WHERE tenant = ?
       descendant_id IN (SELECT descendant_id FROM descendants)
    OR ancestor_id  IN (SELECT descendant_id FROM descendants)
   );`
+
+// DeleteTenant deletes every node, closure row and metadata row of tenant in one transaction. It is
+// the supported way to drop a tenant's whole tree; DeleteRecurseMany rejects the virtual root. The
+// tenant's lock row is kept: on PostgreSQL a writer waiting on that row would otherwise proceed
+// without the lock. A tenant that has no rows in any of the tree's tables is not an error and
+// nothing is written. It returns ErrEmptyTenant if tenant is empty.
+func (ct *Tree) DeleteTenant(ctx context.Context, tenant string) error {
+	tenant, err := validateTenant(tenant)
+	if err != nil {
+		return err
+	}
+	known := false
+	for _, tbl := range []string{ct.nodesTbl, ct.relationsTbl, ct.metaTbl, ct.lockTbl} {
+		var found []int
+		err := ct.db.WithContext(ctx).
+			Raw(fmt.Sprintf("SELECT 1 FROM %s WHERE tenant = ? LIMIT 1", tbl), tenant).
+			Scan(&found).Error
+		if err != nil {
+			return fmt.Errorf("deleteTenant: failed to look up tenant: %w", err)
+		}
+		if len(found) > 0 {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return nil
+	}
+	return ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
+		for _, tbl := range []string{ct.nodesTbl, ct.relationsTbl, ct.metaTbl} {
+			if err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE tenant = ?", tbl), tenant).Error; err != nil {
+				return fmt.Errorf("deleteTenant: failed to delete from %s: %w", tbl, err)
+			}
+		}
+		return nil
+	})
+}
