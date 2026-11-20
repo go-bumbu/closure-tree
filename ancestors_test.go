@@ -71,12 +71,49 @@ func TestAncestors(t *testing.T) {
 	}
 }
 
+// checkItemsShape checks the errors of items that are not a pointer to a slice.
+func checkItemsShape(t *testing.T, ct *closuretree.Tree, node uint) {
+	t.Helper()
+	ctx := context.Background()
+	var one filterNode
+	if err := ct.Ancestors(ctx, node, tenantF, nil); !errors.Is(err, closuretree.ErrItemsNil) {
+		t.Errorf("nil items: %v", err)
+	}
+	if err := ct.Ancestors(ctx, node, tenantF, []filterNode{}); !errors.Is(err, closuretree.ErrItemsNotPointerToSlice) {
+		t.Errorf("a slice by value: %v", err)
+	}
+	if err := ct.Ancestors(ctx, node, tenantF, &one); !errors.Is(err, closuretree.ErrItemsNotPointerToSlice) {
+		t.Errorf("a pointer to a struct: %v", err)
+	}
+}
+
+// checkHiddenStart checks that a default filter hides a start node that does not match it, and
+// that Unfiltered shows it again.
+func checkHiddenStart(t *testing.T, ftree *closuretree.Tree, node uint) {
+	t.Helper()
+	ctx := context.Background()
+	var items []filterNode
+	if err := ftree.Ancestors(ctx, node, tenantF, &items); !errors.Is(err, closuretree.ErrNodeNotFound) {
+		t.Errorf("Ancestors of a node the default filter hides: %v", err)
+	}
+	if _, err := ftree.AncestorIds(ctx, node, tenantF); !errors.Is(err, closuretree.ErrNodeNotFound) {
+		t.Errorf("AncestorIds of a node the default filter hides: %v", err)
+	}
+	if err := ftree.Ancestors(ctx, node, tenantF, &items, closuretree.Unfiltered()); err != nil {
+		t.Errorf("Ancestors with Unfiltered: %v", err)
+	}
+	if _, err := ftree.AncestorIds(ctx, node, tenantF, closuretree.Unfiltered()); err != nil {
+		t.Errorf("AncestorIds with Unfiltered: %v", err)
+	}
+}
+
 func TestAncestorsOfUnknownNodes(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			_, ct, id := filterTree(t, db)
 			ctx := context.Background()
 			var items []filterNode
+			checkItemsShape(t, ct, id["a"])
 			notFound := map[string]error{
 				"an unknown id":            ct.Ancestors(ctx, 99999, tenantF, &items),
 				"the virtual root":         ct.Ancestors(ctx, 0, tenantF, &items),
@@ -131,6 +168,7 @@ func TestAncestorsWithOptions(t *testing.T) {
 			}
 			checkNames(t, "the default filter applies", ancestorNames(t, ftree, id, "x21"), "a", "x2")
 			checkNames(t, "Unfiltered switches it off", ancestorNames(t, ftree, id, "x21", closuretree.Unfiltered()), "a", "x", "x2")
+			checkHiddenStart(t, ftree, id["x"])
 
 			var named []filterNode
 			if err := ct.Ancestors(ctx, id["x21"], tenantF, &named, closuretree.Columns("name")); err != nil || len(named) != 3 {

@@ -1412,8 +1412,8 @@ func readIntoExportedPointerWrapper(t *testing.T, gdb *gorm.DB) {
 	}
 }
 
-// Reads that do not honour the new options ignore them but still validate them.
-func TestOlderReadsIgnoreNewOptions(t *testing.T) {
+// DescendantIds ignores DepthRange, ForAncestors, IncludeVirtualRoot, Relation and NoPreload, but still validates them.
+func TestDescendantIdsIgnoresOptionsItDoesNotHonour(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
@@ -1432,7 +1432,7 @@ func TestOlderReadsIgnoreNewOptions(t *testing.T) {
 			with, err := ct.DescendantIds(ctx, 0, 0, tenantF, closuretree.DepthRange(0, 0), closuretree.ForAncestors(),
 				closuretree.IncludeVirtualRoot(), closuretree.Relation("Nope"), closuretree.NoPreload())
 			if err != nil || !cmp.Equal(plain, with) {
-				t.Errorf("new options changed an older read: %v, %v", with, err)
+				t.Errorf("DescendantIds must ignore the options it does not honour: %v, %v", with, err)
 			}
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel() // a query would fail with context.Canceled, so validation must come first
