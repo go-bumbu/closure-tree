@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 var validTableName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -70,6 +71,10 @@ type Tree struct {
 	dialect      dialect
 	col2FieldMap map[string]string
 	model        any // node model retained so Migrate can AutoMigrate it
+
+	schema        *schema.Schema // the parsed model schema
+	modelColumns  []string       // the columns a read selects by default
+	defaultFilter []resolvedCond // set by WithFilter
 }
 
 // New returns a Tree for the given item on the specified gorm database. It parses and validates the
@@ -137,6 +142,8 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		lockTbl:      lockTbl,
 		dialect:      dialectOf(db),
 		model:        item,
+		schema:       stmt.Schema,
+		modelColumns: modelColumnsOf(stmt.Schema),
 	}
 
 	return ct, nil
