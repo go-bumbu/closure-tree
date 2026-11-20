@@ -135,15 +135,16 @@ func (ct *Tree) descendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDepth 
 			s.add("\n  AND "+filter, fargs...)
 		} else {
 			// prune: reject a node when any node on the path from the requested parent down to it,
-			// both ends included, does not match. The virtual root has no node row and always passes.
+			// both ends included, does not match. Those are the candidate's own ancestors at a
+			// distance of at most ct.depth, its distance to the requested parent. The virtual root
+			// has no node row, so the join drops it and it always passes.
 			notMatch, nargs := ct.notMatchSQL("mid", p.conds)
 			s.add("\n  AND NOT EXISTS (\n")
 			s.add("    SELECT 1\n")
-			s.add("    FROM " + ct.relationsTbl + " AS up\n")
-			s.add("    JOIN " + ct.relationsTbl + " AS down ON down.ancestor_id = up.descendant_id AND down.tenant = up.tenant\n")
-			s.add("    JOIN " + ct.nodesTbl + " AS mid ON mid.node_id = up.descendant_id AND mid.tenant = up.tenant\n")
-			s.add("    WHERE up.ancestor_id = ? AND up.tenant = ?\n", parent, tenant)
-			s.add("      AND down.descendant_id = nodes.node_id\n")
+			s.add("    FROM " + ct.relationsTbl + " AS path\n")
+			s.add("    JOIN " + ct.nodesTbl + " AS mid ON mid.node_id = path.ancestor_id AND mid.tenant = path.tenant\n")
+			s.add("    WHERE path.descendant_id = nodes.node_id AND path.tenant = nodes.tenant\n")
+			s.add("      AND path.depth <= ct.depth\n")
 			s.add("      AND "+notMatch+"\n  )", nargs...)
 		}
 	}
@@ -179,8 +180,10 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 		if parent != 0 {
 			// the requested parent must match too; the virtual root has no row and always matches
 			reqMatch, rargs := ct.matchSQL("req", p.conds)
-			s.add("\n\t\tAND EXISTS (\n\t\t\tSELECT 1 FROM "+ct.nodesTbl+" AS req\n\t\t\tWHERE req.node_id = ? AND req.tenant = ? AND "+reqMatch+"\n\t\t)",
-				append([]any{parent, tenant}, rargs...)...)
+			s.add("\n\t\tAND EXISTS (\n")
+			s.add("\t\t\tSELECT 1 FROM " + ct.nodesTbl + " AS req\n")
+			s.add("\t\t\tWHERE req.node_id = ? AND req.tenant = ?", parent, tenant)
+			s.add(" AND "+reqMatch+"\n\t\t)", rargs...)
 		}
 	}
 	s.add("\n\n\tUNION ALL\n\n")
@@ -188,9 +191,10 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 	s.add("\tSELECT\n\t\t" + cols + ",\n")
 	s.add("\t\tt.node_id AS ancestor_id,\n")
 	s.add("\t\tt.cte_depth + 1 AS cte_depth\n")
+	join := ct.orderedJoin()
 	s.add("\tFROM Tree AS t\n")
-	s.add("\tJOIN "+ct.relationsTbl+" AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?\n", tenant)
-	s.add("\tJOIN " + ct.nodesTbl + " AS nodes ON nodes.node_id = ct.descendant_id\n")
+	s.add("\t"+join+" "+ct.relationsTbl+" AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?\n", tenant)
+	s.add("\t" + join + " " + ct.nodesTbl + " AS nodes ON nodes.node_id = ct.descendant_id\n")
 	s.add("\tWHERE nodes.tenant = ? AND t.cte_depth < ?", tenant, maxDepth)
 	if filter != "" {
 		s.add(" AND "+filter, fargs...)
@@ -202,4 +206,20 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 		s.add("\tSELECT Tree.*, Tree.ancestor_id AS parent_id FROM Tree ORDER BY cte_depth;")
 	}
 	return s.b.String(), s.args
+}
+
+// orderedJoin returns the inner join keyword that keeps the tables in their written order. The
+// recursive step of a tree read must go from the working table to its closure rows to the nodes;
+// that is the only sensible order. On tables without statistics SQLite and MySQL otherwise may
+// reorder it and scan every node of the tenant per step. SQLite keeps the order of a CROSS JOIN,
+// MySQL that of a STRAIGHT_JOIN; PostgreSQL plans this step well with a plain JOIN.
+func (ct *Tree) orderedJoin() string {
+	switch ct.dialect {
+	case dialectSQLite:
+		return "CROSS JOIN"
+	case dialectMySQL:
+		return "STRAIGHT_JOIN"
+	default:
+		return "JOIN"
+	}
 }

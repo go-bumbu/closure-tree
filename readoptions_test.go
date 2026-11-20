@@ -1061,3 +1061,140 @@ func TestWithFilterAndWithTxCompose(t *testing.T) {
 		})
 	}
 }
+
+// largeTreeNodes and the ids below describe the tree TestFilteredReadsOnLargeTree builds: ids
+// 1..8000, node 1 is the only root and the parent of node i > 1 is (i-2)/4+1, so every node has
+// four children (4p-2 .. 4p+1) until the ids run out. Levels hold 1, 4, 16, 64, 256, 1024, 4096
+// and 2539 nodes.
+const (
+	largeTreeNodes = 8000
+	// largeHiddenRoot is the last node of level 4. It does not match the filter; its subtree has
+	// 1+4+16+64 = 85 nodes (levels 4 to 7; its level-8 children would have ids above 8000).
+	largeHiddenRoot    = 85
+	largeHiddenSubtree = 85
+	// largeRealParent is a real node above largeHiddenRoot (85 -> 21 -> 5); its subtree has
+	// 1+4+16+64+256+1024 = 1365 nodes.
+	largeRealParent  = 5
+	largeRealSubtree = 1365
+	// largeReadBound is the time one read may take. Without table statistics on SQLite, the
+	// statements before the fix took seconds for these reads (the pruning DescendantIds about 3 s
+	// with the CGO driver and 7 s with the pure-Go one, the filtered TreeDescendantsIds about 20 s
+	// with the CGO driver), because the planner scanned far more rows than the subtree. The
+	// current statements take at most about 80 ms on every database. One second is missed by the
+	// old statements three to twenty times over and met by the new ones more than ten times over.
+	largeReadBound = time.Second
+)
+
+// buildLargeTree inserts the node rows of the tree described at largeTreeNodes in batches,
+// builds the closure rows with BuildFromParents, and analyzes the tables on PostgreSQL and MySQL.
+// SQLite is left without statistics, its normal state.
+func buildLargeTree(t *testing.T, gdb *gorm.DB, db testdbs.TargetDb, ct *closuretree.Tree) {
+	t.Helper()
+	rows := make([]filterNode, largeTreeNodes)
+	links := make([]closuretree.ParentLink, largeTreeNodes)
+	for i := range rows {
+		id := uint(i + 1)
+		kind := "doc"
+		if id == largeHiddenRoot {
+			kind = "other"
+		}
+		rows[i] = filterNode{Node: closuretree.Node{NodeId: id, Tenant: tenantF}, Name: fmt.Sprintf("n%d", id), Kind: kind}
+		links[i] = closuretree.ParentLink{NodeID: id}
+		if id > 1 {
+			links[i].ParentID = (id-2)/4 + 1
+		}
+	}
+	if err := gdb.CreateInBatches(&rows, 500).Error; err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+	if err := ct.BuildFromParents(context.Background(), tenantF, links); err != nil {
+		t.Fatal(err)
+	}
+	analyze := ""
+	switch db.DbType() {
+	case testdbs.DBTypePostgres:
+		analyze = "ANALYZE "
+	case testdbs.DBTypeMysql:
+		analyze = "ANALYZE TABLE "
+	}
+	if analyze != "" {
+		for _, tbl := range []string{ct.NodeTableName(), ct.ClosureTableName()} {
+			if err := gdb.Exec(analyze + tbl).Error; err != nil {
+				t.Fatalf("analyze %s: %v", tbl, err)
+			}
+		}
+	}
+}
+
+// countTree returns the number of nodes in a tree read.
+func countTree(nodes []*closuretree.TreeNode) int {
+	n := len(nodes)
+	for _, c := range nodes {
+		n += countTree(c.Children)
+	}
+	return n
+}
+
+// Filtered reads on a large tree return the right number of nodes within largeReadBound, also on
+// SQLite without table statistics.
+func TestFilteredReadsOnLargeTree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large tree")
+	}
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			buildLargeTree(t, gdb, db, ct)
+			ctx := context.Background()
+			docs := closuretree.Filter(closuretree.Eq("kind", "doc"))
+
+			// read runs fn, at most twice, and checks the count of the faster run and its time.
+			read := func(what string, want int, fn func() (int, error)) {
+				t.Helper()
+				best := time.Duration(1<<63 - 1)
+				for try := 0; try < 2 && best > largeReadBound; try++ {
+					start := time.Now()
+					got, err := fn()
+					elapsed := time.Since(start)
+					if err != nil {
+						t.Fatalf("%s: %v", what, err)
+					}
+					if got != want {
+						t.Errorf("%s: want %d nodes, got %d", what, want, got)
+					}
+					best = min(best, elapsed)
+				}
+				t.Logf("%-40s %v", what, best)
+				if best > largeReadBound {
+					t.Errorf("%s: took %v, want at most %v", what, best, largeReadBound)
+				}
+			}
+			for _, parent := range []struct {
+				name    string
+				id      uint
+				subtree int // descendants of the parent, the parent itself excluded
+			}{
+				{"virtual root", 0, largeTreeNodes},
+				{"real node", largeRealParent, largeRealSubtree - 1},
+			} {
+				read(parent.name+": DescendantIds, prune", parent.subtree-largeHiddenSubtree, func() (int, error) {
+					ids, err := ct.DescendantIds(ctx, parent.id, 0, tenantF, docs)
+					return len(ids), err
+				})
+				read(parent.name+": DescendantIds, per node", parent.subtree-1, func() (int, error) {
+					ids, err := ct.DescendantIds(ctx, parent.id, 0, tenantF, docs, closuretree.PerNode())
+					return len(ids), err
+				})
+				read(parent.name+": TreeDescendantsIds", parent.subtree-largeHiddenSubtree, func() (int, error) {
+					tree, err := ct.TreeDescendantsIds(ctx, parent.id, 0, tenantF, docs)
+					return countTree(tree), err
+				})
+			}
+		})
+	}
+}
