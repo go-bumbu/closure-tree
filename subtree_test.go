@@ -156,6 +156,149 @@ func TestSubtreeIDsReuse(t *testing.T) {
 	}
 }
 
+// checkRerun embeds a subquery, runs it directly, embeds it again and runs it directly again. The
+// two embeddings must give the same non-empty rows, and so must the two direct runs.
+func checkRerun(t *testing.T, what string, embed, direct func() ([]string, error)) {
+	t.Helper()
+	var got [4][]string
+	for i, run := range []func() ([]string, error){embed, direct, embed, direct} {
+		rows, err := run()
+		if err != nil {
+			t.Errorf("%s, run %d: %v", what, i+1, err)
+		}
+		got[i] = rows
+	}
+	if len(got[0]) == 0 || !slices.Equal(got[0], got[2]) {
+		t.Errorf("%s: embedded before a direct run %v, after it %v", what, got[0], got[2])
+	}
+	if len(got[1]) == 0 || !slices.Equal(got[1], got[3]) {
+		t.Errorf("%s: first direct run %v, second %v", what, got[1], got[3])
+	}
+}
+
+// A subquery value stays usable after it was executed directly with Scan.
+func TestSubqueriesRunDirectly(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, id := filterTree(t, db)
+			silent := gdb.Session(&gorm.Session{Logger: logger.Discard})
+			sub, err := ct.SubtreeIDs(tenantF, []uint{id["x"]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkRerun(t, "SubtreeIDs", func() ([]string, error) {
+				names := []string{}
+				err := silent.Table(ct.NodeTableName()).Where("node_id IN (?)", sub).Order("name").Pluck("name", &names).Error
+				return names, err
+			}, func() ([]string, error) {
+				var ids []uint
+				err := sub.Scan(&ids).Error
+				slices.Sort(ids)
+				return strings.Fields(fmt.Sprint(ids)), err
+			})
+			pairs, err := ct.ClosurePairs(tenantF, closuretree.ForAncestors(id["x"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkRerun(t, "ClosurePairs", func() ([]string, error) {
+				var n int64
+				err := silent.Table("(?) AS cp", pairs).Count(&n).Error
+				return []string{fmt.Sprint(n)}, err
+			}, func() ([]string, error) {
+				var rows []relRow
+				err := pairs.Scan(&rows).Error
+				out := make([]string, 0, len(rows))
+				for _, r := range rows {
+					out = append(out, fmt.Sprint(r))
+				}
+				slices.Sort(out)
+				return out, err
+			})
+		})
+	}
+}
+
+// blobNode has a byte-slice column, to filter on byte-slice values.
+type blobNode struct {
+	closuretree.Node
+	Name string
+	Tag  []byte
+}
+
+// blobTree returns a migrated Tree of blobNode with the root nodes p, q and r, whose tags are
+// "abc", "zz" and "mm", and the node id of p.
+func blobTree(t *testing.T, db testdbs.TargetDb) (*gorm.DB, *closuretree.Tree, uint) {
+	t.Helper()
+	gdb := connAndClose(t, db)
+	dropTreeTables(gdb, blobNode{})
+	ct, err := newTestTree(gdb, blobNode{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p uint
+	for _, n := range []*blobNode{{Name: "p", Tag: []byte("abc")}, {Name: "q", Tag: []byte("zz")}, {Name: "r", Tag: []byte("mm")}} {
+		if err := ct.Add(context.Background(), n, nil, nil, tenantF); err != nil {
+			t.Fatal(err)
+		}
+		if n.Name == "p" {
+			p = n.NodeId
+		}
+	}
+	return gdb, ct, p
+}
+
+// blobSelections returns the node ids a filter selects through DescendantIds, through a
+// SubtreeIDs value embedded once and embedded twice in one query, and through ClosurePairs.
+func blobSelections(t *testing.T, gdb *gorm.DB, ct *closuretree.Tree, f closuretree.ReadOption) map[string][]uint {
+	t.Helper()
+	silent := gdb.Session(&gorm.Session{Logger: logger.Discard})
+	got := map[string][]uint{}
+	ids, err := ct.DescendantIds(context.Background(), 0, 0, tenantF, f)
+	if err != nil {
+		t.Errorf("DescendantIds: %v", err)
+	}
+	got["DescendantIds"] = ids
+	sub, err := ct.SubtreeIDs(tenantF, []uint{0}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pluck := func(what string, q *gorm.DB, column string) {
+		ids := []uint{}
+		if err := q.Order(column).Pluck(column, &ids).Error; err != nil {
+			t.Errorf("%s: %v", what, err)
+		}
+		got[what] = ids
+	}
+	nodes := ct.NodeTableName()
+	pluck("SubtreeIDs", silent.Table(nodes).Where("node_id IN (?)", sub), "node_id")
+	pluck("SubtreeIDs twice", silent.Table(nodes).Where("node_id IN (?) AND node_id IN (?)", sub, sub), "node_id")
+	pairs, err := ct.ClosurePairs(tenantF, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pluck("ClosurePairs", silent.Table("(?) AS cp", pairs), "descendant_id")
+	return got
+}
+
+// A byte-slice value in a filter is bound as one value, also inside an embedded subquery.
+func TestFilterOnBytes(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, p := blobTree(t, db)
+			for what, f := range map[string]closuretree.ReadOption{
+				"In": closuretree.Filter(closuretree.In("tag", []byte("abc"), []byte("nope"))),
+				"Eq": closuretree.Filter(closuretree.Eq("tag", []byte("abc"))),
+			} {
+				for read, ids := range blobSelections(t, gdb, ct, f) {
+					if !slices.Equal([]uint{p}, ids) {
+						t.Errorf("%s through %s: want [%d], got %v", what, read, p, ids)
+					}
+				}
+			}
+		})
+	}
+}
+
 // errCase is the outcome of a call and the error it must return.
 type errCase struct {
 	what string

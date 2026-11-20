@@ -97,8 +97,10 @@ func (ct *Tree) subtree(tenant string, ancestors any, opts []ReadOption) (*gorm.
 
 // subquery wraps a statement as a *gorm.DB that executes nothing by itself: a fresh session of the
 // Tree's database with the statement set by Raw. gorm renders it into the statement it is passed to.
+// The final Session makes every use start from a copy of the statement; without it, a direct run
+// such as Scan clears the SQL, and the value would render as nothing afterwards.
 func (ct *Tree) subquery(sql string, args []any) *gorm.DB {
-	return ct.db.Session(&gorm.Session{NewDB: true}).Raw(sql, args...)
+	return ct.db.Session(&gorm.Session{NewDB: true}).Raw(sql, args...).Session(&gorm.Session{})
 }
 
 // ClosurePairs returns a subquery that selects the closure rows of the tenant as the columns

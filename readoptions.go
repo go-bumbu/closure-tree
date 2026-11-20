@@ -214,7 +214,7 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 			if v == nil {
 				rc.op = opIsNull
 			} else {
-				rc.values = []any{v}
+				rc.values = []any{oneValue(v)}
 			}
 		case opIn:
 			for _, v := range c.values {
@@ -222,8 +222,8 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 					return nil, err
 				}
 			}
-			if len(c.values) > 0 {
-				rc.values = c.values
+			for _, v := range c.values {
+				rc.values = append(rc.values, oneValue(v))
 			}
 		}
 		out = append(out, rc)
@@ -254,6 +254,26 @@ func checkFilterValue(column string, v any) error {
 		return fmt.Errorf("filter on %q: a value of type %T is a list; pass the values one by one", column, v)
 	}
 	return nil
+}
+
+// bytesValue binds a byte slice as one value. gorm renders a subquery again when it embeds it in
+// another statement, and then expands a plain byte slice that directly follows "(" into its bytes,
+// as the first value of an IN list does.
+type bytesValue []byte
+
+// Value returns the bytes.
+func (b bytesValue) Value() (driver.Value, error) { return []byte(b), nil }
+
+// oneValue returns a byte slice of any type as a bytesValue, unless it is a driver.Valuer, and any
+// other value unchanged.
+func oneValue(v any) any {
+	if _, ok := v.(driver.Valuer); ok || v == nil {
+		return v
+	}
+	if rv := reflect.ValueOf(v); rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() == reflect.Uint8 {
+		return bytesValue(rv.Bytes())
+	}
+	return v
 }
 
 // planRead applies the options and validates them against the model. Every read runs it, so an
