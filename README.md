@@ -164,15 +164,16 @@ A new node is placed first among its siblings; pass `closuretree.PlaceLast()` to
 Each node carries a `SortOrder float64` field (stored as `REAL`/`DOUBLE` in the database). The library
 manages this value automatically — callers never set it directly.
 
-**Placing nodes:** `Add`, `GetOrAdd` and `Update` take an `afterNodeID` parameter (a `*uint`), and
-`Add` and `GetOrAdd` also accept the `PlaceLast()` option. The meaning differs per method:
+**Placing nodes:** `Add` and `Update` take an `afterNodeID` parameter (a `*uint`), and `Add` and
+`GetOrAdd` accept the `PlaceLast()` option. `GetOrAdd` has no `afterNodeID`: a node it creates is
+placed first among its siblings, or last with `PlaceLast()`. The meaning differs per method:
 
-| `afterNodeID` / option | `Add` and `GetOrAdd` | `Update` |
+| `afterNodeID` / option | `Add` | `Update` |
 |---|---|---|
 | `nil` | Place first among siblings (the default) | No reordering; a node moved to a new parent is appended last there |
-| `0` (`&0` for `Update`) | Place first among siblings | Place first among siblings |
-| `someID` | Place immediately after that sibling | Place immediately after that sibling |
-| `closuretree.PlaceLast()` | Place after the current last sibling | Not available |
+| `&0` | Place first among siblings | Place first among siblings |
+| `&someID` | Place immediately after that sibling | Place immediately after that sibling |
+| `closuretree.PlaceLast()` | Place after the current last sibling (also for `GetOrAdd`) | Not available |
 
 ```GO
 err := tree.Add(ctx, &Tag{Name: "x"}, &parentID, nil, "user1", closuretree.PlaceLast())
@@ -305,6 +306,9 @@ err = tree.BuildFromParents(ctx, "user1", links)
 * PostgreSQL: rows copied with explicit ids leave the id sequence behind, and the next `Add` fails
   with a duplicate key. Advance the sequence after copying:
   `SELECT setval(pg_get_serial_sequence('categories', 'node_id'), (SELECT MAX(node_id) FROM categories))`.
+* PostgreSQL: run `ANALYZE` on the node table and the closure table after a bulk build
+  (`ANALYZE categories; ANALYZE closure_tree_rel_categories;`). Freshly loaded tables have no
+  statistics, and the planner then chooses slow plans.
 
 ---
 
@@ -333,7 +337,7 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 
 **Read operations**
 * `GetNode(ctx, nodeID, tenant, item)` — Load a single node into `item`
-* `FindChild(ctx, parentID, tenant, match, out) (found bool, err error)` — Find a direct child by query-by-example (the non-zero fields of `match`), tenant-scoped; populates `out` like `GetNode`
+* `FindChild(ctx, parentID, tenant, match, matchFields, out) (found bool, err error)` — Find a direct child whose fields named in `matchFields` equal those of `match` (zero values included), tenant-scoped; populates `out` like `GetNode`
 * `IsDescendant(ctx, ancestorID, descendantID, tenant) (bool, error)` — Check ancestry
 * `IsChildOf(ctx, nodeID, parentID, tenant) (bool, error)` — Check direct parent relationship
 * `Descendants(ctx, parent, maxDepth, tenant, items)` — Flat list of all nested children (ordered by `sort_order ASC, node_id ASC`)

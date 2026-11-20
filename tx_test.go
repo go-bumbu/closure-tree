@@ -200,6 +200,9 @@ func TestWithTxReadYourWrites(t *testing.T) {
 func TestWithTxSingleConnection(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
+			if !strings.HasPrefix(db.DbType(), "Sqlite") {
+				t.Skip("the single-connection case is SQLite specific")
+			}
 			gdb := connAndClose(t, db) // one database per test name
 			dropTreeTables(gdb, TestPayload{})
 			ct, err := newTestTree(gdb, TestPayload{})
@@ -207,9 +210,6 @@ func TestWithTxSingleConnection(t *testing.T) {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
-			if !strings.HasPrefix(db.DbType(), "Sqlite") {
-				t.Skip("the single-connection case is SQLite specific")
-			}
 			sqlDB, err := gdb.DB()
 			if err != nil {
 				t.Fatal(err)
@@ -277,24 +277,15 @@ func TestWithTxPlainHandle(t *testing.T) {
 	}
 }
 
-// WithTx(nil) panics at the call with a message that names WithTx.
+// WithTx(nil) panics at the call with a message that names WithTx. The check needs no database:
+// it comes before anything else, so a zero Tree is enough.
 func TestWithTxNilPanics(t *testing.T) {
-	for _, db := range testdbs.DBs() {
-		t.Run(db.DbType(), func(t *testing.T) {
-			gdb := connAndClose(t, db) // one database per test name
-			dropTreeTables(gdb, TestPayload{})
-			ct, err := newTestTree(gdb, TestPayload{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() {
-				if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "WithTx") {
-					t.Errorf("want a panic naming WithTx, got %v", r)
-				}
-			}()
-			ct.WithTx(nil)
-		})
-	}
+	defer func() {
+		if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "WithTx") {
+			t.Errorf("want a panic naming WithTx, got %v", r)
+		}
+	}()
+	new(closuretree.Tree).WithTx(nil)
 }
 
 func TestLockTenantNeedsTransaction(t *testing.T) {
@@ -578,4 +569,93 @@ func waitWrittenOrBlocked(t *testing.T, ctx context.Context, gdb *gorm.DB, db te
 			seen = 0
 		}
 	}
+}
+
+// GetOrAdd, Renormalize and RenormalizeAll on a Tree bound to a caller's transaction: their writes
+// show inside the transaction, and its rollback undoes them.
+func TestWithTxSortOrderWritesRollBack(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			p := &TestPayload{Name: "p"}
+			for _, n := range []*TestPayload{p, {Name: "r2"}} { // r2 is placed first: sort_order -10
+				if err := ct.Add(ctx, n, nil, nil, tenant1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range []string{"c1", "c2"} {
+				if err := ct.Add(ctx, &TestPayload{Name: name}, up(p.NodeId), nil, tenant1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := readSortState(t, gdb, ct, tenant1)
+
+			err = gdb.Transaction(func(tx *gorm.DB) error {
+				tt := ct.WithTx(tx)
+				if created, err := tt.GetOrAdd(ctx, &TestPayload{Name: "c0"}, p.NodeId, tenant1, []string{"Name"}); err != nil || !created {
+					t.Errorf("GetOrAdd: created=%v err=%v", created, err)
+				}
+				if created, err := tt.GetOrAdd(ctx, &TestPayload{Name: "c0"}, p.NodeId, tenant1, []string{"Name"}); err != nil || created {
+					t.Errorf("GetOrAdd again: want the child added in the transaction, created=%v err=%v", created, err)
+				}
+				if err := tt.Renormalize(ctx, p.NodeId, tenant1); err != nil {
+					t.Errorf("Renormalize: %v", err)
+				}
+				// Renormalize removed the meta row of p, so only the root group is left to do.
+				if n, err := tt.RenormalizeAll(ctx, tenant1, 9999); err != nil || n != 1 {
+					t.Errorf("RenormalizeAll: n=%d err=%v", n, err)
+				}
+				// each add placed its node first: the roots are r2, p and the children c0, c2, c1
+				want := map[string]float64{"r2": 10, "p": 20, "c0": 10, "c2": 20, "c1": 30}
+				if diff := cmp.Diff(want, readSortState(t, tx, ct, tenant1).Orders); diff != "" {
+					t.Errorf("sort orders inside the transaction (-want +got):\n%s", diff)
+				}
+				return errRollback
+			})
+			if !errors.Is(err, errRollback) {
+				t.Fatalf("want the rollback error, got %v", err)
+			}
+			if diff := cmp.Diff(before, readSortState(t, gdb, ct, tenant1)); diff != "" {
+				t.Errorf("the rollback left changes (-before +after):\n%s", diff)
+			}
+			assertConsistent(t, gdb, ct, tenant1)
+		})
+	}
+}
+
+// sortState is a tenant's sort_order per node name and min_halvings per parent id.
+type sortState struct {
+	Orders map[string]float64
+	Meta   map[uint]int
+}
+
+// readSortState reads the tenant's sortState through db.
+func readSortState(t *testing.T, db *gorm.DB, ct *closuretree.Tree, tenant string) sortState {
+	t.Helper()
+	var nodes []TestPayload
+	if err := db.Table(ct.NodeTableName()).Where("tenant = ?", tenant).Find(&nodes).Error; err != nil {
+		t.Fatal(err)
+	}
+	var meta []struct {
+		ParentID    uint
+		MinHalvings int
+	}
+	if err := db.Table("closure_tree_meta_"+ct.NodeTableName()).Select("parent_id, min_halvings").
+		Where("tenant = ?", tenant).Scan(&meta).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := sortState{Orders: map[string]float64{}, Meta: map[uint]int{}}
+	for _, n := range nodes {
+		s.Orders[n.Name] = n.SortOrder
+	}
+	for _, m := range meta {
+		s.Meta[m.ParentID] = m.MinHalvings
+	}
+	return s
 }

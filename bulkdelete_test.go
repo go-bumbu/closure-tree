@@ -150,6 +150,17 @@ func TestDeleteTenant(t *testing.T) {
 				t.Errorf("tenant 2 nodes: %d", got.Nodes)
 			}
 
+			// a tenant that has only its lock row: no error, the lock row stays, nothing else is written
+			if err := ct.DeleteTenant(ctx, tenant1); err != nil {
+				t.Errorf("lock row only: %v", err)
+			}
+			if got := countTenant(t, gdb, ct, tenant1); got != (tenantCounts{Lock: 1}) {
+				t.Errorf("lock row only, after DeleteTenant: %+v", got)
+			}
+			if diff := cmp.Diff(otherBefore, closureRows(t, gdb, ct, tenant2)); diff != "" {
+				t.Errorf("lock row only: tenant 2 changed (-before +after):\n%s", diff)
+			}
+
 			// an unknown tenant: no error, nothing written
 			if err := ct.DeleteTenant(ctx, "nobody"); err != nil {
 				t.Errorf("unknown tenant: %v", err)

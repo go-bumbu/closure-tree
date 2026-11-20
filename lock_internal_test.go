@@ -2,6 +2,7 @@ package closuretree
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/go-bumbu/testdbs"
@@ -16,25 +17,24 @@ type lockRetryNode struct {
 func TestLockTenantRetry(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			gdb := db.ConnDbName("lockretry")
-			ct, err := New(gdb, lockRetryNode{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if ct.dialect == dialectSQLite {
+			if strings.HasPrefix(db.DbType(), "Sqlite") {
 				t.Skip("SQLite takes no row lock")
 			}
-			if err := ct.Migrate(); err != nil {
-				t.Fatal(err)
+			ct := newDBInternalTree(t, db, lockRetryNode{})
+			gdb := ct.db
+			del := func(t *testing.T, tx *gorm.DB) {
+				t.Helper()
+				if err := tx.Exec("DELETE FROM "+ct.lockTbl+" WHERE tenant = ?", "t").Error; err != nil {
+					t.Fatalf("delete the lock row: %v", err)
+				}
 			}
-			del := func(tx *gorm.DB) { tx.Exec("DELETE FROM "+ct.lockTbl+" WHERE tenant = ?", "t") }
 
 			t.Run("retries when the row vanishes once", func(t *testing.T) {
 				calls := 0
 				err := gdb.Transaction(func(tx *gorm.DB) error {
 					return ct.dialect.lockTenantHook(tx, ct.lockTbl, "t", func() {
 						if calls == 0 {
-							del(tx)
+							del(t, tx)
 						}
 						calls++
 					})
@@ -47,7 +47,7 @@ func TestLockTenantRetry(t *testing.T) {
 			t.Run("gives up after lockAttempts", func(t *testing.T) {
 				calls := 0
 				err := gdb.Transaction(func(tx *gorm.DB) error {
-					return ct.dialect.lockTenantHook(tx, ct.lockTbl, "t", func() { del(tx); calls++ })
+					return ct.dialect.lockTenantHook(tx, ct.lockTbl, "t", func() { del(t, tx); calls++ })
 				})
 				if !errors.Is(err, ErrLockNotAcquired) || calls != lockAttempts {
 					t.Fatalf("want ErrLockNotAcquired after %d attempts, got err=%v calls=%d", lockAttempts, err, calls)

@@ -14,8 +14,9 @@ var savepointSeq atomic.Uint64
 
 // writeTx runs fn inside a transaction that first takes the per-tenant lock, so structural writes
 // for a tenant serialize instead of racing on the lock-free guards in Add/Update/moveInTx. Every
-// mutating operation (Add, Update, DeleteRecurse, GetOrAdd, Renormalize) goes through here. The
-// dialect-specific lock acquisition lives in dialect.lockTenant; see the concurrency note on Tree.
+// mutating operation (Add, GetOrAdd, Update, DeleteRecurse, DeleteRecurseMany, DeleteTenant,
+// Renormalize, BuildFromParents) and LockTenant go through here. The dialect-specific lock
+// acquisition lives in dialect.lockTenant; see the concurrency note on Tree.
 // The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL).
 //
 // When the Tree is bound to a caller's transaction (WithTx), writeTx opens no transaction of its

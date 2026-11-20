@@ -245,8 +245,10 @@ ORDER BY n.sort_order ASC, n.node_id ASC`, ct.nodesTbl, ct.relationsTbl)
 // RenormalizeAll renormalizes every sibling group under tenant where the halvings
 // remaining is at or below halvingsBuffer. Returns the number of groups renormalized.
 // Use DefaultHalvingsBuffer for the recommended early-warning threshold.
-// Each group is renormalized in its own transaction. On error, returns the number
-// of groups successfully renormalized so far along with the error.
+// It reads the groups to renormalize before taking any lock, and then renormalizes each group in a
+// write of its own, as Renormalize does: its own transaction, or a savepoint on a Tree bound to a
+// transaction (WithTx). On error, returns the number of groups successfully renormalized so far
+// along with the error.
 func (ct *Tree) RenormalizeAll(ctx context.Context, tenant string, halvingsBuffer int) (int, error) {
 	var err error
 	tenant, err = validateTenant(tenant)

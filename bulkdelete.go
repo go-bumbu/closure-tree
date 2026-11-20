@@ -105,7 +105,9 @@ WHERE tenant = ?
 // the supported way to drop a tenant's whole tree; DeleteRecurseMany rejects the virtual root. The
 // tenant's lock row is kept: on PostgreSQL a writer waiting on that row would otherwise proceed
 // without the lock. A tenant that has no rows in any of the tree's tables is not an error and
-// nothing is written. It returns ErrEmptyTenant if tenant is empty.
+// nothing is written. That existence check runs before the lock is taken; on a Tree bound to a
+// transaction (WithTx) it reads that transaction's snapshot. It returns ErrEmptyTenant if tenant is
+// empty.
 func (ct *Tree) DeleteTenant(ctx context.Context, tenant string) error {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

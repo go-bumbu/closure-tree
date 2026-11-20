@@ -32,9 +32,18 @@ func Rebuild() BuildOption { return func(c *buildConfig) { c.rebuild = true } }
 func OrphansToRoot() BuildOption { return func(c *buildConfig) { c.orphansToRoot = true } }
 
 var (
+	// ErrLinksMismatch is returned by BuildFromParents when a node of the tenant has no link, a link
+	// names a node that does not exist, a node is linked twice, or a link has node id 0. The message
+	// lists the ids.
 	ErrLinksMismatch = errors.New("the links do not match the tenant's nodes")
-	ErrOrphanLink    = errors.New("a link names a parent that is not a node of the tenant")
-	ErrLinkCycle     = errors.New("the links contain a cycle")
+	// ErrOrphanLink is returned by BuildFromParents when a link's parent is not a node of the
+	// tenant, unless the OrphansToRoot option is given.
+	ErrOrphanLink = errors.New("a link names a parent that is not a node of the tenant")
+	// ErrLinkCycle is returned by BuildFromParents when the links form a cycle, including a node
+	// that is its own parent. The message names one node of each cycle.
+	ErrLinkCycle = errors.New("the links contain a cycle")
+	// ErrClosureExists is returned by BuildFromParents when the tenant already has closure rows,
+	// unless the Rebuild option is given.
 	ErrClosureExists = errors.New("the tenant already has closure rows; use Rebuild")
 )
 

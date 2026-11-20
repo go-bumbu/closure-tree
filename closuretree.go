@@ -44,16 +44,17 @@ var (
 
 // Tree represents the access to the closure tree allowing to CRUD nodes on the tree of items.
 //
-// Concurrency: a Tree is safe to share across goroutines. Every structural write (Add, Update,
-// DeleteRecurse, GetOrAdd, Renormalize) first takes a per-tenant lock, so writes within a tenant
-// serialize and cannot corrupt the tree. This prevents the patterns that would otherwise race under
-// the default isolation level: two conflicting moves ("move A under B" and "move B under A") forming
-// a cycle, Add racing DeleteRecurse of the same parent leaving orphaned nodes or stale closure rows,
-// and two GetOrAdd calls creating duplicate siblings. Writes for different tenants run concurrently,
-// and reads never take the lock. The exception is MySQL at its default isolation level (REPEATABLE
-// READ) while a caller's transaction is open (see WithTx): there tree writes of different tenants
-// can wait on each other, and deadlock. A deadlock (error 1213) means MySQL has already rolled back
-// the whole caller's transaction; the caller must roll it back and retry it.
+// Concurrency: a Tree is safe to share across goroutines. Every structural write (Add, GetOrAdd,
+// Update, DeleteRecurse, DeleteRecurseMany, DeleteTenant, Renormalize, BuildFromParents), and
+// LockTenant, first takes a per-tenant lock, so writes within a tenant serialize and cannot corrupt
+// the tree. This prevents the patterns that would otherwise race under the default isolation level:
+// two conflicting moves ("move A under B" and "move B under A") forming a cycle, Add racing
+// DeleteRecurse of the same parent leaving orphaned nodes or stale closure rows, and two GetOrAdd
+// calls creating duplicate siblings. Writes for different tenants run concurrently, and reads never
+// take the lock. The exception is MySQL at its default isolation level (REPEATABLE READ) while a
+// caller's transaction is open (see WithTx): there tree writes of different tenants can wait on
+// each other, and deadlock. A deadlock (error 1213) means MySQL has already rolled back the whole
+// caller's transaction; the caller must roll it back and retry it.
 //
 // The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MySQL (released
 // when the transaction ends); on SQLite, which already serializes writers per database, it is the
@@ -323,14 +324,17 @@ func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, 
 	if last {
 		var halvings int
 		sortOrder, halvings, err = ct.lastSortOrder(tx, parentID, 0, tenant)
-		if err == nil {
-			err = ct.upsertMetaHalvings(tx, parentID, tenant, halvings)
+		if err != nil {
+			return fmt.Errorf("unable to compute sort order: %w", err)
+		}
+		if err := ct.upsertMetaHalvings(tx, parentID, tenant, halvings); err != nil {
+			return fmt.Errorf("unable to update sort order metadata: %w", err)
 		}
 	} else {
 		sortOrder, err = ct.placeAmongSiblings(tx, parentID, afterNodeID, tenant)
-	}
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 
 	// Set Node fields (including SortOrder) on the item before Create

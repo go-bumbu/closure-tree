@@ -57,7 +57,8 @@ func (ct *Tree) updateFieldsInTx(tx *gorm.DB, id uint, updateMap map[string]any,
 // Update modifies a node's fields and/or moves it to a new parent, and/or reorders it, atomically.
 //
 // Pass a non-nil item to update fields (must embed Node; Node fields are ignored).
-// Pass a non-nil newParentID to move the node: &0 moves to root, &someID moves under someID.
+// Pass a non-nil newParentID to move the node: &0 moves to root, &someID moves under someID. A move
+// without afterNodeID appends the node last among its new siblings.
 // Pass a non-nil afterNodeID to set sort order: &0 places first, &someID places after that sibling.
 // Passing all three nil returns ErrNoOp.
 func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint, afterNodeID *uint, tenant string) error {

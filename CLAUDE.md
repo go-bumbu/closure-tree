@@ -28,7 +28,7 @@ LOCAL_SQLITE=true go test -run TestTreeGetNode ./...
 
 ### Core files
 
-- **`closuretree.go`** — `Tree` struct and all CRUD methods. All SQL is raw via `fmt.Sprintf` with table name substitution (never user input). `New` validates table names with a regex before any migration. Write operations are transactional via `db.Transaction(...)`.
+- **`closuretree.go`** — `Tree` struct and all CRUD methods. All SQL is raw via `fmt.Sprintf` with table name substitution (never user input). `New` validates table names with a regex before any migration. Write operations go through `writeTx` in `lock.go`, not `db.Transaction(...)` directly.
 - **`node.go`** — `Node` struct to embed in user types. `ParentId` is read-only (populated via LEFT JOIN on read, ignored on write). Reflection helpers `hasNode`/`hasNodeType`/`findNodeValue` support multi-level embedding.
 - **`leaves.go`** — `Leaf` struct for many-to-many targets. `GetLeaves` auto-discovers the `many2many:` GORM tag, validates the m2m table name, then joins through the closure table.
 - **`tx.go`** — `WithTx` (a copy of the Tree bound to the caller's transaction), `LockTenant`, `ErrNotInTransaction`.
