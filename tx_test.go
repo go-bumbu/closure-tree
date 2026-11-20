@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -291,6 +292,93 @@ func TestWithTxNilPanics(t *testing.T) {
 				}
 			}()
 			ct.WithTx(nil)
+		})
+	}
+}
+
+func TestLockTenantNeedsTransaction(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := ct.LockTenant(ctx, tenant1); !errors.Is(err, closuretree.ErrNotInTransaction) {
+				t.Errorf("base Tree: want ErrNotInTransaction, got %v", err)
+			}
+			if err := ct.LockTenant(ctx, ""); !errors.Is(err, closuretree.ErrEmptyTenant) {
+				t.Errorf("empty tenant: want ErrEmptyTenant, got %v", err)
+			}
+			// review focus 1
+			plain := ct.WithTx(gdb.Session(&gorm.Session{}))
+			if err := plain.LockTenant(ctx, tenant1); !errors.Is(err, closuretree.ErrNotInTransaction) {
+				t.Errorf("plain handle: want ErrNotInTransaction, got %v", err)
+			}
+		})
+	}
+}
+
+// A holds the lock from its first statement, reads, then moves x under y. B tries the opposite
+// move meanwhile. A must win and B must see A's move.
+func TestLockTenantFirstSerializesConflictingMoves(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			x, y := &TestPayload{Name: "x"}, &TestPayload{Name: "y"}
+			for _, n := range []*TestPayload{x, y} {
+				if err := ct.Add(ctx, n, nil, nil, tenant1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			locked := make(chan struct{})
+			var errB error
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-locked
+				deadline := time.Now().Add(10 * time.Second)
+				for {
+					errB = ct.Update(ctx, y.NodeId, nil, up(x.NodeId), nil, tenant1)
+					if errB == nil || !isTransientDBErr(errB) || time.Now().After(deadline) {
+						return
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			}()
+			errA := gdb.Transaction(func(tx *gorm.DB) error {
+				tt := ct.WithTx(tx)
+				if err := tt.LockTenant(ctx, tenant1); err != nil {
+					return err
+				}
+				var probe TestPayload
+				if err := tt.GetNode(ctx, x.NodeId, tenant1, &probe); err != nil { // a plain read after the lock
+					return err
+				}
+				close(locked)
+				time.Sleep(200 * time.Millisecond) // let B reach the lock
+				return tt.Update(ctx, x.NodeId, nil, up(y.NodeId), nil, tenant1)
+			})
+			wg.Wait()
+			if errA != nil {
+				t.Fatalf("A: %v", errA)
+			}
+			if !errors.Is(errB, closuretree.ErrInvalidMove) {
+				t.Fatalf("B: want ErrInvalidMove, got %v", errB)
+			}
+			rel := ct.ClosureTableName()
+			if relCount(t, gdb, rel, y.NodeId, x.NodeId, tenant1) != 1 || relCount(t, gdb, rel, x.NodeId, y.NodeId, tenant1) != 0 {
+				t.Fatal("want x under y and no cycle")
+			}
 		})
 	}
 }

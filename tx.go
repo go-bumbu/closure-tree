@@ -1,6 +1,14 @@
 package closuretree
 
-import "gorm.io/gorm"
+import (
+	"context"
+	"errors"
+
+	"gorm.io/gorm"
+)
+
+// ErrNotInTransaction is returned by LockTenant on a Tree that is not bound to a transaction.
+var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; use WithTx")
 
 // WithTx returns a copy of the Tree that runs every read and write on tx, usually a transaction
 // the caller opened. The copy shares everything else with ct; only the database handle differs, so
@@ -29,4 +37,25 @@ func (ct *Tree) WithTx(tx *gorm.DB) *Tree {
 func (ct *Tree) inTransaction() bool {
 	committer, ok := ct.db.Statement.ConnPool.(gorm.TxCommitter)
 	return ok && committer != nil
+}
+
+// LockTenant takes the tenant's write lock in the transaction the Tree is bound to (see WithTx). It
+// is meant to be the first statement of the caller's transaction: the guards inside later tree
+// writes (cycle check, sibling order, duplicate check) are plain reads, and taking the lock first
+// makes them see every write committed before the lock was granted, where the database's isolation
+// level allows it. LockTenant behaves like a tree write with an empty body, with the same savepoint
+// handling; the lock is held until the caller's transaction ends (PostgreSQL and MySQL). Later
+// tree writes in the same transaction take the lock again, which is harmless.
+//
+// It returns ErrEmptyTenant for an empty tenant, and ErrNotInTransaction when the Tree is not
+// inside a transaction, because the lock would be released at once.
+func (ct *Tree) LockTenant(ctx context.Context, tenant string) error {
+	tenant, err := validateTenant(tenant)
+	if err != nil {
+		return err
+	}
+	if !ct.inTransaction() {
+		return ErrNotInTransaction
+	}
+	return ct.writeTx(ctx, tenant, func(*gorm.DB) error { return nil })
 }

@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -70,20 +71,35 @@ func (d dialect) metaUpsertSQL(metaTbl string) string {
 		metaTbl, metaTbl)
 }
 
+// lockAttempts bounds how often lockTenantHook repeats "ensure the row, then lock it" when the
+// lock row disappears between the two statements.
+const lockAttempts = 3
+
+// ErrLockNotAcquired is returned when the tenant's lock row was deleted between ensuring it and
+// locking it, on every one of lockAttempts attempts.
+var ErrLockNotAcquired = errors.New("unable to lock the tenant: the lock row disappeared")
+
 // lockTenant takes the tenant's anchor row as the FIRST statement of a write transaction, so that
 // conflicting structural writes within a tenant run one at a time (see writeTx and the concurrency
 // note on Tree). It upserts the anchor row (so it always exists) and then locks it:
 //
 //   - PostgreSQL / MySQL: SELECT ... FOR UPDATE holds the row until the transaction ends, released
-//     automatically on commit or rollback.
+//     automatically on commit or rollback. If the select returns no row, because the row was
+//     deleted after the upsert, the upsert and the lock are repeated up to lockAttempts times
+//     before ErrLockNotAcquired is returned.
 //   - SQLite: there is no FOR UPDATE and none is needed — SQLite already serializes writers per
 //     database, and the anchor upsert takes that writer lock up front.
 //
 // Taking the lock before the operation's own reads is what makes their guards see committed state;
 // this matters under MySQL REPEATABLE READ, where the read view is fixed at the first read.
 func (d dialect) lockTenant(tx *gorm.DB, lockTbl, tenant string) error {
-	switch d {
-	case dialectSQLite:
+	return d.lockTenantHook(tx, lockTbl, tenant, nil)
+}
+
+// lockTenantHook is lockTenant with a test hook: afterEnsure, when not nil, runs between the upsert
+// of the lock row and the locking select, on every attempt. SQLite never calls it.
+func (d dialect) lockTenantHook(tx *gorm.DB, lockTbl, tenant string, afterEnsure func()) error {
+	if d == dialectSQLite {
 		// The upsert acquires SQLite's database write lock; that is the serialization.
 		if err := tx.Exec(fmt.Sprintf(
 			`INSERT INTO %s (tenant) VALUES (?) ON CONFLICT(tenant) DO UPDATE SET tenant = excluded.tenant`,
@@ -91,25 +107,37 @@ func (d dialect) lockTenant(tx *gorm.DB, lockTbl, tenant string) error {
 			return fmt.Errorf("unable to acquire tenant lock: %w", err)
 		}
 		return nil
-	case dialectMySQL:
-		if err := tx.Exec(fmt.Sprintf(
-			`INSERT INTO %s (tenant) VALUES (?) ON DUPLICATE KEY UPDATE tenant = tenant`,
-			lockTbl), tenant).Error; err != nil {
-			return fmt.Errorf("unable to ensure tenant lock row: %w", err)
+	}
+	for range lockAttempts {
+		if err := d.ensureLockRow(tx, lockTbl, tenant); err != nil {
+			return err
 		}
-	default: // postgres and any other engine supporting SELECT ... FOR UPDATE
-		if err := tx.Exec(fmt.Sprintf(
-			`INSERT INTO %s (tenant) VALUES (?) ON CONFLICT (tenant) DO NOTHING`,
-			lockTbl), tenant).Error; err != nil {
-			return fmt.Errorf("unable to ensure tenant lock row: %w", err)
+		if afterEnsure != nil {
+			afterEnsure()
+		}
+		// Hold the row for the rest of the transaction. Scan the value so the query executes, and
+		// count the rows to know whether one was locked.
+		var locked string
+		res := tx.Raw(fmt.Sprintf(
+			`SELECT tenant FROM %s WHERE tenant = ? FOR UPDATE`, lockTbl), tenant).Scan(&locked)
+		if res.Error != nil {
+			return fmt.Errorf("unable to acquire tenant lock: %w", res.Error)
+		}
+		if res.RowsAffected > 0 {
+			return nil
 		}
 	}
-	// Hold the row for the rest of the transaction. Scan the value so the query executes.
-	var locked string
-	if err := tx.Raw(fmt.Sprintf(
-		`SELECT tenant FROM %s WHERE tenant = ? FOR UPDATE`, lockTbl), tenant).
-		Scan(&locked).Error; err != nil {
-		return fmt.Errorf("unable to acquire tenant lock: %w", err)
+	return ErrLockNotAcquired
+}
+
+// ensureLockRow inserts the tenant's lock row unless it already exists (PostgreSQL and MySQL).
+func (d dialect) ensureLockRow(tx *gorm.DB, lockTbl, tenant string) error {
+	stmt := `INSERT INTO %s (tenant) VALUES (?) ON CONFLICT (tenant) DO NOTHING` // postgres and any other engine supporting SELECT ... FOR UPDATE
+	if d == dialectMySQL {
+		stmt = `INSERT INTO %s (tenant) VALUES (?) ON DUPLICATE KEY UPDATE tenant = tenant`
+	}
+	if err := tx.Exec(fmt.Sprintf(stmt, lockTbl), tenant).Error; err != nil {
+		return fmt.Errorf("unable to ensure tenant lock row: %w", err)
 	}
 	return nil
 }
