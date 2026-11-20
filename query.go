@@ -101,18 +101,9 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 // match gives an empty result; parent 0 always matches. Column names of every option are
 // validated, so an unknown one returns ErrUnknownColumn.
 func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any, opts ...ReadOption) (err error) {
-	sliceVal, err := pointerToSlice(items)
+	structType, add, err := appendTarget(items)
 	if err != nil {
 		return err
-	}
-	// Descendants intentionally accepts both value ([]T) and pointer ([]*T) element slices;
-	// TreeDescendants, by contrast, requires []*T because it links child pointers into a tree.
-	// Every row becomes a new T (see scanEach).
-	elemType := sliceVal.Type().Elem()
-	elemIsPtr := elemType.Kind() == reflect.Pointer
-	structType := elemType
-	if elemIsPtr {
-		structType = elemType.Elem()
 	}
 
 	tenant, err = validateTenant(tenant)
@@ -128,12 +119,31 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 		maxDepth = absMaxDepth
 	}
 	sqlstr, args := ct.descendantsSQL(p, false, parent, maxDepth, tenant)
-	return ct.scanEach(ctx, sqlstr, args, structType, "failed to execute query", func(elem, _ reflect.Value) {
+	return ct.scanEach(ctx, sqlstr, args, structType, "failed to execute query", add)
+}
+
+// appendTarget checks that items is a pointer to a slice and returns the struct type each row is
+// copied into and the function that appends a scanned element to the slice. Descendants and
+// Ancestors intentionally accept both value ([]T) and pointer ([]*T) element slices;
+// TreeDescendants, by contrast, requires []*T because it links child pointers into a tree. Every
+// row becomes a new T (see scanEach).
+func appendTarget(items any) (reflect.Type, func(elem, row reflect.Value), error) {
+	sliceVal, err := pointerToSlice(items)
+	if err != nil {
+		return nil, nil, err
+	}
+	elemType := sliceVal.Type().Elem()
+	elemIsPtr := elemType.Kind() == reflect.Pointer
+	structType := elemType
+	if elemIsPtr {
+		structType = elemType.Elem()
+	}
+	return structType, func(elem, _ reflect.Value) {
 		if !elemIsPtr {
 			elem = elem.Elem()
 		}
 		sliceVal.Set(reflect.Append(sliceVal, elem))
-	})
+	}, nil
 }
 
 // DescendantIds behaves the same as Descendants but only returns the node IDs for the search query.

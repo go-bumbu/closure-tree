@@ -261,3 +261,49 @@ func seedNodes(t *testing.T, gdb *gorm.DB, db testdbs.TargetDb, tenant string, n
 		}
 	}
 }
+
+// filterTree returns a database for the running test, a migrated Tree of filterNode on it with the
+// fixture tree of buildFilterTree, and the node ids by name.
+func filterTree(t *testing.T, db testdbs.TargetDb) (*gorm.DB, *closuretree.Tree, map[string]uint) {
+	t.Helper()
+	gdb := connAndClose(t, db)
+	dropTreeTables(gdb, filterNode{})
+	ct, err := newTestTree(gdb, filterNode{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gdb, ct, buildFilterTree(t, ct)
+}
+
+// largeTree does the same with the tree of buildLargeTree.
+func largeTree(t *testing.T, db testdbs.TargetDb) (*gorm.DB, *closuretree.Tree) {
+	t.Helper()
+	gdb := connAndClose(t, db)
+	dropTreeTables(gdb, filterNode{})
+	ct, err := newTestTree(gdb, filterNode{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildLargeTree(t, gdb, db, ct)
+	return gdb, ct
+}
+
+// within runs fn, at most twice, and fails the test when the faster run took longer than
+// largeReadBound. It logs the time.
+func within(t *testing.T, what string, fn func() error) {
+	t.Helper()
+	best := time.Duration(1<<63 - 1)
+	for try := 0; try < 2 && best > largeReadBound; try++ {
+		start := time.Now()
+		err := fn()
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		best = min(best, elapsed)
+	}
+	t.Logf("%-40s %v", what, best)
+	if best > largeReadBound {
+		t.Errorf("%s: took %v, want at most %v", what, best, largeReadBound)
+	}
+}

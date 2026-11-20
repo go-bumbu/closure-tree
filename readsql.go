@@ -228,3 +228,41 @@ func (ct *Tree) orderedJoin() string {
 		return "JOIN"
 	}
 }
+
+// nodeExistsSQL selects 1 when the node exists in the tenant and matches the plan's conditions, so
+// a start node that does not match the filter counts as not found.
+func (ct *Tree) nodeExistsSQL(p *readPlan, nodeID uint, tenant string) (string, []any) {
+	var s sqlBuf
+	s.add("SELECT 1 FROM " + ct.nodesTbl + " AS nodes\n")
+	s.add("WHERE nodes.node_id = ? AND nodes.tenant = ?", nodeID, tenant)
+	if filter, fargs := ct.matchSQL("nodes", p.conds); filter != "" {
+		s.add(" AND "+filter, fargs...)
+	}
+	s.add("\nLIMIT 1")
+	return s.b.String(), s.args
+}
+
+// ancestorsSQL selects the ancestors of nodeID, root first, leaving out the node itself and the
+// virtual root (it has no node row, so the join drops it). Ancestors that do not match the plan's
+// conditions are skipped. With idsOnly it selects node_id; otherwise the plan's columns and, last,
+// the parent computed from the closure rows.
+func (ct *Tree) ancestorsSQL(p *readPlan, idsOnly bool, nodeID uint, tenant string) (string, []any) {
+	var s sqlBuf
+	if idsOnly {
+		s.add("SELECT nodes.node_id\n")
+	} else {
+		s.add("SELECT " + ct.selectList("nodes", p.columns) + ", parent_rel.ancestor_id AS parent_id\n")
+	}
+	s.add("FROM " + ct.relationsTbl + " AS ct\n")
+	s.add(ct.orderedJoin() + " " + ct.nodesTbl + " AS nodes ON nodes.node_id = ct.ancestor_id AND nodes.tenant = ct.tenant\n")
+	if !idsOnly {
+		s.add("LEFT JOIN " + ct.relationsTbl + " AS parent_rel\n")
+		s.add("  ON parent_rel.descendant_id = nodes.node_id AND parent_rel.depth = 1 AND parent_rel.tenant = nodes.tenant\n")
+	}
+	s.add("WHERE ct.descendant_id = ? AND ct.tenant = ? AND ct.depth > 0", nodeID, tenant)
+	if filter, fargs := ct.matchSQL("nodes", p.conds); filter != "" {
+		s.add(" AND "+filter, fargs...)
+	}
+	s.add("\nORDER BY ct.depth DESC")
+	return s.b.String(), s.args
+}

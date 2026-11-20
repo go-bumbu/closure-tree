@@ -1152,36 +1152,20 @@ func TestFilteredReadsOnLargeTree(t *testing.T) {
 	}
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			gdb := connAndClose(t, db)
-			dropTreeTables(gdb, filterNode{})
-			ct, err := newTestTree(gdb, filterNode{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			buildLargeTree(t, gdb, db, ct)
+			_, ct := largeTree(t, db)
 			ctx := context.Background()
 			docs := closuretree.Filter(closuretree.Eq("kind", "doc"))
 
-			// read runs fn, at most twice, and checks the count of the faster run and its time.
+			// read checks the count of nodes a read returns and its time.
 			read := func(what string, want int, fn func() (int, error)) {
 				t.Helper()
-				best := time.Duration(1<<63 - 1)
-				for try := 0; try < 2 && best > largeReadBound; try++ {
-					start := time.Now()
+				within(t, what, func() error {
 					got, err := fn()
-					elapsed := time.Since(start)
-					if err != nil {
-						t.Fatalf("%s: %v", what, err)
-					}
-					if got != want {
+					if err == nil && got != want {
 						t.Errorf("%s: want %d nodes, got %d", what, want, got)
 					}
-					best = min(best, elapsed)
-				}
-				t.Logf("%-40s %v", what, best)
-				if best > largeReadBound {
-					t.Errorf("%s: took %v, want at most %v", what, best, largeReadBound)
-				}
+					return err
+				})
 			}
 			for _, parent := range []struct {
 				name    string
@@ -1428,7 +1412,7 @@ func readIntoExportedPointerWrapper(t *testing.T, gdb *gorm.DB) {
 	}
 }
 
-// The reads of the earlier plans ignore the new options but still validate them.
+// Reads that do not honour the new options ignore them but still validate them.
 func TestOlderReadsIgnoreNewOptions(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
