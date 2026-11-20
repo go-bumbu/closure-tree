@@ -5,12 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
-// Leaf is an embeddable ID to be used in closure tree, this is mandatory if you want to use leaves functionality
+// Leaf is an embeddable id and tenant for a model that GetLeaves reads. It is optional: GetLeaves
+// reads any model with a many2many relation to the tree's nodes. Embedding Leaf adds a condition on
+// the model's own tenant column, so a row of another tenant is not returned even when it is
+// attached to a node of the requested tenant.
+//
+// Deprecated: GetLeaves no longer requires it and reads a plain model with a many2many relation to
+// the nodes.
 type Leaf struct {
 	LeafId uint   `gorm:"autoIncrement;primaryKey;not null;column:leaf_id"`
 	Tenant string `gorm:"index"`
@@ -20,166 +28,246 @@ func (n *Leaf) Id() uint {
 	return n.LeafId
 }
 
+// ErrItemIsNotTreeLeaf was returned by GetLeaves for a model that did not embed Leaf.
+//
+// Deprecated: GetLeaves no longer returns it; a model without Leaf is accepted.
 var ErrItemIsNotTreeLeaf = errors.New("the item does not embed Leaf")
 
-// ErrLeafMissingM2M is returned when a leaf type has no many2many association to the tree's nodes.
+// ErrLeafMissingM2M is returned when the model given to GetLeaves has no many2many relation to the
+// tree's node table, or when the field named with Relation is not one.
 var ErrLeafMissingM2M = errors.New("item struct does not contain a many2many gorm tag")
 
-// isLeaveSlice uses reflection to verify if the passed item is a pointer to a slice that embedded Leaf struct
-// returns an error for every condition checked, returns nil if the passed item is as expected
-func isLeaveSlice(item any) error {
-	if item == nil {
-		return ErrItemsNil
-	}
+// ErrAmbiguousRelation is returned when the model given to GetLeaves has several many2many
+// relations to the tree's node table and no Relation option names one.
+var ErrAmbiguousRelation = errors.New("several many2many relations point to the node table; name one with Relation")
 
-	itemType := reflect.TypeOf(item)
-
-	// Ensure item is a pointer
-	if itemType.Kind() != reflect.Pointer {
-		return ErrItemsNotPointerToSlice
-	}
-
-	// Ensure the pointer points to a slice
-	sliceType := itemType.Elem()
-	if sliceType.Kind() != reflect.Slice {
-		return ErrItemsNotPointerToSlice
-	}
-
-	// Get the element type of the slice
-	elemType := sliceType.Elem()
-	if elemType.Kind() != reflect.Struct {
-		return fmt.Errorf("item is not a slice of structs")
-	}
-
-	// Check if the struct embeds Leaf
-	hasLeaf := false
-	hasManyToMany := false
-
-	for i := 0; i < elemType.NumField(); i++ {
-		field := elemType.Field(i)
-
-		// Check if the struct embeds Leaf
-		if field.Anonymous && field.Type == reflect.TypeOf(Leaf{}) {
-			hasLeaf = true
-		}
-
-		// Check if the struct has a slice field with a gorm "many2many" annotation
-		if field.Type.Kind() == reflect.Slice {
-			gormTag := field.Tag.Get("gorm")
-			if strings.Contains(gormTag, "many2many:") {
-				hasManyToMany = true
-			}
-		}
-	}
-
-	if !hasLeaf {
-		return ErrItemIsNotTreeLeaf
-	}
-
-	if !hasManyToMany {
-		return ErrLeafMissingM2M
-	}
-	return nil
-}
-
-// m2mFieldName returns the struct field name of the first many2many association on the element type
-// of item (a pointer to a slice of structs), in declaration order. isLeaveSlice must have validated
-// item first.
-func m2mFieldName(item any) (string, error) {
-	if item == nil {
-		return "", ErrItemsNil
-	}
-	elemType := reflect.TypeOf(item).Elem().Elem()
-	for i := 0; i < elemType.NumField(); i++ {
-		field := elemType.Field(i)
-		if field.Type.Kind() == reflect.Slice && strings.Contains(field.Tag.Get("gorm"), "many2many:") {
-			return field.Name, nil
-		}
-	}
-	return "", ErrLeafMissingM2M
-}
-
-// GetLeaves loads into target every leaf (a struct embedding Leaf with a many2many relation to the
-// tree's node type) associated with parentID or any of its descendants down to maxDepth, scoped to
-// tenant. parentID=0 operates on the whole forest; maxDepth<=0 means unlimited. Results are ordered
-// by the leaf primary key.
+// GetLeaves loads into target the rows of a model attached to parentID or to a node below it,
+// scoped to tenant. target is a pointer to a slice of the model, []T or []*T. The model needs a
+// many2many relation to the tree's node type; when it has several, name the field with Relation.
+// The rows are ordered by the model's primary key, which must be a single column, and each row
+// comes once, also when it is attached to several nodes of the subtree. parentID 0 is the virtual
+// root and stands for every node of the tenant.
 //
-// The many2many join columns are resolved from the parsed GORM schema, so a custom NamingStrategy /
-// SingularTable works. The descendant set is filtered by joining the closure table directly instead
-// of materialising ids into an IN (...) list, so arbitrarily large subtrees do not hit the driver's
-// bind-parameter limit.
-func (ct *Tree) GetLeaves(ctx context.Context, target any, parentID uint, maxDepth int, tenant string) error {
+// maxDepth limits how far below parentID a node may be: the parent itself is included, and
+// maxDepth <= 0 means no limit. A DepthRange option replaces maxDepth.
+//
+// GetLeaves honours the read options Filter, Unfiltered, PerNode, DepthRange, Relation and
+// NoPreload; the others are ignored. The filter, and the Tree's default filter, apply to the nodes
+// as in SubtreeIDs: without PerNode a node counts only when it and every node between parentID and
+// it match, with PerNode when it matches itself, and a row is returned when it is attached to a
+// node that counts. The relation is preloaded unless NoPreload is given; the preloaded nodes are not
+// checked against the tenant or the filter. Preloading binds one value per returned row, so for
+// results of many thousands of rows use NoPreload. A model that embeds Leaf is also checked
+// against its own tenant column.
+//
+// For ordering, paging, counting or conditions on the model's own table, use SubtreeIDs in your own
+// query instead.
+func (ct *Tree) GetLeaves(ctx context.Context, target any, parentID uint, maxDepth int, tenant string, opts ...ReadOption) error {
 	tenant, err := validateTenant(tenant)
 	if err != nil {
 		return err
 	}
-	// Validate the target slice before hitting the database.
-	if err := isLeaveSlice(target); err != nil {
+	if err := checkLeafTarget(target); err != nil {
 		return err
 	}
+	p, err := ct.planRead(opts)
+	if err != nil {
+		return err
+	}
+	q, err := ct.planLeaves(target, p.relation)
+	if err != nil {
+		return err
+	}
+
+	depth := depthRange{min: 0, max: maxDepth}
 	if maxDepth <= 0 {
-		maxDepth = absMaxDepth
+		depth.max = -1
 	}
+	if p.depth != nil {
+		depth = *p.depth
+	}
+	sub := ct.subquery(ct.subtreeSQL(p, tenant, []uint{parentID}, depth))
 
-	stmt := &gorm.Statement{DB: ct.db}
-	if err := stmt.Parse(target); err != nil {
-		return fmt.Errorf("error parsing schema: %w", err)
+	db := ct.db.WithContext(ctx).Model(target).Where(q.in, sub)
+	if q.tenantCol != "" {
+		db = db.Where(q.tenantCol+" = ?", tenant)
 	}
-
-	fieldName, err := m2mFieldName(target)
-	if err != nil {
-		return err
+	db = db.Order(q.order)
+	if !p.noPreload {
+		db = db.Preload(q.field)
 	}
-	rel, ok := stmt.Schema.Relationships.Relations[fieldName]
-	if !ok || rel.JoinTable == nil {
-		return fmt.Errorf("no many2many relationship found for field %q", fieldName)
-	}
-
-	// Resolve the join columns from the schema. For a many2many, the reference with
-	// OwnPrimaryKey=true maps the leaf's (source) primary key to its join-table foreign key; the
-	// other maps the node's primary key to its join-table foreign key.
-	joinTbl := rel.JoinTable.Table
-	leafTbl := rel.Schema.Table
-	var leafPKCol, leafJoinFKCol, nodeJoinFKCol string
-	for _, ref := range rel.References {
-		if ref.OwnPrimaryKey {
-			leafPKCol = ref.PrimaryKey.DBName
-			leafJoinFKCol = ref.ForeignKey.DBName
-		} else {
-			nodeJoinFKCol = ref.ForeignKey.DBName
-		}
-	}
-	if leafPKCol == "" || leafJoinFKCol == "" || nodeJoinFKCol == "" {
-		return fmt.Errorf("unable to resolve many2many join columns for field %q", fieldName)
-	}
-	if err := validateTableName(joinTbl); err != nil {
-		return err
-	}
-	if err := validateTableName(leafTbl); err != nil {
-		return err
-	}
-
-	// leaf -> join table -> closure table. ancestor_id=parentID with depth<=maxDepth selects
-	// parentID itself (its depth-0 self row) plus every descendant down to maxDepth; for parentID=0
-	// there is no self row, so it yields the depth 1..maxDepth nodes under the forest.
-	joinLeaf := fmt.Sprintf(`INNER JOIN %s ON %s.%s = %s.%s`,
-		joinTbl, leafTbl, leafPKCol, joinTbl, leafJoinFKCol)
-	joinClosure := fmt.Sprintf(`INNER JOIN %s ON %s.descendant_id = %s.%s`,
-		ct.relationsTbl, ct.relationsTbl, joinTbl, nodeJoinFKCol)
-	whereSQL := fmt.Sprintf(`%s.ancestor_id = ? AND %s.depth <= ? AND %s.tenant = ? AND %s.tenant = ?`,
-		ct.relationsTbl, ct.relationsTbl, ct.relationsTbl, leafTbl)
-	orderSQL := fmt.Sprintf(`%s.%s ASC`, leafTbl, leafPKCol)
-
-	err = ct.db.WithContext(ctx).Model(target).
-		InnerJoins(joinLeaf).
-		InnerJoins(joinClosure).
-		Preload(fieldName).
-		Where(whereSQL, parentID, maxDepth, tenant, tenant).
-		Order(orderSQL).
-		Distinct().
-		Find(target).Error
-	if err != nil {
+	if err := db.Find(target).Error; err != nil {
 		return fmt.Errorf("unable to query leaves: %w", err)
 	}
 	return nil
+}
+
+// checkLeafTarget accepts a non-nil pointer to a slice of structs or of pointers to structs.
+func checkLeafTarget(target any) error {
+	if target == nil {
+		return ErrItemsNil
+	}
+	v := reflect.ValueOf(target)
+	if v.Kind() != reflect.Pointer || v.Type().Elem().Kind() != reflect.Slice {
+		return ErrItemsNotPointerToSlice
+	}
+	if v.IsNil() {
+		return ErrItemsNil
+	}
+	elem := v.Type().Elem().Elem()
+	if elem.Kind() == reflect.Pointer {
+		elem = elem.Elem()
+	}
+	if elem.Kind() != reflect.Struct {
+		return fmt.Errorf("the target must be a slice of structs or of pointers to structs, not %s", v.Type().Elem())
+	}
+	return nil
+}
+
+// leafQuery holds the quoted SQL fragments of a GetLeaves statement on one model.
+type leafQuery struct {
+	field     string // the Go field of the relation, for Preload
+	in        string // the row is attached to a node of the subquery bound to its placeholder
+	tenantCol string // the model's tenant column, quoted; "" when the model does not embed Leaf
+	order     string
+}
+
+// planLeaves resolves the relation of target's model to the node table, its join columns and the
+// model's primary key and tenant column from the parsed schema, and validates the table names.
+func (ct *Tree) planLeaves(target any, relation string) (*leafQuery, error) {
+	stmt := &gorm.Statement{DB: ct.db}
+	if err := stmt.Parse(target); err != nil {
+		return nil, fmt.Errorf("error parsing schema: %w", err)
+	}
+	s := stmt.Schema
+	rel, err := ct.leafRelation(s, relation)
+	if err != nil {
+		return nil, err
+	}
+
+	// The reference with OwnPrimaryKey maps the model's column to its foreign key in the join
+	// table; the other maps the node's id to its foreign key in the join table.
+	var ownCol, ownFK, nodeFK string
+	var own, other int
+	for _, ref := range rel.References {
+		if ref.OwnPrimaryKey {
+			ownCol, ownFK = ref.PrimaryKey.DBName, ref.ForeignKey.DBName
+			own++
+		} else {
+			if ref.PrimaryKey.DBName != colNodeID {
+				return nil, fmt.Errorf("the relation %s of %s must reference the node column %s, not %s",
+					rel.Name, s.Name, colNodeID, ref.PrimaryKey.DBName)
+			}
+			nodeFK = ref.ForeignKey.DBName
+			other++
+		}
+	}
+	if own != 1 || other != 1 {
+		return nil, fmt.Errorf("unable to resolve the many2many join columns of %s.%s: want one column on each side",
+			s.Name, rel.Name)
+	}
+	if len(s.PrimaryFields) != 1 {
+		return nil, fmt.Errorf("the model %s must have exactly one primary key column for GetLeaves, it has %d",
+			s.Name, len(s.PrimaryFields))
+	}
+
+	joinTbl, tbl := rel.JoinTable.Table, s.Table
+	if err := validateTableName(joinTbl); err != nil {
+		return nil, err
+	}
+	if err := validateTableName(tbl); err != nil {
+		return nil, err
+	}
+
+	q := &leafQuery{
+		field: rel.Name,
+		in: ct.quoteCol(tbl, ownCol) + " IN (SELECT " + ct.quoteCol(joinTbl, ownFK) +
+			" FROM " + ct.quoteTable(joinTbl) + " WHERE " + ct.quoteCol(joinTbl, nodeFK) + " IN (?))",
+		order: ct.quoteCol(tbl, s.PrimaryFields[0].DBName) + " ASC",
+	}
+	if col, embeds := leafTenantColumn(s); embeds {
+		if col == "" {
+			return nil, fmt.Errorf("the model %s embeds Leaf, but its tenant column is not in the schema", s.Name)
+		}
+		q.tenantCol = ct.quoteCol(tbl, col)
+	}
+	return q, nil
+}
+
+// leafRelation returns the many2many relation of the model to the tree's node table: the one of
+// the named field, or else the only one there is.
+func (ct *Tree) leafRelation(s *schema.Schema, name string) (*schema.Relationship, error) {
+	toNodes := func(rel *schema.Relationship) bool {
+		return rel != nil && rel.Type == schema.Many2Many && rel.JoinTable != nil &&
+			rel.FieldSchema != nil && rel.FieldSchema.Table == ct.nodesTbl
+	}
+	if name != "" {
+		if rel := s.Relationships.Relations[name]; toNodes(rel) {
+			return rel, nil
+		}
+		return nil, fmt.Errorf("%w: the field %s of %s is not a many2many relation to %s",
+			ErrLeafMissingM2M, name, s.Name, ct.nodesTbl)
+	}
+	var found []*schema.Relationship
+	for _, rel := range s.Relationships.Many2Many {
+		if toNodes(rel) {
+			found = append(found, rel)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return nil, fmt.Errorf("%w: %s has no many2many relation to %s", ErrLeafMissingM2M, s.Name, ct.nodesTbl)
+	case 1:
+		return found[0], nil
+	}
+	names := make([]string, len(found))
+	for i, rel := range found {
+		names[i] = rel.Name
+	}
+	return nil, fmt.Errorf("%w: %s has %s", ErrAmbiguousRelation, s.Name, strings.Join(names, ", "))
+}
+
+// leafTenantColumn tells whether the model embeds Leaf, at any embedding depth, and returns the
+// column of its Tenant field, or "" when the schema has none.
+func leafTenantColumn(s *schema.Schema) (string, bool) {
+	path, ok := leafPath(s.ModelType)
+	if !ok {
+		return "", false
+	}
+	tenantField, _ := reflect.TypeOf(Leaf{}).FieldByName(tenantIdField)
+	path = append(path, tenantField.Index...)
+	for _, f := range s.Fields {
+		if slices.Equal(f.StructField.Index, path) {
+			return f.DBName, true
+		}
+	}
+	return "", true
+}
+
+// leafPath returns the index path of an embedded Leaf in t, found by type as findNodeValue finds
+// Node.
+func leafPath(t reflect.Type) ([]int, bool) {
+	leafType := reflect.TypeOf(Leaf{})
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.Anonymous {
+			continue
+		}
+		if f.Type == leafType {
+			return []int{i}, true
+		}
+		if f.Type.Kind() == reflect.Struct {
+			if sub, ok := leafPath(f.Type); ok {
+				return append([]int{i}, sub...), true
+			}
+		}
+	}
+	return nil, false
+}
+
+// quoteTable returns the table name quoted with the dialect's quoting.
+func (ct *Tree) quoteTable(name string) string {
+	var b strings.Builder
+	ct.db.QuoteTo(&b, name)
+	return b.String()
 }

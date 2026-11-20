@@ -1806,8 +1806,8 @@ func TestGetLeaves(t *testing.T) {
 				}
 				var leaves []NoLeaf
 				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
-				if !errors.Is(err, closuretree.ErrItemIsNotTreeLeaf) {
-					t.Errorf("expected ErrItemIsNotTreeLeaf, got %v", err)
+				if !errors.Is(err, closuretree.ErrLeafMissingM2M) {
+					t.Errorf("expected ErrLeafMissingM2M, got %v", err)
 				}
 			})
 
