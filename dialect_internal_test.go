@@ -3,6 +3,8 @@ package closuretree
 import (
 	"database/sql"
 	"testing"
+
+	"github.com/go-bumbu/testdbs"
 )
 
 // TestDialectFromName pins the mapping from GORM dialector names to the internal dialect enum,
@@ -35,5 +37,47 @@ func TestTxOptions(t *testing.T) {
 		if got := d.txOptions(); got != nil {
 			t.Errorf("dialect %d: want no options, got %+v", d, got)
 		}
+	}
+}
+
+// TestUpsertMetaHalvingsKeepsLower pins what the single upsert of upsertMetaHalvings stores: a new
+// row for a new (tenant, parent), otherwise the lower of the stored and the new min_halvings.
+func TestUpsertMetaHalvingsKeepsLower(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct := newDBInternalTree(t, db, txSample{})
+			stored := func(parentID uint) []int {
+				t.Helper()
+				var got []int
+				if err := ct.db.Table(ct.metaTbl).Where("tenant = ? AND parent_id = ?", "t1", parentID).
+					Pluck("min_halvings", &got).Error; err != nil {
+					t.Fatal(err)
+				}
+				return got
+			}
+			steps := []struct {
+				parentID uint
+				halvings int
+				want     int
+			}{
+				{0, 50, 50}, // new row
+				{0, 60, 50}, // higher: kept
+				{0, 50, 50}, // equal: kept
+				{0, 40, 40}, // lower: stored
+				{7, 9999, 9999},
+				{7, 0, 0},
+			}
+			for _, s := range steps {
+				if err := ct.upsertMetaHalvings(ct.db, s.parentID, "t1", s.halvings); err != nil {
+					t.Fatalf("upsert parent %d halvings %d: %v", s.parentID, s.halvings, err)
+				}
+				if got := stored(s.parentID); len(got) != 1 || got[0] != s.want {
+					t.Errorf("after upserting %d for parent %d: want [%d], got %v", s.halvings, s.parentID, s.want, got)
+				}
+			}
+			if got := stored(0); len(got) != 1 || got[0] != 40 {
+				t.Errorf("parent 0 changed by the writes for parent 7: %v", got)
+			}
+		})
 	}
 }

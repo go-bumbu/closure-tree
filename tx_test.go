@@ -13,6 +13,7 @@ import (
 	"github.com/go-bumbu/testdbs"
 	"github.com/google/go-cmp/cmp"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestWithTxRollbackLeavesNothing(t *testing.T) {
@@ -432,5 +433,149 @@ func TestPostgresOwnTransactionsUnderRepeatableReadDefault(t *testing.T) {
 			}
 			raceConflictingMoves(t, gdb, ct, 40)
 		})
+	}
+}
+
+// Two caller transactions write to two new tenants whose names sort next to each other, with other
+// tenants' rows around them: A adds a root, B's first add starts while A is open, then A adds a
+// child of its root. Both must commit without a deadlock and keep their rows (on MySQL an UPDATE of
+// the sort-order meta table that matched no row used to leave gap locks that deadlocked here). The
+// order of the statements is fixed: A's second add starts only once B's add has finished or is
+// waiting on a lock, and B commits only after A.
+func TestWithTxAdjacentTenantsDoNotDeadlock(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			if strings.HasPrefix(db.DbType(), "Sqlite") {
+				t.Skip("SQLite allows one writing transaction per database, so B cannot write while A is open")
+			}
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second) // fail instead of hanging
+			defer cancel()
+			const tenantA, tenantB = "adj-a", "adj-b"
+			for _, other := range []string{"adj-0", "adj-z"} { // sort before A and after B
+				if err := ct.Add(ctx, &TestPayload{Name: "other"}, nil, nil, other); err != nil {
+					t.Fatal(err)
+				}
+			}
+			quiet := gdb.Session(&gorm.Session{Logger: logger.Discard}) // errors are reported by the test
+
+			txA := quiet.WithContext(ctx).Begin()
+			if txA.Error != nil {
+				t.Fatal(txA.Error)
+			}
+			defer txA.Rollback()
+			a1 := &TestPayload{Name: "a1"}
+			if err := ct.WithTx(txA).Add(ctx, a1, nil, nil, tenantA); err != nil {
+				t.Fatalf("A's first add: %v", err)
+			}
+
+			written := make(chan error, 1)
+			releaseB := make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseB) })
+			defer release() // a failing test does not leave B waiting
+			idB, doneB := startTxWrite(ctx, db, quiet, written, releaseB, func(tx *gorm.DB) error {
+				return ct.WithTx(tx).Add(ctx, &TestPayload{Name: "b1"}, nil, nil, tenantB)
+			})
+			waitWrittenOrBlocked(t, ctx, gdb, db, <-idB, written)
+
+			errA := ct.WithTx(txA).Add(ctx, &TestPayload{Name: "a2"}, up(a1.NodeId), nil, tenantA)
+			if errA == nil {
+				errA = txA.Commit().Error
+			}
+			release()
+			var resB txResult
+			select {
+			case resB = <-doneB:
+			case <-time.After(30 * time.Second):
+				t.Fatal("B did not finish")
+			}
+			if errA != nil {
+				t.Errorf("A: %v", errA)
+			}
+			if resB.write != nil || resB.commit != nil {
+				t.Errorf("B: add: %v, commit: %v", resB.write, resB.commit)
+			}
+			if got := countTenant(t, gdb, ct, tenantA).Nodes; got != 2 {
+				t.Errorf("tenant A: want 2 nodes, got %d", got)
+			}
+			if got := countTenant(t, gdb, ct, tenantB).Nodes; got != 1 {
+				t.Errorf("tenant B: want 1 node, got %d", got)
+			}
+			assertConsistent(t, gdb, ct, tenantA)
+			assertConsistent(t, gdb, ct, tenantB)
+		})
+	}
+}
+
+// txResult is the outcome of a caller transaction run by startTxWrite.
+type txResult struct{ write, commit error }
+
+// startTxWrite runs write in a transaction on gdb, on a goroutine of its own. It sends the
+// transaction's database session id on the first returned channel and the write's error on
+// written, then waits for release and commits, or rolls back after a failed write; the outcome
+// arrives on the second returned channel.
+func startTxWrite(ctx context.Context, db testdbs.TargetDb, gdb *gorm.DB, written chan<- error,
+	release <-chan struct{}, write func(tx *gorm.DB) error) (<-chan int64, <-chan txResult) {
+	session := make(chan int64, 1)
+	done := make(chan txResult, 1)
+	go func() {
+		var res txResult
+		defer func() { done <- res }()
+		var id int64
+		tx := gdb.WithContext(ctx).Begin()
+		res.write = tx.Error
+		if res.write == nil {
+			query := "SELECT CONNECTION_ID()"
+			if db.DbType() == testdbs.DBTypePostgres {
+				query = "SELECT pg_backend_pid()"
+			}
+			res.write = tx.Raw(query).Scan(&id).Error
+		}
+		session <- id
+		if res.write == nil {
+			res.write = write(tx)
+		}
+		written <- res.write
+		<-release
+		if res.write != nil {
+			tx.Rollback()
+			return
+		}
+		res.commit = tx.Commit().Error
+	}()
+	return session, done
+}
+
+// waitWrittenOrBlocked returns once the write that startTxWrite runs in session id has finished
+// (its error, read from written, is put back) or is waiting on a lock. PostgreSQL reports the lock
+// wait; MySQL shows it only with the PROCESS privilege, so there the write counts as waiting once
+// one of its statements has run for 150ms, far longer than any of them takes unblocked.
+func waitWrittenOrBlocked(t *testing.T, ctx context.Context, gdb *gorm.DB, db testdbs.TargetDb, id int64, written chan error) {
+	t.Helper()
+	running := "SELECT COUNT(*) FROM pg_stat_activity WHERE pid = ? AND wait_event_type = 'Lock'"
+	polls := 1
+	if db.DbType() == testdbs.DBTypeMysql {
+		running = "SELECT COUNT(*) FROM information_schema.processlist WHERE id = ? AND command <> 'Sleep' AND info IS NOT NULL"
+		polls = 15
+	}
+	for seen := 0; seen < polls; {
+		select {
+		case err := <-written:
+			written <- err
+			return
+		case <-ctx.Done():
+			t.Fatal("the write neither finished nor waited on a lock")
+		case <-time.After(10 * time.Millisecond):
+		}
+		if countRaw(t, gdb, running, id) > 0 {
+			seen++
+		} else {
+			seen = 0
+		}
 	}
 }

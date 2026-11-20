@@ -227,7 +227,15 @@ err := db.Transaction(func(tx *gorm.DB) error {
   tree for the same tenant from inside the transaction waits on the transaction's own lock, so it
   blocks: forever, or until a lock or busy timeout fails it.
 * A tree error rolls back only the tree's own work (to a savepoint the tree takes) and leaves your
-  transaction usable; you decide whether to commit or roll back.
+  transaction usable; you decide whether to commit or roll back. This holds for every tree error
+  except a MySQL deadlock.
+* MySQL: a deadlock error (error 1213) means the server has already rolled back your whole
+  transaction. Roll back and retry the transaction; continuing would run the following statements
+  outside any transaction. The tree's error contains the driver's error, so you can test for it with
+  `errors.As` (for `github.com/go-sql-driver/mysql`, a `*mysql.MySQLError` with `Number` 1213).
+* MySQL at its default isolation level (REPEATABLE READ): while your transaction is open, tree writes
+  of different tenants can wait on each other, and deadlock. Keep such transactions short, or run
+  them at READ COMMITTED.
 * After a successful tree write the tenant lock is held until your transaction ends, so do not hold
   the transaction across slow work. After a failed tree write the lock may already be released;
   `LockTenant` holds it for the whole transaction.

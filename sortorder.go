@@ -177,19 +177,10 @@ func halvingsRemaining(a, b float64) int {
 
 // upsertMetaHalvings records halvings as the new minimum for (tenant, parentID)
 // if it is lower than the current stored value, or inserts a new row.
+// It is the single upsert statement of dialect.metaUpsertSQL: an UPDATE that matches no row would
+// leave a gap lock on MySQL that makes adjacent tenants' first writes deadlock.
 // Must be called inside a transaction.
 func (ct *Tree) upsertMetaHalvings(tx *gorm.DB, parentID uint, tenant string, halvings int) error {
-	// Try to lower the existing value
-	res := tx.Exec(
-		fmt.Sprintf(`UPDATE %s SET min_halvings = ? WHERE tenant = ? AND parent_id = ? AND min_halvings > ?`,
-			ct.metaTbl), halvings, tenant, parentID, halvings)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected > 0 {
-		return nil
-	}
-	// Row doesn't exist or already has an equal/lower value — insert, keeping the lower min_halvings.
 	return tx.Exec(ct.dialect.metaUpsertSQL(ct.metaTbl), tenant, parentID, halvings).Error
 }
 

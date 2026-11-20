@@ -21,6 +21,13 @@ var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; us
 // and the outer transaction stays usable. A successful write keeps the tenant lock until the outer
 // transaction ends (PostgreSQL and MySQL).
 //
+// The one exception is a deadlock on MySQL (error 1213): the server has already rolled back the
+// whole outer transaction, so the caller must roll it back and retry it; continuing would run the
+// following statements outside any transaction. The returned error contains the driver's error,
+// so it can be tested with errors.As. On MySQL at its default isolation level (REPEATABLE READ),
+// tree writes of different tenants can wait on each other, and deadlock, while a caller's
+// transaction is open: keep such transactions short, or run them at READ COMMITTED.
+//
 // Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
 // the transaction waits on the transaction's own lock, so it blocks: forever, or until a lock or
 // busy timeout fails it. A transaction that writes to several trees or tenants must take their locks in
