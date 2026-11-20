@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	closuretree "github.com/go-bumbu/closure-tree"
@@ -202,7 +203,74 @@ func TestGetLeavesErrors(t *testing.T) {
 			if err := ct.GetLeaves(cancelled, &words, 0, 0, tenantF); err == nil || errors.Is(err, context.Canceled) {
 				t.Errorf("a slice of non-structs must be rejected before querying: %v", err)
 			}
+			checkUnreadableModels(t, ct, cancelled)
 		})
+	}
+}
+
+// byName references a node by its name column, not by node_id.
+type byName struct {
+	ID    uint          `gorm:"primaryKey"`
+	Nodes []*filterNode `gorm:"many2many:by_name_nodes;references:Name;joinReferences:NodeName"`
+}
+
+// twoKeys has a primary key of two columns, so its relation joins on two columns on its side.
+type twoKeys struct {
+	ID    uint          `gorm:"primaryKey"`
+	Code  string        `gorm:"primaryKey"`
+	Nodes []*filterNode `gorm:"many2many:two_keys_nodes;"`
+}
+
+// twoKeysOneRef has a primary key of two columns, but its relation references only one of them.
+type twoKeysOneRef struct {
+	ID    uint          `gorm:"primaryKey"`
+	Code  string        `gorm:"primaryKey"`
+	Nodes []*filterNode `gorm:"many2many:two_keys_one_ref_nodes;foreignKey:ID;joinForeignKey:ItemID"`
+}
+
+// hiddenLeaf embeds Leaf, but gorm ignores the embedded struct, so the schema has no tenant column.
+type hiddenLeaf struct {
+	closuretree.Leaf `gorm:"-"`
+	ID               uint          `gorm:"primaryKey"`
+	Nodes            []*filterNode `gorm:"many2many:hidden_leaf_nodes;"`
+}
+
+// otherTableOnly has a many2many relation, but not to the node table.
+type otherTableOnly struct {
+	ID      uint        `gorm:"primaryKey"`
+	Related []*leafItem `gorm:"many2many:other_table_only_items;"`
+}
+
+// checkUnreadableModels checks that GetLeaves rejects, with ctx cancelled and so before any query,
+// the targets and models it cannot read correctly, with an error that says why.
+func checkUnreadableModels(t *testing.T, ct *closuretree.Tree, ctx context.Context) {
+	t.Helper()
+	var nilTarget *[]leafItem
+	if err := ct.GetLeaves(ctx, nilTarget, 0, 0, tenantF); !errors.Is(err, closuretree.ErrItemsNil) {
+		t.Errorf("a nil pointer to a slice: want ErrItemsNil, got %v", err)
+	}
+	cases := map[string]struct {
+		err  error
+		want string
+	}{
+		"a relation that references another node column": {ct.GetLeaves(ctx, &[]byName{}, 0, 0, tenantF), "node_id"},
+		"a relation with two join columns on its side":   {ct.GetLeaves(ctx, &[]twoKeys{}, 0, 0, tenantF), "join columns"},
+		"a primary key of two columns":                   {ct.GetLeaves(ctx, &[]twoKeysOneRef{}, 0, 0, tenantF), "primary key"},
+		"an embedded Leaf without its tenant column":     {ct.GetLeaves(ctx, &[]hiddenLeaf{}, 0, 0, tenantF), "tenant column"},
+	}
+	for what, c := range cases {
+		if c.err == nil || errors.Is(c.err, context.Canceled) || !strings.Contains(c.err.Error(), c.want) {
+			t.Errorf("%s: want an error about %q before querying, got %v", what, c.want, c.err)
+		}
+	}
+	// the model has a many2many relation, so the message must not claim it has none at all
+	for what, err := range map[string]error{
+		"only a relation to another table":            ct.GetLeaves(ctx, &[]otherTableOnly{}, 0, 0, tenantF),
+		"a Relation that does not point to the nodes": ct.GetLeaves(ctx, &[]leafItem{}, 0, 0, tenantF, closuretree.Relation("Related")),
+	} {
+		if !errors.Is(err, closuretree.ErrLeafMissingM2M) || strings.Contains(err.Error(), "gorm tag") {
+			t.Errorf("%s: want ErrLeafMissingM2M saying what is wrong, got %v", what, err)
+		}
 	}
 }
 
@@ -239,6 +307,90 @@ func TestGetLeavesChecksTheTenantOfALeaf(t *testing.T) {
 			var leaves []tenantLeaf
 			if err := ct.GetLeaves(ctx, &leaves, id["a"], 0, tenantF); err != nil || len(leaves) != 1 || leaves[0].Name != "mine" {
 				t.Errorf("want only the leaf of the tenant, got %+v, %v", leaves, err)
+			}
+		})
+	}
+}
+
+// pointerLeaf embeds Leaf through a pointer; its tenant column is checked as well.
+type pointerLeaf struct {
+	*closuretree.Leaf
+	Name  string
+	Nodes []*filterNode `gorm:"many2many:pointer_leaf_nodes;"`
+}
+
+// Two leaves embedding *Leaf are attached to the same node of tenantF; one of them carries another
+// tenant.
+func TestGetLeavesChecksTheTenantOfAPointerLeaf(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, id := filterTree(t, db)
+			if err := gdb.Migrator().DropTable("pointer_leaf_nodes", &pointerLeaf{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := gdb.AutoMigrate(&pointerLeaf{}); err != nil {
+				t.Fatal(err)
+			}
+			for _, leaf := range []*pointerLeaf{
+				{Leaf: &closuretree.Leaf{Tenant: tenantF}, Name: "mine"},
+				{Leaf: &closuretree.Leaf{Tenant: "other"}, Name: "foreign"},
+			} {
+				if err := gdb.Create(leaf).Error; err != nil {
+					t.Fatal(err)
+				}
+				attach(t, gdb, leaf, "Nodes", id["a1"])
+			}
+			var leaves []pointerLeaf
+			if err := ct.GetLeaves(context.Background(), &leaves, id["a"], 0, tenantF); err != nil || len(leaves) != 1 || leaves[0].Name != "mine" {
+				t.Errorf("want only the leaf of the tenant, got %+v, %v", leaves, err)
+			}
+		})
+	}
+}
+
+// codedItem's relation references its unique code column instead of its primary key.
+type codedItem struct {
+	ID    uint   `gorm:"primaryKey"`
+	Code  string `gorm:"size:32;uniqueIndex"`
+	Name  string
+	Nodes []*filterNode `gorm:"many2many:coded_item_nodes;foreignKey:Code;joinForeignKey:ItemCode"`
+}
+
+// The rows come in the order of the primary key, also when the relation references another column
+// whose order differs.
+func TestGetLeavesOrdersByThePrimaryKey(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, id := filterTree(t, db)
+			if err := gdb.Migrator().DropTable("coded_item_nodes", &codedItem{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := gdb.AutoMigrate(&codedItem{}); err != nil {
+				t.Fatal(err)
+			}
+			// created in this order, so the primary keys rise while the codes fall
+			for _, it := range []struct{ name, code, node string }{
+				{"first", "z", "a1"}, {"second", "y", "x21"}, {"outside", "x", "b1"}, {"third", "w", "a"},
+			} {
+				item := &codedItem{Name: it.name, Code: it.code}
+				if err := gdb.Create(item).Error; err != nil {
+					t.Fatal(err)
+				}
+				attach(t, gdb, item, "Nodes", id[it.node])
+			}
+			var items []codedItem
+			if err := ct.GetLeaves(context.Background(), &items, id["a"], 0, tenantF); err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, it := range items {
+				names = append(names, it.Name)
+				if len(it.Nodes) != 1 {
+					t.Errorf("%s: want its node preloaded, got %d", it.Name, len(it.Nodes))
+				}
+			}
+			if want := []string{"first", "second", "third"}; !slices.Equal(want, names) {
+				t.Errorf("want %v, got %v", want, names)
 			}
 		})
 	}

@@ -23,6 +23,13 @@ func (ct *Tree) quoteCol(alias, column string) string {
 	return b.String()
 }
 
+// quoteTable returns the table name quoted with the dialect's quoting.
+func (ct *Tree) quoteTable(name string) string {
+	var b strings.Builder
+	ct.db.QuoteTo(&b, name)
+	return b.String()
+}
+
 // selectList returns the quoted, comma-separated columns qualified by alias,
 // e.g. `"nodes"."node_id", "nodes"."name"`, or `<alias>.*` when columns is nil.
 func (ct *Tree) selectList(alias string, columns []string) string {

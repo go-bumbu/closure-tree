@@ -18,7 +18,8 @@ import (
 // attached to a node of the requested tenant.
 //
 // Deprecated: GetLeaves no longer requires it and reads a plain model with a many2many relation to
-// the nodes.
+// the nodes. A model without Leaf gets no tenant condition on its own table, so a caller who needs
+// one adds it in their own query with SubtreeIDs, or keeps Leaf.
 type Leaf struct {
 	LeafId uint   `gorm:"autoIncrement;primaryKey;not null;column:leaf_id"`
 	Tenant string `gorm:"index"`
@@ -36,6 +37,12 @@ var ErrItemIsNotTreeLeaf = errors.New("the item does not embed Leaf")
 // ErrLeafMissingM2M is returned when the model given to GetLeaves has no many2many relation to the
 // tree's node table, or when the field named with Relation is not one.
 var ErrLeafMissingM2M = errors.New("item struct does not contain a many2many gorm tag")
+
+// missingM2MError is an ErrLeafMissingM2M with a message that says what is wrong with the model.
+type missingM2MError struct{ msg string }
+
+func (e *missingM2MError) Error() string { return e.msg }
+func (e *missingM2MError) Unwrap() error { return ErrLeafMissingM2M }
 
 // ErrAmbiguousRelation is returned when the model given to GetLeaves has several many2many
 // relations to the tree's node table and no Relation option names one.
@@ -205,8 +212,8 @@ func (ct *Tree) leafRelation(s *schema.Schema, name string) (*schema.Relationshi
 		if rel := s.Relationships.Relations[name]; toNodes(rel) {
 			return rel, nil
 		}
-		return nil, fmt.Errorf("%w: the field %s of %s is not a many2many relation to %s",
-			ErrLeafMissingM2M, name, s.Name, ct.nodesTbl)
+		return nil, &missingM2MError{fmt.Sprintf("the field %s of %s is not a many2many relation to the node table %s",
+			name, s.Name, ct.nodesTbl)}
 	}
 	var found []*schema.Relationship
 	for _, rel := range s.Relationships.Many2Many {
@@ -216,7 +223,7 @@ func (ct *Tree) leafRelation(s *schema.Schema, name string) (*schema.Relationshi
 	}
 	switch len(found) {
 	case 0:
-		return nil, fmt.Errorf("%w: %s has no many2many relation to %s", ErrLeafMissingM2M, s.Name, ct.nodesTbl)
+		return nil, &missingM2MError{fmt.Sprintf("%s has no many2many relation to the node table %s", s.Name, ct.nodesTbl)}
 	case 1:
 		return found[0], nil
 	}
@@ -245,7 +252,8 @@ func leafTenantColumn(s *schema.Schema) (string, bool) {
 }
 
 // leafPath returns the index path of an embedded Leaf in t, found by type as findNodeValue finds
-// Node.
+// Node. Embedding through a pointer counts too; such a step is written -i-1, as gorm writes it in
+// the StructField.Index of an embedded field.
 func leafPath(t reflect.Type) ([]int, bool) {
 	leafType := reflect.TypeOf(Leaf{})
 	for i := 0; i < t.NumField(); i++ {
@@ -253,21 +261,18 @@ func leafPath(t reflect.Type) ([]int, bool) {
 		if !f.Anonymous {
 			continue
 		}
-		if f.Type == leafType {
-			return []int{i}, true
+		ft, step := f.Type, i
+		if ft.Kind() == reflect.Pointer {
+			ft, step = ft.Elem(), -i-1
 		}
-		if f.Type.Kind() == reflect.Struct {
-			if sub, ok := leafPath(f.Type); ok {
-				return append([]int{i}, sub...), true
+		if ft == leafType {
+			return []int{step}, true
+		}
+		if ft.Kind() == reflect.Struct {
+			if sub, ok := leafPath(ft); ok {
+				return append([]int{step}, sub...), true
 			}
 		}
 	}
 	return nil, false
-}
-
-// quoteTable returns the table name quoted with the dialect's quoting.
-func (ct *Tree) quoteTable(name string) string {
-	var b strings.Builder
-	ct.db.QuoteTo(&b, name)
-	return b.String()
 }
