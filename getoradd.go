@@ -21,7 +21,7 @@ import (
 // out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the same
 // way GetNode does (including NodeId and the read-only ParentId) and found is true. When nothing
 // matches, found is false and err is nil.
-func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, match any, matchFields []string, out any) (found bool, err error) {
+func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, match any, matchFields []string, out any, opts ...ReadOption) (found bool, err error) {
 	if err = checkItem(match); err != nil {
 		return false, err
 	}
@@ -40,7 +40,11 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 	if err != nil {
 		return false, err
 	}
-	return ct.findChildInTx(ct.db.WithContext(ctx), parentID, tenant, whereSQL, whereArgs, out)
+	p, err := ct.planRead(opts)
+	if err != nil {
+		return false, err
+	}
+	return ct.findChildInTx(ct.db.WithContext(ctx), p, parentID, tenant, whereSQL, whereArgs, out)
 }
 
 // GetOrAdd is an idempotent get-or-create for a direct child of parentID. It looks up a direct child
@@ -82,7 +86,7 @@ func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant st
 	reflectItem, t, itemIsPointer := stripNodeCopy(item)
 
 	err = ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
-		found, ferr := ct.findChildInTx(tx, parentID, tenant, whereSQL, whereArgs, reflectItem)
+		found, ferr := ct.findChildInTx(tx, ct.plainPlan(), parentID, tenant, whereSQL, whereArgs, reflectItem)
 		if ferr != nil {
 			return ferr
 		}
@@ -172,14 +176,10 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 	return strings.Join(conds, " AND "), args, nil
 }
 
-// findChildInTx runs the direct-child query-by-example lookup on the given tx and scans the
-// first match into out. It reports found=false (nil error) when no row matches.
-func (ct *Tree) findChildInTx(tx *gorm.DB, parentID uint, tenant, whereSQL string, whereArgs []any, out any) (bool, error) {
-	sqlstr := fmt.Sprintf(findChildQuery, ct.nodesTbl, ct.relationsTbl, whereSQL)
-	args := make([]any, 0, len(whereArgs)+2)
-	args = append(args, parentID, tenant)
-	args = append(args, whereArgs...)
-
+// findChildInTx runs the direct-child query-by-example lookup planned by p on the given tx and
+// scans the first match into out. It reports found=false (nil error) when no row matches.
+func (ct *Tree) findChildInTx(tx *gorm.DB, p *readPlan, parentID uint, tenant, whereSQL string, whereArgs []any, out any) (bool, error) {
+	sqlstr, args := ct.findChildSQL(p, parentID, tenant, whereSQL, whereArgs)
 	result := tx.Raw(sqlstr, args...).Scan(out)
 	if result.Error != nil {
 		return false, fmt.Errorf("failed to find child: %w", result.Error)
@@ -189,16 +189,3 @@ func (ct *Tree) findChildInTx(tx *gorm.DB, parentID uint, tenant, whereSQL strin
 	}
 	return true, nil
 }
-
-// findChildQuery selects direct children (depth=1) of a parent, restricted by tenant and the
-// caller's match conditions. child_rel.ancestor_id is the direct parent id (0 for root nodes),
-// aliased to parent_id so the read-only Node.ParentId is populated exactly like GetNode.
-const findChildQuery = `SELECT nodes.*, child_rel.ancestor_id AS parent_id
-FROM %s AS nodes
-JOIN %s AS child_rel
-  ON child_rel.descendant_id = nodes.node_id
-  AND child_rel.depth = 1
-  AND child_rel.tenant = nodes.tenant
-WHERE child_rel.ancestor_id = ? AND nodes.tenant = ? AND %s
-ORDER BY nodes.sort_order ASC, nodes.node_id ASC
-LIMIT 1`

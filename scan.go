@@ -1,12 +1,12 @@
 package closuretree
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
-	"math"
 	"reflect"
 	"sort"
-	"strconv"
+
+	"gorm.io/gorm/schema"
 )
 
 // pointerToSlice validates that items is a non-nil pointer to a slice and returns the slice's
@@ -38,202 +38,123 @@ func validateItems(items any) error {
 	return nil
 }
 
-func scanRowsToNodes(rows *sql.Rows, columns []string, col2FieldMap map[string]string, elemType reflect.Type) (
-	map[int64]reflect.Value, map[int64]int64, error,
-) {
-	nodes := make(map[int64]reflect.Value)
-	ancestorMap := make(map[int64]int64)
+// scanEach runs the query and passes every row to add as a new *T, where T is elemType. Rows are
+// scanned with gorm's scanner into the Tree's model, which gorm parsed in New; when T is another
+// type, the model's fields are then copied into T (see modelToElem). gorm skips the result columns
+// the model has no field for, such as cte_depth.
+func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, elemType reflect.Type, add func(elem reflect.Value)) (err error) {
+	toElem := ct.modelToElem(ctx, elemType)
+	db := ct.db.WithContext(ctx)
+	rows, err := db.Raw(sqlstr, args...).Rows()
+	if err != nil {
+		return fmt.Errorf("failed to execute query: %w", err)
+	}
+	defer func() {
+		e := rows.Close()
+		if err == nil { // don't overwrite the original error
+			err = e
+		}
+	}()
 
 	for rows.Next() {
-		values := make([]any, len(columns))
-		valuePtrs := make([]any, len(columns))
-		for i := range values {
-			valuePtrs[i] = &values[i]
+		row := reflect.New(ct.schema.ModelType)
+		if err := db.ScanRows(rows, row.Interface()); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
 		}
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return nil, nil, fmt.Errorf("failed to scan row: %w", err)
-		}
-
-		node, nodeID, ancestorID, err := mapRowToStruct(values, columns, col2FieldMap, elemType)
-		if err != nil {
-			return nil, nil, err
-		}
-		nodes[nodeID] = node
-		ancestorMap[nodeID] = ancestorID
+		add(toElem(row))
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("row iteration error: %w", err)
+		return fmt.Errorf("row iteration error: %w", err)
 	}
-
-	return nodes, ancestorMap, nil
+	return nil
 }
 
-// toInt64 safely converts database integer values to int64, handling different driver types.
-func toInt64(v any) (int64, bool) {
-	if v == nil {
-		return 0, true
+// modelToElem returns the conversion of a scanned *Model into a *T, where T is elemType: the
+// identity when T is the model, otherwise a copy of every model field into the field of T that
+// has the same Go name and type. T is often not a type gorm can parse: the element of a
+// TreeDescendants read typically wraps the model and adds an untagged Children []*T field, which
+// gorm takes for a relation without a foreign key. A field T lacks is not copied, so T may be
+// smaller than the model.
+func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) func(row reflect.Value) reflect.Value {
+	if elemType == ct.schema.ModelType {
+		return func(row reflect.Value) reflect.Value { return row }
 	}
-	switch n := v.(type) {
-	case int64:
-		return n, true
-	case int:
-		return int64(n), true
-	case int32:
-		return int64(n), true
-	case uint:
-		if uint64(n) > math.MaxInt64 {
-			return 0, false
-		}
-		return int64(n), true
-	case uint32:
-		return int64(n), true
-	case uint64:
-		if n > math.MaxInt64 {
-			return 0, false
-		}
-		return int64(n), true
-	case float64:
-		return int64(n), true
-	case string:
-		p, err := strconv.ParseInt(n, 10, 64)
-		return p, err == nil
-	case []byte:
-		p, err := strconv.ParseInt(string(n), 10, 64)
-		return p, err == nil
+	type fieldCopy struct {
+		src *schema.Field
+		dst []int
 	}
-	return 0, false
+	var copies []fieldCopy
+	if elemType.Kind() == reflect.Struct {
+		for _, f := range ct.schema.Fields {
+			if f.DBName == "" || !f.Readable {
+				continue
+			}
+			dst, ok := elemType.FieldByName(f.Name)
+			if ok && dst.IsExported() && dst.Type == f.StructField.Type {
+				copies = append(copies, fieldCopy{src: f, dst: dst.Index})
+			}
+		}
+	}
+	return func(row reflect.Value) reflect.Value {
+		elem := reflect.New(elemType)
+		for _, c := range copies {
+			if dst, err := elem.Elem().FieldByIndexErr(c.dst); err == nil {
+				dst.Set(c.src.ReflectValueOf(ctx, row.Elem()))
+			}
+		}
+		return elem
+	}
 }
 
-// trySetFromString attempts to parse s and assign it to fieldVal for numeric kinds.
-// Returns true if the assignment was made.
-func trySetFromString(s string, fieldVal reflect.Value) bool {
-	switch fieldVal.Kind() {
-	case reflect.Float32, reflect.Float64:
-		if f, err := strconv.ParseFloat(s, 64); err == nil {
-			fieldVal.SetFloat(f)
-			return true
-		}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-			fieldVal.SetInt(n)
-			return true
-		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if n, err := strconv.ParseUint(s, 10, 64); err == nil {
-			fieldVal.SetUint(n)
-			return true
-		}
+// nodeOf returns the Node of v, a pointer to a struct that is or embeds Node.
+func nodeOf(v reflect.Value) (Node, bool) {
+	t, sv := v.Type().Elem(), v.Elem()
+	if t == reflect.TypeOf(Node{}) {
+		return sv.Interface().(Node), true
 	}
-	return false
+	nv, ok := findNodeValue(t, sv)
+	if !ok {
+		return Node{}, false
+	}
+	return nv.Interface().(Node), true
 }
 
-func mapRowToStruct(values []any, columns []string, col2FieldMap map[string]string, elemType reflect.Type) (
-	reflect.Value, int64, int64, error,
-) {
-	newElem := reflect.New(elemType.Elem())
-	var nodeID, ancestorID int64
-
-	for i, col := range columns {
-		fieldName, ok := col2FieldMap[col]
-		if !ok {
-			continue
-		}
-
-		var value any
-		if b, ok := values[i].([]byte); ok {
-			value = string(b)
-		} else {
-			value = values[i]
-		}
-
-		if fieldName == nodeIDField {
-			n, ok := toInt64(value)
-			if !ok {
-				return reflect.Value{}, 0, 0, fmt.Errorf("cannot convert nodeID column value to int64: %T", value)
-			}
-			nodeID = n
-		}
-		if fieldName == ancestorIDMapKey {
-			n, ok := toInt64(value)
-			if !ok {
-				return reflect.Value{}, 0, 0, fmt.Errorf("cannot convert ancestorID column value to int64: %T", value)
-			}
-			ancestorID = n
-			// Also populate ParentId on the struct so TreeDescendants is
-			// consistent with GetNode and Descendants.
-			if pf := newElem.Elem().FieldByName("ParentId"); pf.IsValid() && pf.CanSet() && n >= 0 {
-				pf.SetUint(uint64(n))
-			}
-		}
-
-		fieldVal := newElem.Elem().FieldByName(fieldName)
-		if !fieldVal.IsValid() || !fieldVal.CanSet() {
-			continue
-		}
-
-		if value == nil {
-			continue
-		}
-
-		// Some drivers (e.g. PostgreSQL) return numeric columns as []byte/string.
-		// Handle the string → numeric conversion explicitly before reflection assignment.
-		if s, ok := value.(string); ok && trySetFromString(s, fieldVal) {
-			continue
-		}
-
-		val := reflect.ValueOf(value)
-		if val.Type().AssignableTo(fieldVal.Type()) {
-			fieldVal.Set(val)
-		} else if val.Type().ConvertibleTo(fieldVal.Type()) {
-			fieldVal.Set(val.Convert(fieldVal.Type()))
-		} else {
-			return reflect.Value{}, 0, 0, fmt.Errorf("cannot assign type %s to field %s", val.Type(), fieldName)
+// linkTree appends every node to the Children field of its parent, found through Node.ParentId,
+// and returns the nodes whose parent is not among them. nodes are pointers to structs that embed
+// Node; a node without Node, or whose parent has no Children field of type []*T, is left unlinked.
+// Siblings, and the returned roots, are ordered by sort_order, then node id.
+func linkTree(nodes []reflect.Value) []reflect.Value {
+	type entry struct {
+		v       reflect.Value
+		node    Node
+		hasNode bool
+	}
+	entries := make([]entry, 0, len(nodes))
+	byID := make(map[uint]reflect.Value, len(nodes))
+	for _, v := range nodes {
+		n, ok := nodeOf(v)
+		entries = append(entries, entry{v: v, node: n, hasNode: ok})
+		if ok {
+			byID[n.NodeId] = v
 		}
 	}
-
-	return newElem, nodeID, ancestorID, nil
-}
-
-func buildTreeHierarchy(nodes map[int64]reflect.Value, ancestorMap map[int64]int64) []reflect.Value {
-	var roots []reflect.Value
-
-	// Process in sorted key order to ensure deterministic children ordering
-	keys := make([]int64, 0, len(nodes))
-	for k := range nodes {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		ni := nodes[keys[i]].Elem()
-		nj := nodes[keys[j]].Elem()
-		sfi := ni.FieldByName("SortOrder")
-		sfj := nj.FieldByName("SortOrder")
-		if sfi.IsValid() && sfj.IsValid() {
-			si := sfi.Float()
-			sj := sfj.Float()
-			if si != sj {
-				return si < sj
-			}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].node.SortOrder != entries[j].node.SortOrder {
+			return entries[i].node.SortOrder < entries[j].node.SortOrder
 		}
-		return keys[i] < keys[j]
+		return entries[i].node.NodeId < entries[j].node.NodeId
 	})
 
-	for _, nodeID := range keys {
-		node := nodes[nodeID]
-		ancestorID, hasAncestor := ancestorMap[nodeID]
-		if !hasAncestor {
-			roots = append(roots, node)
+	var roots []reflect.Value
+	for _, e := range entries {
+		parent, found := byID[e.node.ParentId]
+		if !e.hasNode || !found {
+			roots = append(roots, e.v)
 			continue
 		}
-
-		parent, found := nodes[ancestorID]
-		if !found {
-			roots = append(roots, node)
-			continue
-		}
-
-		childrenField := parent.Elem().FieldByName("Children")
-		if childrenField.IsValid() {
-			childrenField.Set(reflect.Append(childrenField, node))
+		children := parent.Elem().FieldByName("Children")
+		if children.IsValid() && children.CanSet() && children.Type() == reflect.SliceOf(e.v.Type()) {
+			children.Set(reflect.Append(children, e.v))
 		}
 	}
 	return roots

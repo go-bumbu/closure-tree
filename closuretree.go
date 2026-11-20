@@ -22,7 +22,6 @@ func validateTableName(name string) error {
 }
 
 const closureTblName = "closure_tree_rel"
-const ancestorIDMapKey = "ancestorId"
 
 var (
 	ErrItemIsNotTreeNode      = errors.New("the item does not embed Node")
@@ -69,7 +68,6 @@ type Tree struct {
 	metaTbl      string
 	lockTbl      string
 	dialect      dialect
-	col2FieldMap map[string]string
 	model        any // node model retained so Migrate can AutoMigrate it
 
 	schema        *schema.Schema // the parsed model schema
@@ -126,17 +124,9 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		return nil, err
 	}
 
-	// Generate a map of column names to field names
-	columnFieldMap := make(map[string]string)
-	for _, field := range stmt.Schema.Fields {
-		columnFieldMap[field.DBName] = field.Name
-	}
-	columnFieldMap[colAncestorID] = ancestorIDMapKey
-
 	ct := &Tree{
 		db:           db,
 		nodesTbl:     name,
-		col2FieldMap: columnFieldMap,
 		relationsTbl: relTbl,
 		metaTbl:      metaTbl,
 		lockTbl:      lockTbl,

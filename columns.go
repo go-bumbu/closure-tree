@@ -1,7 +1,8 @@
 package closuretree
 
-// Canonical database column names shared by the raw SQL (writers) and the row scanner via
-// col2FieldMap (readers). They are the single declared source for these names.
+// Canonical database column names shared by the raw SQL of the writes and the reads, whose rows
+// gorm's scanner maps back to the struct fields by these names. They are the single declared
+// source for these names.
 //
 // The SQL strings still spell the names inline for readability, but they are not free to drift:
 // TestColumnNamesMatchSchema asserts every constant here equals the column name GORM derives from
