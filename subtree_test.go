@@ -118,6 +118,8 @@ func TestSubtreeIDsFiltered(t *testing.T) {
 				// pruning is relative to each requested ancestor: x2 is requested itself
 				c.check(name+": prune with two ancestors", c.sub([]string{"a", "x2"}, f), "a", "a1", "x2", "x21")
 				c.check(name+": prune strictly below", c.sub(a, f, closuretree.DepthRange(1, -1)), "a1")
+				// the requested ancestor must match although the range leaves it out
+				c.check(name+": an ancestor that does not match, strictly below", c.sub([]string{"x"}, f, closuretree.DepthRange(1, -1)))
 			}
 		})
 	}
@@ -128,11 +130,15 @@ func TestSubtreeIDsReuse(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb, ct, id := filterTree(t, db)
 			c := subtreeChecker{t, gdb, ct, id}
+			if err := ct.Add(context.Background(), &filterNode{Name: "o1", Kind: "doc"}, nil, nil, "other"); err != nil {
+				t.Fatal(err)
+			}
 			other, err := ct.SubtreeIDs("other", []uint{id["a"], 0})
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.check("another tenant's nodes never appear", other)
+			c.check("another tenant's nodes never appear", c.sub([]string{""}), "a", "a1", "b", "b1", "x", "x1", "x2", "x21")
+			c.check("only the nodes of the tenant", other, "o1")
 
 			// one subquery value used in two statements, and twice in one
 			once := c.sub([]string{"a"}, closuretree.DepthRange(1, 1))
@@ -209,6 +215,17 @@ func TestSubtreeIDsOfErrors(t *testing.T) {
 			_ = broken.AddError(errBroken)
 			s, err = ct.SubtreeIDsOf(tenantF, broken)
 			add("SubtreeIDsOf, ancestors with an error", errBroken, s, err)
+			// no Error is set, but gorm cannot render a model it cannot parse, so it would embed nothing
+			unparsable := gdb.Session(&gorm.Session{Logger: logger.Discard}).Model(make(chan int)).Select("node_id")
+			if unparsable.Error != nil {
+				t.Fatalf("the fixture must not carry an error yet: %v", unparsable.Error)
+			}
+			s, err = ct.SubtreeIDsOf(tenantF, unparsable)
+			want := err // any error will do; a nil one fails the case below
+			if want == nil {
+				want = errors.New("an error")
+			}
+			add("SubtreeIDsOf, ancestors that cannot be rendered", want, s, err)
 			s, err = ct.SubtreeIDsOf(tenantF, ancestors, closuretree.DepthRange(2, 1))
 			add("SubtreeIDsOf, invalid range", closuretree.ErrInvalidDepthRange, s, err)
 			for _, e := range cases {
@@ -224,23 +241,34 @@ func TestSubtreeIDsOf(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb, ct, id := filterTree(t, db)
 			active := closuretree.Filter(closuretree.IsNull("archived_at"))
+			byName := func() *gorm.DB {
+				return gdb.Table(ct.NodeTableName()).Select("node_id").Where("name IN ?", []string{"a", "x2"})
+			}
+			byModel := func() *gorm.DB {
+				return gdb.Model(&filterNode{}).Select("node_id").Where("name IN ?", []string{"a", "x2"})
+			}
+			byRaw := func() *gorm.DB {
+				return gdb.Raw("SELECT node_id FROM "+ct.NodeTableName()+" WHERE name IN ?", []string{"a", "x2"})
+			}
 			for what, opts := range map[string][]closuretree.ReadOption{
 				"no options":     nil,
 				"prune":          {active},
 				"per node":       {active, closuretree.PerNode()},
 				"strictly below": {closuretree.DepthRange(1, -1)},
 			} {
-				ancestors := gdb.Table(ct.NodeTableName()).Select("node_id").Where("name IN ?", []string{"a", "x2"})
-				bySub, err := ct.SubtreeIDsOf(tenantF, ancestors, opts...)
-				if err != nil {
-					t.Fatal(err)
-				}
 				bySlice, err := ct.SubtreeIDs(tenantF, []uint{id["a"], id["x2"]}, opts...)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if got, want := namesIn(t, gdb, ct, bySub), namesIn(t, gdb, ct, bySlice); !slices.Equal(want, got) || len(want) == 0 {
-					t.Errorf("%s: slice form %v, subquery form %v", what, want, got)
+				want := namesIn(t, gdb, ct, bySlice)
+				for form, ancestors := range map[string]*gorm.DB{"Table": byName(), "Model": byModel(), "Raw": byRaw()} {
+					bySub, err := ct.SubtreeIDsOf(tenantF, ancestors, opts...)
+					if err != nil {
+						t.Fatalf("%s, %s: %v", what, form, err)
+					}
+					if got := namesIn(t, gdb, ct, bySub); !slices.Equal(want, got) || len(want) == 0 {
+						t.Errorf("%s, %s: slice form %v, subquery form %v", what, form, want, got)
+					}
 				}
 			}
 		})

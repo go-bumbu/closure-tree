@@ -2,8 +2,10 @@ package closuretree
 
 import (
 	"errors"
+	"fmt"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // ErrNoAncestors is returned when no ancestors are given to SubtreeIDs or SubtreeIDsOf. An empty
@@ -44,7 +46,8 @@ func (ct *Tree) SubtreeIDs(tenant string, ancestors []uint, opts ...ReadOption) 
 
 // SubtreeIDsOf is SubtreeIDs with the ancestors given as a subquery that selects a single column of
 // node ids. A nil subquery is ErrNoAncestors, and a subquery whose Error is set returns that error,
-// because gorm would render it as nothing and the statement would read IN (). Everything else is as
+// because gorm would render it as nothing and the statement would read IN (). A subquery that only
+// fails when rendered is rejected too. Everything else is as
 // in SubtreeIDs.
 func (ct *Tree) SubtreeIDsOf(tenant string, ancestors *gorm.DB, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
@@ -57,7 +60,25 @@ func (ct *Tree) SubtreeIDsOf(tenant string, ancestors *gorm.DB, opts ...ReadOpti
 	if ancestors.Error != nil {
 		return nil, ancestors.Error
 	}
+	if err := renderable(ancestors); err != nil {
+		return nil, err
+	}
 	return ct.subtree(tenant, ancestors, opts)
+}
+
+// renderable renders a subquery once in a dry-run session with a silent logger and returns an error
+// when that fails or produces no SQL. gorm renders a subquery that cannot be built (for example a
+// model it cannot parse) as nothing, and the statement would read IN ().
+func renderable(sub *gorm.DB) error {
+	var rows []map[string]any
+	dry := sub.Session(&gorm.Session{DryRun: true, Logger: logger.Discard}).Find(&rows)
+	if dry.Error != nil {
+		return fmt.Errorf("the ancestors subquery cannot be rendered: %w", dry.Error)
+	}
+	if dry.Statement.SQL.Len() == 0 {
+		return errors.New("the ancestors subquery cannot be rendered: it produces no SQL")
+	}
+	return nil
 }
 
 func (ct *Tree) subtree(tenant string, ancestors any, opts []ReadOption) (*gorm.DB, error) {
