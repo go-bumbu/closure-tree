@@ -3,6 +3,7 @@ package closuretree_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	closuretree "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
 	"github.com/google/go-cmp/cmp"
+	"gorm.io/gorm"
 )
 
 type filterNode struct {
@@ -742,6 +744,170 @@ func TestFilterOnTreeReads(t *testing.T) {
 				both(name+": PerNode changes nothing here", "a(a1) b(b1)", "", 0, f, closuretree.PerNode())
 			}
 			both("a leaf is pruned", "a(a1 x(x1 x2(x21))) b", "", 0, closuretree.Filter(closuretree.Eq("hidden", false)))
+		})
+	}
+}
+
+func TestWithFilterOnEveryRead(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := buildFilterTree(t, ct)
+			ctx := context.Background()
+			ftree, err := ct.WithFilter(closuretree.IsNull("archived_at"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			flat := func(tr *closuretree.Tree, opts ...closuretree.ReadOption) []string {
+				t.Helper()
+				var items []filterNode
+				if err := tr.Descendants(ctx, 0, 0, tenantF, &items, opts...); err != nil {
+					t.Fatal(err)
+				}
+				out := []string{}
+				for _, n := range items {
+					out = append(out, n.Name)
+				}
+				sort.Strings(out)
+				return out
+			}
+			everything := []string{"a", "a1", "b", "b1", "x", "x1", "x2", "x21"}
+			check := func(what string, want, got []string) {
+				t.Helper()
+				if diff := cmp.Diff(want, got); diff != "" {
+					t.Errorf("%s (-want +got):\n%s", what, diff)
+				}
+			}
+			check("the default filter prunes", []string{"a", "a1", "b", "b1"}, flat(ftree))
+			check("Unfiltered switches it off", everything, flat(ftree, closuretree.Unfiltered()))
+			// a per-call filter replaces the default: with AND this would be empty
+			check("a per-call Filter replaces it", []string{"x"},
+				flat(ftree, closuretree.Filter(closuretree.NotNull("archived_at")), closuretree.PerNode()))
+			check("the original Tree is unfiltered", everything, flat(ct))
+
+			var n filterNode
+			if err := ftree.GetNode(ctx, id["x"], tenantF, &n); !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("GetNode: want ErrNodeNotFound, got %v", err)
+			}
+			if err := ftree.GetNode(ctx, id["x"], tenantF, &n, closuretree.Unfiltered()); err != nil {
+				t.Errorf("GetNode with Unfiltered: %v", err)
+			}
+			var roots []*filterNode
+			if err := ftree.TreeDescendants(ctx, 0, 0, tenantF, &roots); err != nil || render(roots) != "a(a1) b(b1)" {
+				t.Errorf("TreeDescendants: %q, %v", render(roots), err)
+			}
+			ids, err := ftree.DescendantIds(ctx, 0, 0, tenantF)
+			if err != nil || len(ids) != 4 {
+				t.Errorf("DescendantIds: %d, %v", len(ids), err)
+			}
+			if _, err := ct.WithFilter(closuretree.Eq("nope", 1)); !errors.Is(err, closuretree.ErrUnknownColumn) {
+				t.Errorf("WithFilter on an unknown column: %v", err)
+			}
+		})
+	}
+}
+
+func TestWritesIgnoreTheFilter(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := buildFilterTree(t, ct)
+			ctx := context.Background()
+			ftree, err := ct.WithFilter(closuretree.IsNull("archived_at"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// GetOrAdd returns the existing non-matching child; FindChild on the same Tree does not see it
+			again := &filterNode{Name: "x"}
+			created, err := ftree.GetOrAdd(ctx, again, id["a"], tenantF, []string{"Name"})
+			if err != nil || created || again.NodeId != id["x"] {
+				t.Errorf("GetOrAdd: created=%v id=%d err=%v", created, again.NodeId, err)
+			}
+			var out filterNode
+			if found, err := ftree.FindChild(ctx, id["a"], tenantF, &filterNode{Name: "x"}, []string{"Name"}, &out); err != nil || found {
+				t.Errorf("FindChild: found=%v err=%v", found, err)
+			}
+			// Add under a non-matching parent, and after a non-matching sibling
+			if err := ftree.Add(ctx, &filterNode{Name: "x3", Kind: "doc"}, up(id["x"]), nil, tenantF); err != nil {
+				t.Errorf("Add under the non-matching node: %v", err)
+			}
+			if err := ftree.Add(ctx, &filterNode{Name: "a2", Kind: "doc"}, up(id["a"]), up(id["x"]), tenantF); err != nil {
+				t.Errorf("Add after the non-matching sibling: %v", err)
+			}
+			// Update and DeleteRecurse see every node
+			if err := ftree.Update(ctx, id["x1"], nil, up(id["b"]), nil, tenantF); err != nil {
+				t.Errorf("Update: %v", err)
+			}
+			if err := ftree.DeleteRecurse(ctx, id["x"], tenantF); err != nil {
+				t.Errorf("DeleteRecurse of the non-matching node: %v", err)
+			}
+			var left []filterNode
+			if err := ct.Descendants(ctx, 0, 0, tenantF, &left); err != nil {
+				t.Fatal(err)
+			}
+			names := []string{}
+			for _, n := range left {
+				names = append(names, n.Name)
+			}
+			sort.Strings(names)
+			if diff := cmp.Diff([]string{"a", "a1", "a2", "b", "b1", "x1"}, names); diff != "" {
+				t.Errorf("nodes left (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestWithFilterAndWithTxCompose(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			keep := closuretree.Eq("name", "keep")
+			ft, err := ct.WithFilter(keep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = gdb.Transaction(func(tx *gorm.DB) error {
+				filterThenTx := ft.WithTx(tx)
+				txThenFilter, err := ct.WithTx(tx).WithFilter(keep)
+				if err != nil {
+					return err
+				}
+				for _, name := range []string{"keep", "drop"} {
+					if err := filterThenTx.Add(ctx, &TestPayload{Name: name}, nil, nil, tenant1); err != nil {
+						return err
+					}
+				}
+				// both orders keep the filter and see the uncommitted rows
+				for what, tr := range map[string]*closuretree.Tree{"WithFilter then WithTx": filterThenTx, "WithTx then WithFilter": txThenFilter} {
+					var got []TestPayload
+					if err := tr.Descendants(ctx, 0, 0, tenant1, &got); err != nil {
+						return err
+					}
+					if len(got) != 1 || got[0].Name != "keep" {
+						return fmt.Errorf("%s: %+v", what, got)
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
