@@ -40,7 +40,8 @@ func (ct *Tree) writeTx(ctx context.Context, tenant string, fn func(tx *gorm.DB)
 // caller's transaction usable, and the original error is returned (or the panic re-raised).
 func (ct *Tree) savepointTx(tx *gorm.DB, tenant string, fn func(tx *gorm.DB) error) (err error) {
 	name := fmt.Sprintf("ct_sp_%d", savepointSeq.Add(1))
-	if err := tx.SavePoint(name).Error; err != nil {
+	if err := execSavepointStmt(tx, "SAVEPOINT "+name); err != nil {
+		// Nothing to roll back: the caller's transaction is untouched.
 		return fmt.Errorf("unable to create savepoint: %w", err)
 	}
 	panicked := true
@@ -70,7 +71,7 @@ func (ct *Tree) savepointTx(tx *gorm.DB, tenant string, fn func(tx *gorm.DB) err
 
 // rollbackToSavepoint undoes the work done since the savepoint name and then releases it.
 func rollbackToSavepoint(tx *gorm.DB, name string) error {
-	if err := tx.RollbackTo(name).Error; err != nil {
+	if err := execSavepointStmt(tx, "ROLLBACK TO SAVEPOINT "+name); err != nil {
 		return fmt.Errorf("unable to roll back to savepoint: %w", err)
 	}
 	if err := releaseSavepoint(tx, name); err != nil {
@@ -79,12 +80,17 @@ func rollbackToSavepoint(tx *gorm.DB, name string) error {
 	return nil
 }
 
-// releaseSavepoint releases the savepoint name. gorm has no call for it, so it is plain SQL that all
-// three databases accept. Like gorm's SavePoint and RollbackTo, it bypasses a prepared-statement
-// connection (gorm.Session.PrepareStmt): MySQL refuses savepoint statements in the prepared
-// statement protocol.
+// releaseSavepoint releases the savepoint name.
 func releaseSavepoint(tx *gorm.DB, name string) error {
-	stmt := "RELEASE SAVEPOINT " + name
+	return execSavepointStmt(tx, "RELEASE SAVEPOINT "+name)
+}
+
+// execSavepointStmt runs one savepoint statement (SAVEPOINT, ROLLBACK TO SAVEPOINT or RELEASE
+// SAVEPOINT) as plain SQL that all three databases accept, and returns its error on every database.
+// gorm's SavePoint and RollbackTo are not used: the PostgreSQL and SQLite dialectors discard the
+// statement's error. Like them, it bypasses a prepared-statement connection
+// (gorm.Session.PrepareStmt): MySQL refuses savepoint statements in the prepared statement protocol.
+func execSavepointStmt(tx *gorm.DB, stmt string) error {
 	if prepared, ok := tx.Statement.ConnPool.(*gorm.PreparedStmtTX); ok {
 		_, err := prepared.Tx.ExecContext(tx.Statement.Context, stmt)
 		return err
