@@ -3,6 +3,7 @@ package closuretree_test
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -312,6 +313,7 @@ type reservedNode struct {
 	Children []*reservedNode `gorm:"-"`
 }
 
+//nolint:gocyclo // test function covers many assertion branches
 func TestReadsQuoteReservedColumnNames(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -349,6 +351,14 @@ func TestReadsQuoteReservedColumnNames(t *testing.T) {
 			}
 			if found, err := ct.FindChild(ctx, p.NodeId, tenant1, &reservedNode{Group: "g"}, []string{"Group"}, &got); err != nil || !found {
 				t.Errorf("FindChild: %v, %v", found, err)
+			}
+			var second []reservedNode
+			byOrder := closuretree.Filter(closuretree.Eq("order", 2))
+			if err := ct.Descendants(ctx, 0, 0, tenant1, &second, byOrder, closuretree.PerNode()); err != nil || len(second) != 1 {
+				t.Errorf("filter on a reserved-word column: %d, %v", len(second), err)
+			}
+			if err := ct.Descendants(ctx, 0, 0, tenant1, &second, byOrder); err != nil { // prune: the root has order 1
+				t.Errorf("prune on a reserved-word column: %v", err)
 			}
 		})
 	}
@@ -553,6 +563,108 @@ func TestFilterOnSingleNodeReads(t *testing.T) {
 			if err != nil || created || again.NodeId != id["x"] {
 				t.Errorf("GetOrAdd: created=%v id=%d err=%v", created, again.NodeId, err)
 			}
+		})
+	}
+}
+
+func TestFilterOnFlatReads(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := buildFilterTree(t, ct)
+			ctx := context.Background()
+
+			nameOf := map[uint]string{}
+			for name, nodeID := range id {
+				nameOf[nodeID] = name
+			}
+			// both runs Descendants and DescendantIds and compares each, sorted, with want.
+			both := func(what string, want []string, parent string, maxDepth int, opts ...closuretree.ReadOption) {
+				t.Helper()
+				var items []filterNode
+				if err := ct.Descendants(ctx, id[parent], maxDepth, tenantF, &items, opts...); err != nil {
+					t.Fatalf("%s: %v", what, err)
+				}
+				ids, err := ct.DescendantIds(ctx, id[parent], maxDepth, tenantF, opts...)
+				if err != nil {
+					t.Fatalf("%s: %v", what, err)
+				}
+				fromItems, fromIDs := []string{}, []string{}
+				for _, n := range items {
+					fromItems = append(fromItems, n.Name)
+				}
+				for _, nodeID := range ids {
+					fromIDs = append(fromIDs, nameOf[nodeID])
+				}
+				sort.Strings(fromItems)
+				sort.Strings(fromIDs)
+				if diff := cmp.Diff(want, fromItems); diff != "" {
+					t.Errorf("%s, Descendants (-want +got):\n%s", what, diff)
+				}
+				if diff := cmp.Diff(want, fromIDs); diff != "" {
+					t.Errorf("%s, DescendantIds (-want +got):\n%s", what, diff)
+				}
+			}
+			// id[""] is 0: the virtual root
+			everything := []string{"a", "a1", "b", "b1", "x", "x1", "x2", "x21"}
+			per := closuretree.PerNode()
+
+			filters := map[string]closuretree.ReadOption{
+				"IsNull":       closuretree.Filter(closuretree.IsNull("archived_at")),
+				"Eq with NULL": closuretree.Filter(closuretree.Eq("note", "keep")), // note is NULL on x: prune must treat NULL as "does not match"
+			}
+			for name, f := range filters {
+				both(name+": prune from the root", []string{"a", "a1", "b", "b1"}, "", 0, f)
+				both(name+": per node from the root", []string{"a", "a1", "b", "b1", "x1", "x2", "x21"}, "", 0, f, per)
+				both(name+": prune under a", []string{"a1"}, "a", 0, f)
+				both(name+": per node under a", []string{"a1", "x1", "x2", "x21"}, "a", 0, f, per)
+				both(name+": prune under the non-matching node", []string{}, "x", 0, f)
+				both(name+": per node under the non-matching node", []string{"x1", "x2", "x21"}, "x", 0, f, per)
+				both(name+": prune under x2", []string{"x21"}, "x2", 0, f) // only the path from the requested parent counts
+				both(name+": prune with maxDepth 1", []string{"a", "b"}, "", 1, f)
+			}
+
+			operators := []struct {
+				name string
+				cond closuretree.Cond
+				want []string
+			}{
+				{"Eq false", closuretree.Eq("hidden", false), []string{"a", "a1", "b", "x", "x1", "x2", "x21"}},
+				{"Eq true", closuretree.Eq("hidden", true), []string{"b1"}},
+				{"Eq string", closuretree.Eq("kind", "folder"), []string{"b"}},
+				{"Eq nil", closuretree.Eq("note", nil), []string{"x"}},
+				{"NotNull", closuretree.NotNull("archived_at"), []string{"x"}},
+				{"In", closuretree.In("name", "a", "b"), []string{"a", "b"}},
+				{"In without values", closuretree.In("name"), []string{}},
+				{"Go field name", closuretree.IsNull("ArchivedAt"), []string{"a", "a1", "b", "b1", "x1", "x2", "x21"}},
+			}
+			for _, op := range operators {
+				both("per node, "+op.name, op.want, "", 0, closuretree.Filter(op.cond), per)
+			}
+
+			docsNotHidden := []string{"a", "a1", "x", "x1", "x2", "x21"}
+			both("two conds are joined with AND", docsNotHidden, "", 0,
+				closuretree.Filter(closuretree.Eq("kind", "doc"), closuretree.Eq("hidden", false)), per)
+			both("two Filter options are joined with AND", docsNotHidden, "", 0,
+				closuretree.Filter(closuretree.Eq("kind", "doc")), closuretree.Filter(closuretree.Eq("hidden", false)), per)
+
+			// a filter may name a column that Columns did not select
+			var named []filterNode
+			err = ct.Descendants(ctx, 0, 0, tenantF, &named, closuretree.Columns("name"),
+				closuretree.Filter(closuretree.Eq("kind", "folder")), per)
+			if err != nil || len(named) != 1 || named[0].Name != "b" || named[0].Kind != "" {
+				t.Errorf("a filter on a column that is not selected: %+v, %v", named, err)
+			}
+
+			// review focus 4
+			both("no options", everything, "", 0)
+			both("an empty Filter", everything, "", 0, closuretree.Filter())
+			both("PerNode without a filter", everything, "", 0, per)
 		})
 	}
 }

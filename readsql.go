@@ -125,6 +125,24 @@ func (ct *Tree) descendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDepth 
 		s.add("  AND parent_rel.tenant = nodes.tenant\n")
 	}
 	s.add("WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.tenant = ?", parent, maxDepth, tenant)
+	if len(p.conds) > 0 {
+		if p.perNode {
+			filter, fargs := ct.matchSQL("nodes", p.conds)
+			s.add("\n  AND "+filter, fargs...)
+		} else {
+			// prune: reject a node when any node on the path from the requested parent down to it,
+			// both ends included, does not match. The virtual root has no node row and always passes.
+			notMatch, nargs := ct.notMatchSQL("mid", p.conds)
+			s.add("\n  AND NOT EXISTS (\n")
+			s.add("    SELECT 1\n")
+			s.add("    FROM " + ct.relationsTbl + " AS up\n")
+			s.add("    JOIN " + ct.relationsTbl + " AS down ON down.ancestor_id = up.descendant_id AND down.tenant = up.tenant\n")
+			s.add("    JOIN " + ct.nodesTbl + " AS mid ON mid.node_id = up.descendant_id AND mid.tenant = up.tenant\n")
+			s.add("    WHERE up.ancestor_id = ? AND up.tenant = ?\n", parent, tenant)
+			s.add("      AND down.descendant_id = nodes.node_id\n")
+			s.add("      AND "+notMatch+"\n  )", nargs...)
+		}
+	}
 	s.add("\nORDER BY ct.depth, nodes.sort_order ASC, nodes.node_id ASC;")
 	return s.b.String(), s.args
 }
