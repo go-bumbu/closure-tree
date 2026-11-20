@@ -21,6 +21,10 @@ import (
 // out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the same
 // way GetNode does (including NodeId and the read-only ParentId) and found is true. When nothing
 // matches, found is false and err is nil.
+//
+// FindChild honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A child
+// that does not match the filter is not found; the parent's own match is not checked. Column names
+// of every option are validated, so an unknown one returns ErrUnknownColumn.
 func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, match any, matchFields []string, out any, opts ...ReadOption) (found bool, err error) {
 	if err = checkItem(match); err != nil {
 		return false, err

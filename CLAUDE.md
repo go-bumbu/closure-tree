@@ -28,13 +28,16 @@ LOCAL_SQLITE=true go test -run TestTreeGetNode ./...
 
 ### Core files
 
-- **`closuretree.go`** — `Tree` struct and all CRUD methods. All SQL is raw via `fmt.Sprintf` with table name substitution (never user input). `New` validates table names with a regex before any migration. Write operations go through `writeTx` in `lock.go`, not `db.Transaction(...)` directly.
+- **`closuretree.go`** — `Tree` struct and all CRUD methods. Write SQL is raw via `fmt.Sprintf` with table name substitution (never user input); read SQL is built in `readsql.go`. `New` validates table names with a regex before any migration. Write operations go through `writeTx` in `lock.go`, not `db.Transaction(...)` directly.
 - **`node.go`** — `Node` struct to embed in user types. `ParentId` is read-only (populated via LEFT JOIN on read, ignored on write). Reflection helpers `hasNode`/`hasNodeType`/`findNodeValue` support multi-level embedding.
 - **`leaves.go`** — `Leaf` struct for many-to-many targets. `GetLeaves` auto-discovers the `many2many:` GORM tag, validates the m2m table name, then joins through the closure table.
 - **`tx.go`** — `WithTx` (a copy of the Tree bound to the caller's transaction), `LockTenant`, `ErrNotInTransaction`.
 - **`lock.go`** — `writeTx`: runs a write in its own transaction, or in a savepoint inside the caller's; takes the tenant lock.
 - **`placement.go`** — `AddOption`, `PlaceLast`, `ErrConflictingPlacement` for `Add` and `GetOrAdd`.
 - **`bulkdelete.go`** — `DeleteRecurseMany` (set semantics, chunked ids) and `DeleteTenant`.
+- **`readoptions.go`** — the read options (`Filter`, `Eq`, `IsNull`, `NotNull`, `In`, `PerNode`, `Unfiltered`, `Columns`), `planRead` (validates them into a `readPlan`), `WithFilter` and `ErrUnknownColumn`.
+- **`readsql.go`** — builds the read statements from parts (`sqlBuf`, select list, match and not-match predicates); identifiers are validated and quoted, values are bound.
+- **`scan.go`** — scans each row with gorm's scanner into the Tree's model, then copies it into the caller's element type by Go field name.
 - **`build.go`** — `BuildFromParents`: builds the closure rows of existing nodes from `ParentLink`s, validated in Go before any write; options `Rebuild` and `OrphansToRoot`.
 
 ### Key invariants
@@ -49,4 +52,8 @@ LOCAL_SQLITE=true go test -run TestTreeGetNode ./...
 
 ### `TreeDescendants` requirements
 
-The items slice must be `[]*YourType` and `YourType` must have a `Children []*YourType` field. Scanning is done via `mapRowToStruct` using the `col2FieldMap` built at `New` time; unknown columns (like `cte_depth`, `ancestor_id`) are silently skipped.
+The items slice must be `[]*YourType` and `YourType` must have a `Children []*YourType` field. Each row is scanned with gorm's scanner into the Tree's model (parsed at `New` time), then copied into `YourType` by Go field name (see `scan.go`); gorm skips result columns the model has no field for (like `cte_depth`). `YourType` may be the model, a smaller struct, or a struct wrapping the model; a same-named field of a type that cannot be assigned, converted or dereferenced fails the read before it queries. Children are linked through the scanned row's node id and parent id, so `YourType` need not embed `Node`.
+
+### Read options
+
+Every read takes `opts ...ReadOption`; `planRead` validates all of them first, so an unknown column returns `ErrUnknownColumn` from every read, also from one that ignores the option. An empty `Filter()` has no effect; only `Unfiltered()` switches the Tree's default filter off, and only a `Filter` with a cond replaces it. `WithFilter` replaces any existing default filter. Writes are never filtered.

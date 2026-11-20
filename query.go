@@ -7,7 +7,11 @@ import (
 	"sort"
 )
 
-// GetNode loads a single item into the passed pointer
+// GetNode loads a single item into the passed pointer, scanning straight into it.
+//
+// GetNode honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A node that
+// does not match the filter returns ErrNodeNotFound. Column names of every option are validated,
+// so an unknown one returns ErrUnknownColumn.
 func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item any, opts ...ReadOption) error {
 
 	if err := checkItem(item); err != nil {
@@ -81,6 +85,17 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 // parent determines the root node id of to load.
 // maxDepth determines the depth of the relationship to load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
+//
+// Each row is scanned with gorm's scanner into the Tree's model and then copied into the element
+// type by Go field name. The element type may be the model, a smaller struct, or a struct that
+// wraps the model. A same-named field of another type is assigned, converted or dereferenced; if
+// that is not possible the read returns "cannot assign type ... to field ..." before querying.
+//
+// Descendants honours the read options Filter, Unfiltered, PerNode and Columns. By default a node
+// is returned only if it and every node between parent and it match the filter; with PerNode it
+// is returned when it matches. In the default mode a parent that is a real node and does not
+// match gives an empty result; parent 0 always matches. Column names of every option are
+// validated, so an unknown one returns ErrUnknownColumn.
 func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any, opts ...ReadOption) (err error) {
 	sliceVal, err := pointerToSlice(items)
 	if err != nil {
@@ -118,6 +133,10 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 }
 
 // DescendantIds behaves the same as Descendants but only returns the node IDs for the search query.
+//
+// DescendantIds honours the read options Filter, Unfiltered and PerNode, with the meaning they
+// have in Descendants; Columns is ignored. Column names of every option are validated, so an
+// unknown one returns ErrUnknownColumn.
 func (ct *Tree) DescendantIds(ctx context.Context, parent uint, maxDepth int, tenant string, opts ...ReadOption) ([]uint, error) {
 	var err error
 	tenant, err = validateTenant(tenant)
@@ -158,6 +177,16 @@ const absMaxDepth = 2147483647
 // parent determines the root node id of to load.
 // maxDepth determines the depth of the relationship to load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
+//
+// Each row is scanned with gorm's scanner into the Tree's model and then copied into the element
+// type by Go field name, as in Descendants. Children are linked through the node id and parent id
+// of the scanned row, so the element type does not have to embed Node.
+//
+// TreeDescendants honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A
+// node that does not match the filter is left out with its whole subtree; its children are never
+// re-parented. A parent that is a real node and does not match gives an empty result; parent 0
+// always matches. Column names of every option are validated, so an unknown one returns
+// ErrUnknownColumn.
 //
 // Note: this uses a recursive CTE. On MySQL 8 the recursion is bounded by cte_max_recursion_depth
 // (default 1000), so loading a subtree deeper than that many levels fails with error 3636; SQLite
@@ -200,6 +229,10 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 }
 
 // TreeDescendantsIds returns the tree structure of the descendants to the passed item.
+//
+// TreeDescendantsIds honours the read options Filter and Unfiltered, with the meaning they have in
+// TreeDescendants; PerNode and Columns are ignored. Column names of every option are validated, so
+// an unknown one returns ErrUnknownColumn.
 //
 // Note: like TreeDescendants this uses a recursive CTE, so on MySQL 8 it is bounded by
 // cte_max_recursion_depth (default 1000, error 3636 beyond it); SQLite and PostgreSQL are not.

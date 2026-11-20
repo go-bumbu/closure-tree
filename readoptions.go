@@ -61,8 +61,8 @@ type readConfig struct {
 type ReadOption func(*readConfig)
 
 // Filter keeps only the nodes that match every condition. For this call it replaces the Tree's
-// default filter (see WithFilter); several Filter options are joined. An empty Filter has no effect,
-// so the default filter still applies.
+// default filter (see WithFilter); several Filter options are joined. An empty Filter has no
+// effect, so the default filter still applies.
 func Filter(conds ...Cond) ReadOption {
 	return func(c *readConfig) {
 		c.filter = append(c.filter, conds...)

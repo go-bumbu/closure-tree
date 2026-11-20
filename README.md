@@ -47,6 +47,9 @@ tables and should be called once at application start up.
 A model must not declare its own field mapped to the column `parent_id` (the embedded `Node` already
 owns it as `ParentId`); `New` returns `ErrParentIDColumn` in that case.
 
+Tables created by v0.8.0 or earlier may carry a stale `parent_id` column. Reads ignore it, and it is
+safe to drop.
+
 To populate the tree we do as follows:
 ```GO
 ctx := context.Background()
@@ -158,6 +161,51 @@ found, err := tree.FindChild(ctx, parentID, "user1", Tag{Name: "b"}, []string{"N
 never left half created and two callers creating the same brand-new child are serialized: the
 first creates it, the second finds it and gets `created = false`, so no duplicate is produced.
 A new node is placed first among its siblings; pass `closuretree.PlaceLast()` to append it last.
+
+### Narrowing reads
+
+Every read takes trailing options that choose which nodes it returns and which columns it fills.
+
+```GO
+// Tag also has the field `Hidden bool`
+visible, err := tree.WithFilter(ct.Eq("Hidden", false)) // a Tree whose reads skip hidden tags
+// handle error
+
+var tags []*Tag
+err = visible.Descendants(ctx, 0, 1, "user1", &tags, ct.Columns("Name")) // one level, only Name filled
+// handle error
+
+err = visible.Descendants(ctx, 0, 1, "user1", &tags, ct.Unfiltered()) // hidden tags too
+```
+
+* `Filter(conds ...Cond)` keeps the nodes that match every cond. The conds are `Eq`, `IsNull`,
+  `NotNull` and `In`. `Eq` with `nil` means `IsNull`; `In` with no values matches nothing.
+* A column is named by its column name or its Go field name. An unknown name returns
+  `ErrUnknownColumn` before any query runs, from every read, also one that ignores the option.
+* A node does not match when the predicate is not true, which includes NULL.
+* Meaning of the filter per read:
+
+| Read | Meaning |
+|---|---|
+| `Descendants`, `DescendantIds` | A node is returned only if it and every node between the requested parent and it match. `PerNode()` turns this off: a node is returned when it matches. |
+| `TreeDescendants`, `TreeDescendantsIds` | A node that does not match is left out with its whole subtree. Its children are never re-parented. |
+| `GetNode` | A node that does not match returns `ErrNodeNotFound`. |
+| `FindChild` | A child that does not match is not found. The parent's own match is not checked. |
+
+* A requested parent that is a real node and does not match gives an empty result in the prune and
+  tree reads; parent 0 always matches. With `PerNode()` the parent is not checked.
+* `Columns(names ...string)` selects only the named columns, in `GetNode`, `FindChild`,
+  `Descendants` and `TreeDescendants`. `node_id`, `tenant` and `sort_order` are always included, and
+  the parent is always computed. Fields that are not selected stay zero. A filter may name a column
+  that is not selected.
+* `WithFilter(conds ...Cond)` returns a copy of the Tree with a default filter for every read. It
+  replaces any default the Tree already has; with no conds the copy has none. A `Filter` with at
+  least one cond replaces the default for one call; `Unfiltered()` switches it off for one call. An
+  empty `Filter()` has no effect.
+* Writes are never filtered, also on a filtered Tree. `GetOrAdd` therefore returns an existing child
+  that `FindChild` on the same Tree does not see.
+* An option that a read does not honour has no effect there. `PerNode` only changes `Descendants`
+  and `DescendantIds`; `Columns` is ignored by the id reads.
 
 ### Sort order
 
@@ -336,15 +384,17 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 * `BuildFromParents(ctx, tenant, links, opts ...BuildOption) error` — Build the closure rows and `sort_order` of node rows that already exist from one `ParentLink` per node (see "Adopting an existing table"); options `Rebuild()` and `OrphansToRoot()`
 
 **Read operations**
-* `GetNode(ctx, nodeID, tenant, item)` — Load a single node into `item`
-* `FindChild(ctx, parentID, tenant, match, matchFields, out) (found bool, err error)` — Find a direct child whose fields named in `matchFields` equal those of `match` (zero values included), tenant-scoped; populates `out` like `GetNode`
+Every read below except `IsDescendant`, `IsChildOf` and `GetLeaves` takes trailing `opts ...ReadOption` (see "Narrowing reads").
+* `GetNode(ctx, nodeID, tenant, item, opts ...ReadOption)` — Load a single node into `item`
+* `FindChild(ctx, parentID, tenant, match, matchFields, out, opts ...ReadOption) (found bool, err error)` — Find a direct child whose fields named in `matchFields` equal those of `match` (zero values included), tenant-scoped; populates `out` like `GetNode`
 * `IsDescendant(ctx, ancestorID, descendantID, tenant) (bool, error)` — Check ancestry
 * `IsChildOf(ctx, nodeID, parentID, tenant) (bool, error)` — Check direct parent relationship
-* `Descendants(ctx, parent, maxDepth, tenant, items)` — Flat list of all nested children (ordered by `sort_order ASC, node_id ASC`)
-* `DescendantIds(ctx, parent, maxDepth, tenant) ([]uint, error)` — Same, IDs only
-* `TreeDescendants(ctx, parent, maxDepth, tenant, items)` — Nested tree via `Children []*T` field
-* `TreeDescendantsIds(ctx, parent, maxDepth, tenant) ([]*TreeNode, error)` — Nested `TreeNode` structs
-* `GetLeaves(items, parentId, maxDepth, tenant)` — Many-to-many leaves via GORM `many2many:` tag
+* `Descendants(ctx, parent, maxDepth, tenant, items, opts ...ReadOption)` — Flat list of all nested children (ordered by `sort_order ASC, node_id ASC`)
+* `DescendantIds(ctx, parent, maxDepth, tenant, opts ...ReadOption) ([]uint, error)` — Same, IDs only
+* `TreeDescendants(ctx, parent, maxDepth, tenant, items, opts ...ReadOption)` — Nested tree via `Children []*T` field
+* `TreeDescendantsIds(ctx, parent, maxDepth, tenant, opts ...ReadOption) ([]*TreeNode, error)` — Nested `TreeNode` structs
+* `GetLeaves(ctx, items, parentId, maxDepth, tenant)` — Many-to-many leaves via GORM `many2many:` tag
+* `WithFilter(conds ...Cond) (*Tree, error)` — Return a copy of the tree with a default read filter
 
 **Sort-order maintenance**
 * `Renormalize(ctx, parentID, tenant)` — Rewrite children of `parentID` with evenly spaced `sort_order` values (10, 20, 30, …)
