@@ -44,12 +44,22 @@ func TestBuildFromParentsMatchesAdd(t *testing.T) {
 			// reference tenant: built with Add in one transaction, each node placed last
 			err = gdb.Transaction(func(tx *gorm.DB) error {
 				tt, idOf := ct.WithTx(tx), map[uint]uint{}
-				for _, kp := range shape {
+				for i, kp := range shape {
 					n := &TestPayload{Name: fmt.Sprintf("k%d", kp[0])}
 					if err := tt.Add(ctx, n, up(idOf[kp[1]]), nil, "ref", closuretree.PlaceLast()); err != nil {
 						return err
 					}
 					idOf[kp[0]] = n.NodeId
+					// A real database has statistics; this test is about row equality, not about
+					// planning. On freshly created tables PostgreSQL has none and plans the
+					// sibling lookup badly, so gather them once after the first 50 nodes.
+					if i+1 == 50 && db.DbType() == testdbs.DBTypePostgres {
+						for _, tbl := range []string{ct.NodeTableName(), ct.ClosureTableName()} {
+							if err := tx.Exec("ANALYZE " + tbl).Error; err != nil {
+								return err
+							}
+						}
+					}
 				}
 				return nil
 			})
@@ -222,6 +232,37 @@ func TestBuildFromParentsValidation(t *testing.T) {
 			}
 			if got := countTenant(t, gdb, ct, "empty"); got.Closure != 0 || got.Nodes != 0 {
 				t.Errorf("empty tenant: %+v", got)
+			}
+		})
+	}
+}
+
+// TestBuildFromParentsPlainBuildRemovesStaleMeta checks that a build without Rebuild deletes the
+// tenant's meta rows too.
+func TestBuildFromParentsPlainBuildRemovesStaleMeta(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			seedNodes(t, gdb, db, tenant1, []seed{{1, "a"}, {2, "b"}})
+			metaTable := "closure_tree_meta_" + ct.NodeTableName()
+			if err := gdb.Exec("INSERT INTO "+metaTable+" (tenant, parent_id, min_halvings) VALUES (?, ?, ?)", tenant1, 1, 0).Error; err != nil {
+				t.Fatal(err)
+			}
+			if got := countTenant(t, gdb, ct, tenant1); got.Meta != 1 {
+				t.Fatalf("precondition: want one meta row, got %d", got.Meta)
+			}
+			links := []closuretree.ParentLink{{NodeID: 1}, {NodeID: 2, ParentID: 1}}
+			if err := ct.BuildFromParents(ctx, tenant1, links); err != nil {
+				t.Fatal(err)
+			}
+			if got := countTenant(t, gdb, ct, tenant1); got.Meta != 0 {
+				t.Errorf("a plain build must delete stale meta rows, %d left", got.Meta)
 			}
 		})
 	}
