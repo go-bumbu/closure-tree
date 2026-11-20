@@ -165,6 +165,16 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 	s.add("\tFROM " + ct.nodesTbl + " AS nodes\n")
 	s.add("\tJOIN " + ct.relationsTbl + " AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant\n")
 	s.add("\tWHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.tenant = ? AND ct.tenant = ?", parent, tenant, tenant)
+	filter, fargs := ct.matchSQL("nodes", p.conds)
+	if filter != "" {
+		s.add(" AND "+filter, fargs...)
+		if parent != 0 {
+			// the requested parent must match too; the virtual root has no row and always matches
+			reqMatch, rargs := ct.matchSQL("req", p.conds)
+			s.add("\n\t\tAND EXISTS (\n\t\t\tSELECT 1 FROM "+ct.nodesTbl+" AS req\n\t\t\tWHERE req.node_id = ? AND req.tenant = ? AND "+reqMatch+"\n\t\t)",
+				append([]any{parent, tenant}, rargs...)...)
+		}
+	}
 	s.add("\n\n\tUNION ALL\n\n")
 	s.add("\t-- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree\n")
 	s.add("\tSELECT\n\t\t" + cols + ",\n")
@@ -174,6 +184,9 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 	s.add("\tJOIN "+ct.relationsTbl+" AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?\n", tenant)
 	s.add("\tJOIN " + ct.nodesTbl + " AS nodes ON nodes.node_id = ct.descendant_id\n")
 	s.add("\tWHERE nodes.tenant = ? AND t.cte_depth < ?", tenant, maxDepth)
+	if filter != "" {
+		s.add(" AND "+filter, fargs...)
+	}
 	s.add("\n\t)\n")
 	if idsOnly {
 		s.add("\tSELECT Tree.node_id, Tree.ancestor_id, Tree.sort_order FROM Tree ORDER BY cte_depth;")

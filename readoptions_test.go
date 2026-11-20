@@ -668,3 +668,80 @@ func TestFilterOnFlatReads(t *testing.T) {
 		})
 	}
 }
+
+// render writes a tree as text with the children of every node sorted by name, e.g.
+// "a(a1 x(x1 x2(x21))) b(b1)".
+func render(nodes []*filterNode) string {
+	parts := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		s := n.Name
+		if len(n.Children) > 0 {
+			s += "(" + render(n.Children) + ")"
+		}
+		parts = append(parts, s)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
+}
+
+// renderIDs does the same for TreeNode values, using nameOf for the names.
+func renderIDs(nodes []*closuretree.TreeNode, nameOf map[uint]string) string {
+	parts := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		s := nameOf[n.NodeId]
+		if len(n.Children) > 0 {
+			s += "(" + renderIDs(n.Children, nameOf) + ")"
+		}
+		parts = append(parts, s)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
+}
+
+func TestFilterOnTreeReads(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := buildFilterTree(t, ct)
+			ctx := context.Background()
+			nameOf := map[uint]string{}
+			for name, nodeID := range id {
+				nameOf[nodeID] = name
+			}
+			both := func(what, want, parent string, maxDepth int, opts ...closuretree.ReadOption) {
+				t.Helper()
+				var roots []*filterNode
+				if err := ct.TreeDescendants(ctx, id[parent], maxDepth, tenantF, &roots, opts...); err != nil {
+					t.Fatalf("%s: %v", what, err)
+				}
+				ids, err := ct.TreeDescendantsIds(ctx, id[parent], maxDepth, tenantF, opts...)
+				if err != nil {
+					t.Fatalf("%s: %v", what, err)
+				}
+				if got := render(roots); got != want {
+					t.Errorf("%s, TreeDescendants: want %q, got %q", what, want, got)
+				}
+				if got := renderIDs(ids, nameOf); got != want {
+					t.Errorf("%s, TreeDescendantsIds: want %q, got %q", what, want, got)
+				}
+			}
+			both("no options", "a(a1 x(x1 x2(x21))) b(b1)", "", 0)
+			for name, f := range map[string]closuretree.ReadOption{
+				"IsNull":       closuretree.Filter(closuretree.IsNull("archived_at")),
+				"Eq with NULL": closuretree.Filter(closuretree.Eq("note", "keep")),
+			} {
+				both(name+": from the root", "a(a1) b(b1)", "", 0, f)
+				both(name+": under the non-matching node", "", "x", 0, f)
+				both(name+": under x2", "x21", "x2", 0, f)
+				both(name+": maxDepth 1", "a b", "", 1, f)
+				both(name+": PerNode changes nothing here", "a(a1) b(b1)", "", 0, f, closuretree.PerNode())
+			}
+			both("a leaf is pruned", "a(a1 x(x1 x2(x21))) b", "", 0, closuretree.Filter(closuretree.Eq("hidden", false)))
+		})
+	}
+}
