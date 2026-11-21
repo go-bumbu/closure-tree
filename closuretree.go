@@ -53,11 +53,12 @@ var (
 // calls creating duplicate siblings. Writes for different tenants run concurrently, and reads never
 // take the lock. The exception is MySQL at its default isolation level (REPEATABLE READ), where
 // tree writes of different tenants can wait on each other, and deadlock: while a caller's
-// transaction is open (see WithTx), and, inside or outside one, when DeleteRecurse,
-// DeleteRecurseMany, DeleteTenant or BuildFromParents runs. No closure-table index leads with the
-// tenant, so the deletes of those four lock closure rows of other tenants. A deadlock (error 1213)
-// means MySQL has already rolled back the whole transaction: retry the call on a Tree not bound to
-// a transaction, or roll back and retry the caller's transaction on one bound with WithTx.
+// transaction is open (see WithTx), and, inside or outside one, when a write that deletes closure
+// rows runs, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant or BuildFromParents. No
+// closure-table index leads with the tenant, so those deletes lock closure rows of other tenants. A
+// deadlock (error 1213) means MySQL has already rolled back the whole transaction: retry the call
+// on a Tree not bound to a transaction, or roll back and retry the caller's transaction on one
+// bound with WithTx.
 //
 // The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MySQL (released
 // when the transaction ends); on SQLite, which already serializes writers per database, it is the

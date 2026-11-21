@@ -442,15 +442,17 @@ err := db.Transaction(func(tx *gorm.DB) error {
   transaction. Roll back and retry the transaction; continuing would run the following statements
   outside any transaction. The tree's error contains the driver's error, so you can test for it with
   `errors.As` (for `github.com/go-sql-driver/mysql`, a `*mysql.MySQLError` with `Number` 1213).
+  Inside a tree write the deadlock error also matches `ErrSavepointRollback`, because the savepoint
+  went with the transaction: if you retry, test for the deadlock first.
 * MySQL at its default isolation level (REPEATABLE READ): while your transaction is open, tree writes
   of different tenants can wait on each other, and deadlock. Keep such transactions short, or run
   them at READ COMMITTED.
-* MySQL at its default isolation level (REPEATABLE READ): `DeleteRecurse`, `DeleteRecurseMany`,
-  `DeleteTenant` and `BuildFromParents` lock closure rows of other tenants, because no closure-table
-  index leads with the tenant. They can therefore deadlock with other tenants' writes, inside or
-  outside your transaction. Error 1213 means the whole transaction was rolled back: on a tree bound
-  with `WithTx` roll back and retry your transaction; on a tree not bound to a transaction retry
-  the call.
+* MySQL at its default isolation level (REPEATABLE READ): writes that delete closure rows, such as
+  `DeleteRecurse`, `DeleteRecurseMany`, `DeleteTenant` and `BuildFromParents`, lock closure rows of
+  other tenants, because no closure-table index leads with the tenant. They can therefore deadlock
+  with other tenants' writes, inside or outside your transaction. Error 1213 means the whole
+  transaction was rolled back: on a tree bound with `WithTx` roll back and retry your transaction;
+  on a tree not bound to a transaction retry the call.
 * After a successful tree write the tenant lock is held until your transaction ends, so do not hold
   the transaction across slow work. After a failed tree write the lock may already be released;
   `LockTenant` holds it for the whole transaction.
@@ -477,8 +479,8 @@ first and then writes fails with a busy error that the timeout does not retry.
 
 On PostgreSQL the transactions the library opens itself (any write on a tree not bound to a
 transaction) run at READ COMMITTED, whatever the connection's default level is. On MySQL they run at
-the connection's default level, so at REPEATABLE READ the four calls named above can deadlock with
-other tenants' writes there too.
+the connection's default level, so at REPEATABLE READ the writes that delete closure rows can
+deadlock with other tenants' writes there too.
 
 ### Adopting an existing table
 
@@ -518,7 +520,8 @@ err = tree.BuildFromParents(ctx, "user1", links)
   * `ErrClosureExists`: the tenant already has closure rows. With the `Rebuild()` option they are
     deleted first, and the tree is built again.
 * It runs under the tenant lock. Through `WithTx` it runs inside your transaction, so a migration
-  can build the tree and drop its old parent column atomically.
+  can build the tree and drop its old parent column atomically, except on MySQL, where DDL commits
+  the transaction implicitly: drop the column there after the commit.
 * PostgreSQL: rows copied with explicit ids leave the id sequence behind, and the next `Add` fails
   with a duplicate key. Advance the sequence after copying:
   `SELECT setval(pg_get_serial_sequence('categories', 'node_id'), (SELECT MAX(node_id) FROM categories))`.
@@ -553,6 +556,7 @@ tenants in one normalised form.
 * `ClosureTableName() string` — Return the table name of the closure tree relationship
 
 **Write operations**
+On MySQL at its default isolation level, writes that delete closure rows, such as the deletes and `BuildFromParents`, can deadlock with other tenants' writes, also on a tree not bound to a transaction (see "Using closure-tree inside your own transaction").
 * `Add(ctx, item, parentID, afterNodeID, tenant, opts ...AddOption)` — Add a new node; it is placed first among its siblings unless `afterNodeID` names a sibling or the `PlaceLast()` option is given
 * `GetOrAdd(ctx, item, parentID, tenant, matchFields, opts ...AddOption) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths; takes the same placement options as `Add`
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect

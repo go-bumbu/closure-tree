@@ -771,6 +771,95 @@ func TestWithTxTimeoutDuringStatementLosesTransaction(t *testing.T) {
 	}
 }
 
+// A holds tenant1's lock and B tenant2's; then, concurrently, A adds to tenant2 and B to tenant1.
+// MySQL detects the deadlock and rolls back one whole transaction (error 1213), so the rollback to
+// that write's savepoint fails too: the error reports the deadlock first and matches
+// ErrSavepointRollback. The other add gets its lock once the server's rollback has released it,
+// and its transaction commits.
+func TestWithTxDeadlockMatchesSavepointRollback(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			if db.DbType() != testdbs.DBTypeMysql {
+				t.Skip("MySQL only: the server rolls back the whole transaction on a deadlock")
+			}
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second) // fail instead of hanging
+			defer cancel()
+			for _, tenant := range []string{tenant1, tenant2} { // the lock rows exist before A and B
+				if err := ct.Add(ctx, &TestPayload{Name: "committed"}, nil, nil, tenant); err != nil {
+					t.Fatal(err)
+				}
+			}
+			quiet := gdb.Session(&gorm.Session{Logger: logger.Discard}) // errors are reported by the test
+
+			txA := quiet.WithContext(ctx).Begin()
+			if txA.Error != nil {
+				t.Fatal(txA.Error)
+			}
+			defer txA.Rollback()
+			txB := quiet.WithContext(ctx).Begin()
+			if txB.Error != nil {
+				t.Fatal(txB.Error)
+			}
+			defer txB.Rollback()
+			if err := ct.WithTx(txA).LockTenant(ctx, tenant1); err != nil {
+				t.Fatalf("A: %v", err)
+			}
+			if err := ct.WithTx(txB).LockTenant(ctx, tenant2); err != nil {
+				t.Fatalf("B: %v", err)
+			}
+
+			var errA, errB error
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				errA = ct.WithTx(txA).Add(ctx, &TestPayload{Name: "a"}, nil, nil, tenant2)
+			}()
+			go func() {
+				defer wg.Done()
+				errB = ct.WithTx(txB).Add(ctx, &TestPayload{Name: "b"}, nil, nil, tenant1)
+			}()
+			wg.Wait()
+			if (errA == nil) == (errB == nil) {
+				t.Fatalf("want exactly one add to fail, A: %v, B: %v", errA, errB)
+			}
+			// The failed add's transaction is gone; the other one wrote to the failed one's tenant.
+			failed, survivor, grown, unchanged := errA, txB, tenant1, tenant2
+			if errA == nil {
+				failed, survivor, grown, unchanged = errB, txA, tenant2, tenant1
+			}
+
+			msg := failed.Error()
+			deadlock := strings.Index(msg, "Error 1213")
+			rollback := strings.Index(msg, closuretree.ErrSavepointRollback.Error())
+			if deadlock < 0 || rollback < deadlock {
+				t.Errorf("want the deadlock (Error 1213) before the failed rollback to the savepoint, got %v", failed)
+			}
+			if !errors.Is(failed, closuretree.ErrSavepointRollback) {
+				t.Errorf("want ErrSavepointRollback, got %v", failed)
+			}
+
+			if err := survivor.Commit().Error; err != nil {
+				t.Fatalf("commit the surviving transaction: %v", err)
+			}
+			if got := countTenant(t, gdb, ct, grown).Nodes; got != 2 {
+				t.Errorf("%s: want the committed node and the surviving add, got %d nodes", grown, got)
+			}
+			if got := countTenant(t, gdb, ct, unchanged).Nodes; got != 1 {
+				t.Errorf("%s: want only the committed node, got %d nodes", unchanged, got)
+			}
+			assertConsistent(t, gdb, ct, tenant1)
+			assertConsistent(t, gdb, ct, tenant2)
+		})
+	}
+}
+
 // GetOrAdd, Renormalize and RenormalizeAll on a Tree bound to a caller's transaction: their writes
 // show inside the transaction, and its rollback undoes them.
 func TestWithTxSortOrderWritesRollBack(t *testing.T) {
