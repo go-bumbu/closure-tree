@@ -395,8 +395,10 @@ const addRootRelQuery = `INSERT INTO %s (ancestor_id, descendant_id, tenant, dep
 // transactional. It returns ErrNodeNotFound if no node with that id exists for the given tenant,
 // and ErrEmptyTenant if tenant is empty.
 //
-// A nodeId of 0, the virtual root, is not rejected: it deletes every node of the tenant, and
-// returns ErrNodeNotFound when the tenant has none. Prefer DeleteTenant to delete a whole tenant.
+// A nodeId of 0, the virtual root, is not rejected: it deletes the tenant's whole tree, meaning
+// every node that has closure rows, and returns ErrNodeNotFound when there is none. Node rows
+// without closure rows, as in a table filled before BuildFromParents, are not deleted. Prefer
+// DeleteTenant to delete a whole tenant; it deletes those rows too.
 func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) error {
 	var err error
 	tenant, err = validateTenant(tenant)

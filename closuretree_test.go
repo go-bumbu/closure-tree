@@ -1660,6 +1660,9 @@ func TestDeleteRecurseVirtualRoot(t *testing.T) {
 			ctx := context.Background()
 			populateTree(t, ct)
 			otherBefore := closureRows(t, gdb, ct, tenant2)
+			if before := countTenant(t, gdb, ct, tenant1); before.Nodes != 6 || before.Meta == 0 || before.Lock != 1 {
+				t.Fatalf("precondition: want 6 nodes, meta rows and one lock row, got %+v", before)
+			}
 
 			if err := ct.DeleteRecurse(ctx, 0, tenant1); err != nil {
 				t.Fatal(err)
@@ -1670,8 +1673,55 @@ func TestDeleteRecurseVirtualRoot(t *testing.T) {
 			if diff := cmp.Diff(otherBefore, closureRows(t, gdb, ct, tenant2)); diff != "" {
 				t.Errorf("tenant 2 changed (-before +after):\n%s", diff)
 			}
+			if got := countTenant(t, gdb, ct, tenant2); got.Nodes != 8 {
+				t.Errorf("tenant 2 nodes: %d", got.Nodes)
+			}
 			if err := ct.DeleteRecurse(ctx, 0, tenant1); !errors.Is(err, closuretree.ErrNodeNotFound) {
 				t.Errorf("empty tenant: want ErrNodeNotFound, got %v", err)
+			}
+		})
+	}
+}
+
+// DeleteRecurse of id 0 finds nodes through their closure rows, so node rows without closure rows,
+// as before BuildFromParents, are not deleted: alone they are not found, and next to a node that
+// has closure rows they are kept. DeleteTenant deletes them.
+func TestDeleteRecurseVirtualRootUnbuilt(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			const unbuilt = "unbuilt"
+			seedNodes(t, gdb, db, unbuilt, []seed{{100001, "u1"}, {100002, "u2"}})
+			if err := ct.DeleteRecurse(ctx, 0, unbuilt); !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("only unbuilt rows: want ErrNodeNotFound, got %v", err)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 2 || got.Closure != 0 {
+				t.Errorf("only unbuilt rows, after DeleteRecurse of id 0: %+v", got)
+			}
+			// with a node added next to them, id 0 deletes that node and keeps the unbuilt rows
+			if err := ct.Add(ctx, &TestPayload{Name: "built"}, nil, nil, unbuilt); err != nil {
+				t.Fatal(err)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 3 || got.Closure != 2 {
+				t.Fatalf("precondition: want 3 nodes and 2 closure rows, got %+v", got)
+			}
+			if err := ct.DeleteRecurse(ctx, 0, unbuilt); err != nil {
+				t.Errorf("unbuilt rows and a node: %v", err)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 2 || got.Closure != 0 || got.Meta != 0 {
+				t.Errorf("unbuilt rows and a node, after DeleteRecurse of id 0: %+v", got)
+			}
+			if err := ct.DeleteTenant(ctx, unbuilt); err != nil {
+				t.Fatal(err)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 0 || got.Closure != 0 || got.Meta != 0 {
+				t.Errorf("after DeleteTenant: %+v", got)
 			}
 		})
 	}
