@@ -29,7 +29,7 @@ benchmark: ## run go benchmarks
 .PHONY: verify
 verify: ## run all checks; runs every check and fails if any fail
 	@fail=0; \
-	for target in lint test-full license-check benchmark coverage; do \
+	for target in lint test-full test-race license-check benchmark coverage; do \
 		echo "==================== make $$target ===================="; \
 		$(MAKE) --no-print-directory $$target || fail=1; \
 	done; \

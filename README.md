@@ -647,7 +647,8 @@ for testing and development there are several make targets available:
 
 * _test_ : performs all tests on sqlite only.
 * _test-full_ : performs all tests on all supported databases, this takes longer as the DBs start in a docker container.
-* _verify_ : on top of running tests, it also runs the linter, license check.
+* _test-race_ : performs the tests with the race detector, on sqlite only, without the large-tree tests.
+* _verify_ : runs the linter, _test-full_, _test-race_, the license check, the benchmarks and the coverage check.
 
 
 Notes for local development 

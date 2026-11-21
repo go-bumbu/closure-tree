@@ -16,6 +16,9 @@ jobs:
       - name: run tests
         run: make test
 
+      - name: run tests with the race detector
+        run: make test-race
+
       - name: ensure test coverage
         run: make coverage
 

@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make test          # SQLite only (fast)
 make test-full     # All DBs via Docker (MySQL, PostgreSQL, SQLite)
+make test-race     # Race detector, SQLite only, skips the large-tree tests (-short)
 make lint          # golangci-lint
-make verify        # test-full + lint + license-check + benchmark + coverage
+make verify        # lint + test-full + test-race + license-check + benchmark + coverage
 make clean         # Remove generated .sqlite files
 ```
 
