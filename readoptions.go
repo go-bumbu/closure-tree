@@ -133,6 +133,7 @@ func DepthRange(min, max int) ReadOption {
 // pairs of the virtual root. Without ids it selects nothing. The ids are copied, and several
 // ForAncestors options are joined. The other reads ignore it.
 func ForAncestors(ids ...uint) ReadOption {
+	ids = slices.Clone(ids)
 	return func(c *readConfig) {
 		c.hasAncestors = true
 		c.ancestors = append(c.ancestors, ids...)

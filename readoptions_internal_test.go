@@ -328,8 +328,9 @@ func TestPlanReadNewOptions(t *testing.T) {
 		}
 	}
 	ids := []uint{1, 2}
-	p := plan(ForAncestors(ids...), ForAncestors(3))
+	opt := ForAncestors(ids...)
 	ids[0] = 99 // the option keeps its own copy
+	p := plan(opt, ForAncestors(3))
 	if !p.hasAncestors || !cmp.Equal([]uint{1, 2, 3}, p.ancestors) {
 		t.Errorf("ForAncestors: %+v", p)
 	}

@@ -616,6 +616,10 @@ func TestClosurePairs(t *testing.T) {
 			c.check("direct children", map[string]int64{"a": 2, "x": 2, "x2": 1, "b": 1}, closuretree.DepthRange(1, 1))
 			c.check("two ancestors", map[string]int64{"a": 6, "b": 2}, closuretree.ForAncestors(id["a"], id["b"]))
 			c.check("an empty ancestor set selects nothing", map[string]int64{}, closuretree.ForAncestors())
+			ids := []uint{id["a"]}
+			opt := closuretree.ForAncestors(ids...)
+			ids[0] = id["b"] // the option keeps its own copy
+			c.check("the ids are copied", map[string]int64{"a": 6}, opt)
 			c.check("naming the virtual root includes it", map[string]int64{"a": 6, "root": 8},
 				closuretree.ForAncestors(id["a"], 0))
 			c.check("the virtual root named and asked for", map[string]int64{"a": 6, "root": 8},
