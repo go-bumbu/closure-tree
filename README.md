@@ -4,8 +4,7 @@ A closure tree is a read efficient way to define tree dependencies of items, e.g
 
 Features:
 * store any basic struct information in a tree structure (Uses GORM under the hood)
-* multi-user/tenant: allows to perform all the operations on a specific user or tenant (with MySQL's
-  default collation, tenants that differ only in case or accents are one tenant; see "Tenants" below)
+* multi-user/tenant: allows to perform all the operations on a specific user or tenant
 * retrieve all the nested descendants of a node
 * control display order of siblings via float64 fractional indexing (`sort_order`)
 
@@ -528,6 +527,10 @@ err = tree.BuildFromParents(ctx, "user1", links)
 * It runs under the tenant lock. Through `WithTx` it runs inside your transaction, so a migration
   can build the tree and drop its old parent column atomically, except on MySQL, where DDL commits
   the transaction implicitly: drop the column there after the commit.
+* MySQL: the node table has rows before the first `Migrate`, and `Migrate` never alters a table of
+  a tree with rows, so the tree keeps the old collation of its tenant columns (see "Tenants"). To
+  compare tenants exactly, run the four statements of "Tenants" after `Migrate` and before
+  `BuildFromParents`.
 * PostgreSQL: rows copied with explicit ids leave the id sequence behind, and the next `Add` fails
   with a duplicate key. Advance the sequence after copying:
   `SELECT setval(pg_get_serial_sequence('categories', 'node_id'), (SELECT MAX(node_id) FROM categories))`.
@@ -547,13 +550,21 @@ For detailed usage check out the examples in [example_test.go]
 this is a quick overview of the exposed methods, check the actual signature/doc for details.
 
 **Tenants**
-The database compares tenants with the collation of the tenant columns. The library sets no
-collation, so the tenant columns get the table's default: the database's default collation, or the
-one the caller's table options (`gorm:table_options`) set. PostgreSQL and SQLite compare exactly.
-MySQL's default collation, `utf8mb4_0900_ai_ci`, ignores case and accents, so with it "Acme",
-"acme" and "acmé" are one tenant for every read, write and lock, and `DeleteTenant(ctx, "acme")`
-deletes all three. Tenants must not differ only in case or accents: use one spelling for each
-tenant, such as ids or lower-case ASCII names.
+Tenants are compared exactly on every database: "Acme", "acme", "acmé" and "acme " are four
+tenants. On MySQL, `Migrate` sets the collation `utf8mb4_0900_bin` on the tenant column of the
+tree's four tables while the tree holds no rows. A tree with rows keeps its collation; under
+MySQL's default, `utf8mb4_0900_ai_ci`, tenants that differ only in case or accents are one tenant,
+and `DeleteTenant(ctx, "acme")` deletes all of them. To change it, stop writes to the tree, store
+one spelling per tenant, then run on each of the four tables, with the column's current type:
+
+```sql
+ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;
+```
+
+Each rebuilds its table. Resume writes only after all four: until then the tables compare tenants
+differently. `Migrate` returns `ErrTenantCollation` until all four agree. The tenant column of a
+model that embeds `Leaf` keeps the collation of your table; it is nullable, so for it leave out
+`NOT NULL`.
 
 **Tree management**
 * `New(db *gorm.DB, item any) (*Tree, error)` — Return a new tree instance; it validates the model and table names but does not create tables

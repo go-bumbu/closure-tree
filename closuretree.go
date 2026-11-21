@@ -70,13 +70,17 @@ var (
 // anchor upsert. SQLite callers should set a busy_timeout so a waiting writer blocks briefly instead
 // of failing immediately with SQLITE_BUSY.
 //
-// Tenants: the database compares tenants with the collation of the tenant columns. The library sets
-// no collation, so the tenant columns get the table's default: the database's default collation, or
-// the one the caller's table options (gorm:table_options) set. PostgreSQL and SQLite compare
-// exactly. MySQL's default collation, utf8mb4_0900_ai_ci, ignores case and accents, so with it
-// "Acme", "acme" and "acmé" are one tenant for every read, write and lock, and DeleteTenant deletes
-// all of them. Tenants must not differ only in case or accents: use one spelling for each tenant,
-// such as ids or lower-case ASCII names.
+// Tenants are compared exactly on every database: "Acme", "acme", "acmé" and "acme " are four
+// tenants. On MySQL, Migrate sets the collation utf8mb4_0900_bin on the tenant column of the tree's
+// four tables while the tree holds no rows. A tree with rows keeps its collation; under MySQL's
+// default, utf8mb4_0900_ai_ci, tenants that differ only in case or accents are one tenant, and
+// DeleteTenant deletes all of them. To change it, stop writes to the tree, store one spelling per
+// tenant, then run on each of the four tables, with the column's current type:
+//
+//	ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;
+//
+// Each rebuilds its table. Resume writes only after all four: until then the tables compare tenants
+// differently. Migrate returns ErrTenantCollation until all four agree.
 type Tree struct {
 	db *gorm.DB
 	// table names, allows multiple trees
