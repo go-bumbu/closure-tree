@@ -1645,9 +1645,9 @@ func TestDelete(t *testing.T) {
 	}
 }
 
-// DeleteRecurse does not reject the virtual root: id 0 deletes every node of the tenant, with its
-// closure and sort-order rows, and keeps the lock row and the other tenants. Once the tenant has no
-// nodes, id 0 is not found.
+// DeleteRecurse does not reject the virtual root: id 0 deletes every node of the tenant that has
+// closure rows, with its closure and sort-order rows, and keeps the lock row and the other tenants.
+// Once no node with closure rows is left, id 0 is not found.
 func TestDeleteRecurseVirtualRoot(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
