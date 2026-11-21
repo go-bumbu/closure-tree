@@ -109,26 +109,47 @@ func TestTenantSpellingsStaySeparate(t *testing.T) {
 				}
 			}
 
-			before := map[string][]relRow{}
-			for _, tenant := range spellings {
-				before[tenant] = closureRows(t, gdb, ct, tenant)
-			}
-			if err := ct.DeleteTenant(ctx, "acme"); err != nil {
-				t.Fatal(err)
-			}
-			for _, tenant := range spellings {
-				got := closureRows(t, gdb, ct, tenant)
-				if tenant == "acme" {
-					if len(got) != 0 {
-						t.Errorf("closure rows of %q after DeleteTenant: %v", tenant, got)
-					}
-					continue
-				}
-				if diff := cmp.Diff(before[tenant], got); diff != "" {
-					t.Errorf("closure rows of %q changed by DeleteTenant(\"acme\") (-want +got):\n%s", tenant, diff)
-				}
-			}
+			assertDeleteTenantExact(t, gdb, ct, spellings, "acme")
 		})
+	}
+}
+
+// assertDeleteTenantExact runs DeleteTenant on deleted, one of the spellings, each of which has two
+// nodes, and checks that it deletes the node, closure and meta rows of deleted only. DeleteTenant
+// deletes them each by its own tenant predicate, so the rows of each table are checked.
+func assertDeleteTenantExact(t *testing.T, gdb *gorm.DB, ct *closuretree.Tree, spellings []string, deleted string) {
+	t.Helper()
+	before := map[string][]relRow{}
+	beforeCounts := map[string]tenantCounts{}
+	for _, tenant := range spellings {
+		before[tenant] = closureRows(t, gdb, ct, tenant)
+		beforeCounts[tenant] = countTenant(t, gdb, ct, tenant)
+		if c := beforeCounts[tenant]; c.Nodes != 2 || c.Meta == 0 || c.Lock != 1 {
+			t.Fatalf("precondition: want 2 nodes, meta rows and one lock row of %q, got %+v", tenant, c)
+		}
+	}
+	if err := ct.DeleteTenant(context.Background(), deleted); err != nil {
+		t.Fatal(err)
+	}
+	for _, tenant := range spellings {
+		got := closureRows(t, gdb, ct, tenant)
+		counts := countTenant(t, gdb, ct, tenant)
+		if tenant == deleted {
+			if len(got) != 0 {
+				t.Errorf("closure rows of %q after DeleteTenant: %v", tenant, got)
+			}
+			// node, closure and meta rows are gone; the lock row is kept
+			if counts != (tenantCounts{Lock: 1}) {
+				t.Errorf("rows of %q after DeleteTenant: %+v", tenant, counts)
+			}
+			continue
+		}
+		if diff := cmp.Diff(before[tenant], got); diff != "" {
+			t.Errorf("closure rows of %q changed by DeleteTenant(%q) (-want +got):\n%s", tenant, deleted, diff)
+		}
+		if counts != beforeCounts[tenant] {
+			t.Errorf("rows of %q changed by DeleteTenant(%q): want %+v, got %+v", tenant, deleted, beforeCounts[tenant], counts)
+		}
 	}
 }
 

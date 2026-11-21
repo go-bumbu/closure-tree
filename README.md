@@ -554,10 +554,10 @@ err = tree.BuildFromParents(ctx, "user1", links)
 * It runs under the tenant lock. Through `WithTx` it runs inside your transaction, so a migration
   can build the tree and drop its old parent column atomically, except on MySQL, where DDL commits
   the transaction implicitly: drop the column there after the commit.
-* MySQL: the node table has rows before the first `Migrate`, and `Migrate` never alters a table of
-  a tree with rows, so the tree keeps the old collation of its tenant columns (see "Tenants"). To
-  compare tenants exactly, run the four statements of "Tenants" after `Migrate` and before
-  `BuildFromParents`.
+* MySQL: the node table has rows before the first `Migrate`, and `Migrate` never changes the tenant
+  collation of a tree with rows, so the tree keeps the old collation of its tenant columns (see
+  "Tenants"). To compare tenants exactly, run the four statements of "Tenants" after `Migrate` and
+  before `BuildFromParents`.
 * PostgreSQL: rows copied with explicit ids leave the id sequence behind, and the next `Add` fails
   with a duplicate key. Advance the sequence after copying:
   `SELECT setval(pg_get_serial_sequence('categories', 'node_id'), (SELECT MAX(node_id) FROM categories))`.
@@ -582,7 +582,10 @@ tenants. On MySQL, `Migrate` sets the collation `utf8mb4_0900_bin` on the tenant
 tree's four tables while the tree holds no rows. A tree with rows keeps its collation; under
 MySQL's default, `utf8mb4_0900_ai_ci`, tenants that differ only in case or accents are one tenant,
 and `DeleteTenant(ctx, "acme")` deletes all of them. To change it, stop writes to the tree, store
-one spelling per tenant, then run on each of the four tables, with the column's current type:
+one spelling per tenant, then run on each of the four tables, with the column's current type. The
+four tables are the node table (`NodeTableName()`, say `categories`) and, named after it,
+`closure_tree_rel_categories` (`ClosureTableName()`), `closure_tree_meta_categories` and
+`closure_tree_lock_categories`:
 
 ```sql
 ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;
