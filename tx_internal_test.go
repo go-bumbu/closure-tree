@@ -171,6 +171,55 @@ func TestWriteTxFailedRollbackKeepsOriginalError(t *testing.T) {
 			if !errors.Is(err, sql.ErrTxDone) || !strings.Contains(err.Error(), "unable to roll back to savepoint") {
 				t.Errorf("want the failed rollback to the savepoint reported too, got %v", err)
 			}
+			if !errors.Is(err, ErrSavepointRollback) {
+				t.Errorf("want ErrSavepointRollback, got %v", err)
+			}
+		})
+	}
+}
+
+// A write whose context is cancelled after its last statement fails to release its savepoint. The
+// rollback to the savepoint still runs, so the error does not match ErrSavepointRollback: the row
+// is gone and the caller's transaction stays usable.
+func TestWriteTxFailedReleaseRollsBackToSavepoint(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct := newDBInternalTree(t, db, txSample{})
+			const tenant = "t1"
+
+			err := ct.db.Transaction(func(tx *gorm.DB) error {
+				// The release fails on purpose; keep the output clean.
+				tt := ct.WithTx(tx.Session(&gorm.Session{Logger: logger.Discard}))
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				err := tt.writeTx(ctx, tenant, func(tx *gorm.DB) error {
+					if err := tx.Exec("INSERT INTO "+ct.nodesTbl+" (tenant, name, sort_order) VALUES (?, ?, 0)",
+						tenant, "unreleased").Error; err != nil {
+						t.Fatalf("insert: %v", err)
+					}
+					cancel()
+					return nil
+				})
+				if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "unable to release savepoint") {
+					t.Errorf("want the failed release, got %v", err)
+				}
+				if errors.Is(err, ErrSavepointRollback) {
+					t.Errorf("the rollback to the savepoint succeeded, want no ErrSavepointRollback, got %v", err)
+				}
+				if n := countTxSampleName(t, ct, tx, tenant, "unreleased"); n != 0 {
+					t.Errorf("the unreleased write left %d rows in the transaction", n)
+				}
+				return tt.Add(context.Background(), &txSample{Name: "after"}, nil, nil, tenant)
+			})
+			if err != nil {
+				t.Fatalf("outer transaction after the failed release: %v", err)
+			}
+			if n := countTxSampleName(t, ct, ct.db, tenant, "unreleased"); n != 0 {
+				t.Errorf("the unreleased write was committed: %d rows", n)
+			}
+			if n := countTxSampleName(t, ct, ct.db, tenant, "after"); n != 1 {
+				t.Errorf("want the later write committed, got %d rows", n)
+			}
 		})
 	}
 }

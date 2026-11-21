@@ -10,6 +10,13 @@ import (
 // ErrNotInTransaction is returned by LockTenant on a Tree that is not bound to a transaction.
 var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; use WithTx")
 
+// ErrSavepointRollback is returned, joined with the write's own error, when a write on a Tree bound
+// to a transaction (see WithTx) failed and could not then be rolled back to its savepoint, for
+// example because the write's context ended during a statement and the driver dropped the
+// connection. The caller's transaction can no longer be used, and its earlier work may be lost:
+// roll it back.
+var ErrSavepointRollback = errors.New("the transaction can no longer be used; roll it back")
+
 // WithTx returns a copy of the Tree that runs every read and write on tx, usually a transaction
 // the caller opened. The copy shares everything else with ct; only the database handle differs, so
 // it is cheap and meant to be created per transaction. ct itself is unchanged and stays safe for
@@ -23,8 +30,11 @@ var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; us
 // Reads on the copy see the transaction's uncommitted rows. Each write on the copy joins the
 // caller's transaction inside a savepoint that closure-tree takes itself, whatever gorm's
 // DisableNestedTransaction says: a failed write rolls back to its savepoint and returns its error,
-// and the outer transaction stays usable. A successful write keeps the tenant lock until the outer
-// transaction ends (PostgreSQL and MySQL).
+// and the outer transaction stays usable, unless errors.Is(err, ErrSavepointRollback): then the
+// rollback to the savepoint failed, for example because the write's context ended during a
+// statement and the driver dropped the connection, which loses the transaction's earlier work too,
+// and the caller must roll the transaction back. A successful write keeps the tenant lock until the
+// outer transaction ends (PostgreSQL and MySQL).
 //
 // The one exception is a deadlock on MySQL (error 1213): the server has already rolled back the
 // whole outer transaction, so the caller must roll it back and retry it; continuing would run the

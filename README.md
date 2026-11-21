@@ -425,7 +425,10 @@ err := db.Transaction(func(tx *gorm.DB) error {
   blocks: forever, or until a lock or busy timeout fails it.
 * A tree error rolls back only the tree's own work (to a savepoint the tree takes) and leaves your
   transaction usable; you decide whether to commit or roll back. This holds for every tree error
-  except a MySQL deadlock.
+  except a MySQL deadlock (below) and an error for which `errors.Is(err, closuretree.ErrSavepointRollback)`
+  is true: the tree could not roll back to its savepoint, for example because the context ended
+  during a statement and the driver dropped the connection, which loses your transaction's earlier
+  work too. Roll your transaction back then.
 * MySQL: a deadlock error (error 1213) means the server has already rolled back your whole
   transaction. Roll back and retry the transaction; continuing would run the following statements
   outside any transaction. The tree's error contains the driver's error, so you can test for it with

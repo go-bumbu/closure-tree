@@ -38,7 +38,10 @@ func (ct *Tree) writeTx(ctx context.Context, tenant string, fn func(tx *gorm.DB)
 // DisableNestedTransaction is set. On success the savepoint is released, so savepoints do not nest
 // deeper with every write; the lock survives the release. On an error, or a panic, the work is
 // rolled back to the savepoint, even when the write's context is cancelled, which leaves the
-// caller's transaction usable, and the original error is returned (or the panic re-raised).
+// caller's transaction usable, and the original error is returned (or the panic re-raised). When
+// that rollback fails, for example because the context ended during a statement and the driver
+// dropped the connection, the transaction is unusable: the failed rollback, wrapped in
+// ErrSavepointRollback, is joined to the original error.
 func (ct *Tree) savepointTx(tx *gorm.DB, tenant string, fn func(tx *gorm.DB) error) (err error) {
 	name := fmt.Sprintf("ct_sp_%d", savepointSeq.Add(1))
 	if err := execSavepointStmt(tx, "SAVEPOINT "+name); err != nil {
@@ -53,7 +56,7 @@ func (ct *Tree) savepointTx(tx *gorm.DB, tenant string, fn func(tx *gorm.DB) err
 			// transaction.
 			rbTx := tx.WithContext(context.WithoutCancel(tx.Statement.Context))
 			if rbErr := rollbackToSavepoint(rbTx, name); rbErr != nil {
-				err = errors.Join(err, rbErr)
+				err = errors.Join(err, fmt.Errorf("%w: %w", ErrSavepointRollback, rbErr))
 			}
 		}
 	}()

@@ -705,6 +705,72 @@ func waitWrittenOrBlocked(t *testing.T, ctx context.Context, gdb *gorm.DB, db te
 	}
 }
 
+// A holds tenant1's lock. B, in a transaction that already has a write of its own, adds to tenant1
+// with a short timeout, which ends while B's statement waits on the lock: the driver drops B's
+// connection, so the rollback to the savepoint fails too. The error matches ErrSavepointRollback,
+// and B's transaction, with its earlier write, is gone.
+func TestWithTxTimeoutDuringStatementLosesTransaction(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			if strings.HasPrefix(db.DbType(), "Sqlite") {
+				t.Skip("SQLite allows one writing transaction per database, so B cannot write while A is open")
+			}
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second) // fail instead of hanging
+			defer cancel()
+			for _, tenant := range []string{tenant1, tenant2} { // the lock rows exist before A and B
+				if err := ct.Add(ctx, &TestPayload{Name: "committed"}, nil, nil, tenant); err != nil {
+					t.Fatal(err)
+				}
+			}
+			quiet := gdb.Session(&gorm.Session{Logger: logger.Discard}) // errors are reported by the test
+
+			txA := quiet.WithContext(ctx).Begin()
+			if txA.Error != nil {
+				t.Fatal(txA.Error)
+			}
+			defer txA.Rollback()
+			if err := ct.WithTx(txA).LockTenant(ctx, tenant1); err != nil {
+				t.Fatalf("A: %v", err)
+			}
+
+			txB := quiet.WithContext(ctx).Begin()
+			if txB.Error != nil {
+				t.Fatal(txB.Error)
+			}
+			defer txB.Rollback() // its error is expected: B's connection is gone
+			tb := ct.WithTx(txB)
+			if err := tb.Add(ctx, &TestPayload{Name: "early"}, nil, nil, tenant2); err != nil {
+				t.Fatalf("B's first add: %v", err)
+			}
+			short, cancelShort := context.WithTimeout(ctx, 300*time.Millisecond)
+			err = tb.Add(short, &TestPayload{Name: "blocked"}, nil, nil, tenant1)
+			cancelShort()
+			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, closuretree.ErrSavepointRollback) {
+				t.Fatalf("want context.DeadlineExceeded and ErrSavepointRollback, got %v", err)
+			}
+
+			if err := tb.Add(ctx, &TestPayload{Name: "later"}, nil, nil, tenant2); err == nil {
+				t.Error("a later write in B's transaction succeeded")
+			}
+			if err := txB.Commit().Error; err == nil {
+				t.Error("B's transaction committed")
+			}
+			if err := txA.Rollback().Error; err != nil {
+				t.Fatalf("roll back A: %v", err)
+			}
+			if got := countTenant(t, gdb, ct, tenant2).Nodes; got != 1 {
+				t.Errorf("tenant2: want only the node committed before B, got %d nodes", got)
+			}
+		})
+	}
+}
+
 // GetOrAdd, Renormalize and RenormalizeAll on a Tree bound to a caller's transaction: their writes
 // show inside the transaction, and its rollback undoes them.
 func TestWithTxSortOrderWritesRollBack(t *testing.T) {
