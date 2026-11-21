@@ -86,9 +86,10 @@ var (
 // four tables while the tree holds no rows. A tree with rows keeps its collation; under MySQL's
 // default, utf8mb4_0900_ai_ci, tenants that differ only in case or accents are one tenant, and
 // DeleteTenant deletes all of them. To change it, stop writes to the tree, store one spelling per
-// tenant, then run on each of the four tables, with the column's current type. The four tables are
-// the node table (NodeTableName) and, named after it, closure_tree_rel_<node table>
-// (ClosureTableName), closure_tree_meta_<node table> and closure_tree_lock_<node table>:
+// tenant, then run the statement below on each of the four tables, with the column's current type
+// in place of varchar(191). The four tables are the node table (NodeTableName) and, named after it,
+// closure_tree_rel_<node table> (ClosureTableName), closure_tree_meta_<node table> and
+// closure_tree_lock_<node table>:
 //
 //	ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;
 //
@@ -180,8 +181,14 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 //
 // On MySQL, as its last step, Migrate gives the tenant column of the four tables the collation
 // utf8mb4_0900_bin while none of them has a row, so that tenants are compared exactly (see Tree);
-// that needs the ALTER privilege. It never changes the tenant collation of a tree with rows, and
-// returns ErrTenantCollation when the tenant columns of such a tree do not share one collation.
+// that needs the ALTER privilege. That step never changes the tenant collation of a tree with rows,
+// and returns ErrTenantCollation when the tenant columns of such a tree do not share one collation.
+// gorm's AutoMigrate, which runs before it, can: when the type or size of the tenant column of the
+// node table or the closure table differs from the model (an adopted table, a changed
+// DefaultStringSize), it modifies the column without a collation, which gives it the default
+// collation of its table, rows or not. It leaves the tenant columns of the meta and lock tables
+// alone, as they are part of the primary key, so on a tree with rows Migrate then returns
+// ErrTenantCollation unless that default is the collation of the other tenant columns.
 func (ct *Tree) Migrate() error {
 	if err := ct.db.AutoMigrate(ct.model); err != nil {
 		return fmt.Errorf("unable to migrate node table: %w", err)
