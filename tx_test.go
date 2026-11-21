@@ -859,8 +859,10 @@ func TestOwnDeletingWritesAcrossTenants(t *testing.T) {
 		name    string
 		writers []writer
 		// mysqlDeadlocks marks a pair that deadlocks on MySQL, so it runs on PostgreSQL only. In ten
-		// runs of 30 calls per writer: the rebuild failed in 90 of 300 calls against
-		// DeleteRecurseMany, which never failed; Update failed in 41 and DeleteRecurse in 39 of 300.
+		// runs of 30 calls per writer, the rebuild lost calls to deadlocks against
+		// DeleteRecurseMany, which never failed, and the pair of Update and DeleteRecurse lost calls
+		// to deadlocks. raceWriters counts every failed call, not deadlocks alone, so no count is
+		// given.
 		mysqlDeadlocks bool
 	}{
 		{"three DeleteTenant", []writer{deleteTenant, deleteTenant, deleteTenant}, false},

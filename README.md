@@ -510,7 +510,7 @@ repeated one such write at the same time (ten runs of 30 calls per write):
 |---|---|---|
 | `DeleteTenant` (after adding nodes), on three tenants | no call failed | no call failed |
 | `BuildFromParents(Rebuild())` and `BuildFromParents(Rebuild())` | no call failed | no call failed |
-| `DeleteRecurseMany` of 600 ids and `BuildFromParents(Rebuild())` | the rebuild deadlocked in 90 of 300 calls | no call failed |
+| `DeleteRecurseMany` of 600 ids and `BuildFromParents(Rebuild())` | the rebuild lost calls to deadlocks | no call failed |
 | `Update` moving a subtree and `DeleteRecurse` | the pair lost calls to deadlocks | no call failed |
 
 InnoDB locks the rows a delete scans at every isolation level, so the library makes no promise that
