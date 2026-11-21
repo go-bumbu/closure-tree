@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -823,6 +824,158 @@ func TestGetOrAddMatchesPointerValuer(t *testing.T) {
 			other := &ptrCodeNode{Name: "a", Code: &ptrCode{"y"}}
 			if found, err := ct.FindChild(ctx, 0, tenant1, other, match, &out); err != nil || found {
 				t.Errorf("FindChild with another Value must not find the row: found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
+type rawDocNode struct {
+	closuretree.Node
+	Name string
+	Doc  json.RawMessage
+}
+
+type bytesDocNode struct {
+	closuretree.Node
+	Name string
+	Doc  []byte
+}
+
+type bytesPtrDocNode struct {
+	closuretree.Node
+	Name string
+	Doc  *[]byte
+}
+
+type rawPtrDocNode struct {
+	closuretree.Node
+	Name string
+	Doc  *json.RawMessage
+}
+
+// idItem is a pointer to a struct that embeds Node.
+type idItem interface{ Id() uint }
+
+// A byte-slice match field matches what Add stores, so GetOrAdd stays idempotent and FindChild
+// finds the child: NULL for a nil one, also behind a pointer, and for an empty one of a named type
+// that is not behind a pointer, which gorm writes as NULL; empty bytes for an empty []byte and for
+// an empty one behind a pointer; the bytes for any other.
+func TestMatchByteSlice(t *testing.T) {
+	cases := []struct {
+		name  string
+		model any
+		item  func() idItem
+	}{
+		{"RawMessage nil", rawDocNode{}, func() idItem { return &rawDocNode{Name: "a"} }},
+		{"RawMessage empty", rawDocNode{}, func() idItem { return &rawDocNode{Name: "a", Doc: json.RawMessage{}} }},
+		{"RawMessage non empty", rawDocNode{}, func() idItem { return &rawDocNode{Name: "a", Doc: json.RawMessage(`{"a":1}`)} }},
+		{"bytes nil", bytesDocNode{}, func() idItem { return &bytesDocNode{Name: "a"} }},
+		{"bytes empty", bytesDocNode{}, func() idItem { return &bytesDocNode{Name: "a", Doc: []byte{}} }},
+		{"bytes non empty", bytesDocNode{}, func() idItem { return &bytesDocNode{Name: "a", Doc: []byte("x")} }},
+		{"pointer to nil bytes", bytesPtrDocNode{}, func() idItem {
+			var b []byte
+			return &bytesPtrDocNode{Name: "a", Doc: &b}
+		}},
+		{"pointer to empty RawMessage", rawPtrDocNode{}, func() idItem {
+			doc := json.RawMessage{}
+			return &rawPtrDocNode{Name: "a", Doc: &doc}
+		}},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, c := range cases {
+			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, c.model)
+				ct, err := newTestTree(gdb, c.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				match := []string{"Name", "Doc"}
+
+				first := c.item()
+				if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+					t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+				}
+				second := c.item()
+				created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+				if err != nil || created || second.Id() != first.Id() {
+					t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.Id(), first.Id(), err)
+				}
+				if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+					t.Errorf("want one node, got %d", n)
+				}
+
+				out := c.item()
+				found, err := ct.FindChild(ctx, 0, tenant1, c.item(), match, out)
+				if err != nil || !found || out.Id() != first.Id() {
+					t.Errorf("FindChild: found=%v id=%d (first %d) err=%v", found, out.Id(), first.Id(), err)
+				}
+			})
+		}
+	}
+}
+
+// A nil and an empty json.RawMessage are both stored as NULL, so they match the same node.
+func TestMatchNilAndEmptyRawMessage(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			ctx := context.Background()
+			match := []string{"Name", "Doc"}
+
+			dropTreeTables(gdb, rawDocNode{})
+			raw, err := newTestTree(gdb, rawDocNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			added := &rawDocNode{Name: "a", Doc: json.RawMessage{}}
+			if created, err := raw.GetOrAdd(ctx, added, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("GetOrAdd of an empty RawMessage: created=%v err=%v", created, err)
+			}
+			var out rawDocNode
+			found, err := raw.FindChild(ctx, 0, tenant1, &rawDocNode{Name: "a", Doc: json.RawMessage(nil)}, match, &out)
+			if err != nil || !found || out.NodeId != added.NodeId {
+				t.Errorf("FindChild with a nil RawMessage: found=%v id=%d (added %d) err=%v", found, out.NodeId, added.NodeId, err)
+			}
+			again := &rawDocNode{Name: "a"}
+			if created, err := raw.GetOrAdd(ctx, again, 0, tenant1, match); err != nil || created || again.NodeId != added.NodeId {
+				t.Errorf("GetOrAdd of a nil RawMessage: created=%v id=%d (added %d) err=%v", created, again.NodeId, added.NodeId, err)
+			}
+		})
+	}
+}
+
+// A nil and an empty []byte are stored as NULL and as empty bytes, so they are two different nodes.
+func TestMatchNilAndEmptyBytes(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			ctx := context.Background()
+			match := []string{"Name", "Doc"}
+
+			dropTreeTables(gdb, bytesDocNode{})
+			bin, err := newTestTree(gdb, bytesDocNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			nilDoc := &bytesDocNode{Name: "a"}
+			if created, err := bin.GetOrAdd(ctx, nilDoc, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("GetOrAdd of nil bytes: created=%v err=%v", created, err)
+			}
+			emptyDoc := &bytesDocNode{Name: "a", Doc: []byte{}}
+			if created, err := bin.GetOrAdd(ctx, emptyDoc, 0, tenant1, match); err != nil || !created || emptyDoc.NodeId == nilDoc.NodeId {
+				t.Fatalf("GetOrAdd of empty bytes must add another node: created=%v id=%d (nil %d) err=%v", created, emptyDoc.NodeId, nilDoc.NodeId, err)
+			}
+			for _, want := range []*bytesDocNode{nilDoc, emptyDoc} {
+				var got bytesDocNode
+				found, err := bin.FindChild(ctx, 0, tenant1, &bytesDocNode{Name: "a", Doc: want.Doc}, match, &got)
+				if err != nil || !found || got.NodeId != want.NodeId {
+					t.Errorf("FindChild with Doc %#v: found=%v id=%d (want %d) err=%v", want.Doc, found, got.NodeId, want.NodeId, err)
+				}
+			}
+			if n := countTenant(t, gdb, bin, tenant1).Nodes; n != 2 {
+				t.Errorf("want two nodes, got %d", n)
 			}
 		})
 	}

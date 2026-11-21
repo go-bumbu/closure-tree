@@ -2,6 +2,7 @@ package closuretree
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"reflect"
 	"strings"
@@ -26,15 +27,19 @@ import (
 // pointer field, or a driver.Valuer field whose Value is nil (such as an invalid sql.NullString),
 // matches as IS NULL; an error from Value is returned. A non-nil pointer field is matched by the
 // value it points to, unless the pointer is a driver.Valuer (its Value method may have a pointer
-// receiver): then its Value is matched. An empty matchFields returns ErrEmptyMatch; an unknown or
-// Node-owned field returns ErrUnknownMatchField.
+// receiver): then its Value is matched. A byte-slice field that Add stores as NULL matches as IS
+// NULL too: a nil one, also behind a pointer, and an empty one of a named type such as
+// json.RawMessage that is not behind a pointer, which gorm writes as NULL; an empty []byte matches
+// empty bytes. Eq binds the value it is given, so use IsNull there. An empty matchFields returns
+// ErrEmptyMatch; an unknown or Node-owned field returns ErrUnknownMatchField.
 //
-// Each value is bound as one value and checked as Eq checks its value: a field whose value is a
-// slice or an array (other than a byte slice or a driver.Valuer), or whose type is a gorm.Valuer
-// (also as a nil pointer), returns an error before any query. Such a field cannot be a match field,
-// but an item with a gorm.Valuer field can still be added. gorm expands a list into several values
-// on insert as well, so an item whose list field holds more than one element cannot be added; give
-// such a field a serializer. A field with a gorm serializer is matched by its serialized value.
+// Every other value is bound as one value. Every value is checked as Eq checks its value: a field
+// whose value is a slice or an array (other than a byte slice or a driver.Valuer), or whose type is
+// a gorm.Valuer (also as a nil pointer), returns an error before any query. Such a field cannot be
+// a match field, but an item with a gorm.Valuer field can still be added. gorm expands a list into
+// several values on insert as well, so an item whose list field holds more than one element cannot
+// be added; give such a field a serializer. A field with a gorm serializer is matched by its
+// serialized value.
 //
 // out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the same
 // way GetNode does (including NodeId and the read-only ParentId) and found is true. When nothing
@@ -159,13 +164,15 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // options (lookUpColumn): a column name wins; a Go field name counts the columns of fields that are
 // not Node-owned, and one that several such columns share is rejected with ErrUnknownMatchField.
 // Each field is matched by its ACTUAL value — including zero values (false/0/"") — so a key that
-// is legitimately zero is honored rather than silently dropped; a value that eqValue reports as
-// NULL matches as IS NULL. The value gorm reads from the field (for a field with a serializer, a
-// driver.Valuer that serializes it) is checked as Eq checks its value (checkBindValue), so a list
-// or a gorm.Valuer is rejected before any query. Node-owned fields (NodeId/Tenant/SortOrder/ParentId) and unknown fields
-// are rejected with ErrUnknownMatchField. An empty matchFields returns ErrEmptyMatch. Column
-// identifiers are dialect-quoted, so a field mapping to a reserved-word column still produces
-// valid SQL.
+// is legitimately zero is honored rather than silently dropped. A value that eqValue reports as
+// NULL matches as IS NULL, and so does a byte slice that Add stores as NULL (addedAsNull): the
+// match compares with what Add stores, where Eq binds the value it is given. Every other value is
+// bound through oneValue, as Eq binds it. The value gorm reads from the field (for a field with a
+// serializer, a driver.Valuer that serializes it) is checked as Eq checks its value
+// (checkBindValue), so a list or a gorm.Valuer is rejected before any query. Node-owned fields
+// (NodeId/Tenant/SortOrder/ParentId) and unknown fields are rejected with ErrUnknownMatchField. An
+// empty matchFields returns ErrEmptyMatch. Column identifiers are dialect-quoted, so a field
+// mapping to a reserved-word column still produces valid SQL.
 func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields []string) (string, []any, error) {
 	if len(matchFields) == 0 {
 		return "", nil, ErrEmptyMatch
@@ -199,22 +206,42 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 		ct.db.QuoteTo(&b, "nodes."+f.DBName)
 		col := b.String()
 
-		val, _ := f.ValueOf(ctx, rv)
-		if err := checkBindValue(val); err != nil {
+		raw, _ := f.ValueOf(ctx, rv)
+		if err := checkBindValue(raw); err != nil {
 			return "", nil, fmt.Errorf("match field %q: %w", name, err)
 		}
-		val, null, err := eqValue(val)
+		val, null, err := eqValue(raw)
 		if err != nil {
 			return "", nil, fmt.Errorf("match field %q: %w", name, err)
 		}
-		if null {
+		if null || addedAsNull(raw, val) {
 			conds = append(conds, col+" IS NULL")
 			continue
 		}
 		conds = append(conds, col+" = ?")
-		args = append(args, val)
+		args = append(args, oneValue(val))
 	}
 	return strings.Join(conds, " AND "), args, nil
+}
+
+// addedAsNull reports whether Add stores the byte slice that a match field holds as NULL, so that
+// the match is IS NULL: a nil byte slice of any type, also behind a non-nil pointer; and an empty
+// one of a named type, such as json.RawMessage, in a field that is not a pointer, which gorm's
+// AddVar writes as an empty list, (NULL), where it binds an empty []byte as empty bytes. raw is the
+// value read from the field and val the value eqValue made of it; a driver.Valuer is stored as its
+// Value, which eqValue has already checked for NULL.
+func addedAsNull(raw, val any) bool {
+	if _, ok := val.(driver.Valuer); ok {
+		return false
+	}
+	rv := reflect.ValueOf(val)
+	if rv.Kind() != reflect.Slice || rv.Type().Elem().Kind() != reflect.Uint8 {
+		return false
+	}
+	if rv.IsNil() {
+		return true
+	}
+	return rv.Len() == 0 && rv.Type() != reflect.TypeFor[[]byte]() && reflect.ValueOf(raw).Kind() != reflect.Pointer
 }
 
 // findChildInTx runs the direct-child query-by-example lookup planned by p on the given tx and
