@@ -8,8 +8,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// ErrVirtualRoot is returned when a node id of 0, the virtual root, is passed to an operation that
-// deletes nodes.
+// ErrVirtualRoot is returned by DeleteRecurseMany when ids contains 0, the virtual root. DeleteRecurse
+// does not return it: it accepts id 0 (see there).
 var ErrVirtualRoot = errors.New("node id 0 is the virtual root; use DeleteTenant to delete a whole tenant")
 
 // idChunkSize is the number of ids bound to one statement of DeleteRecurseMany.

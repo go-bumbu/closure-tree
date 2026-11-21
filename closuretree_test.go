@@ -1645,6 +1645,38 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+// DeleteRecurse does not reject the virtual root: id 0 deletes every node of the tenant, with its
+// closure and sort-order rows, and keeps the lock row and the other tenants. Once the tenant has no
+// nodes, id 0 is not found.
+func TestDeleteRecurseVirtualRoot(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			populateTree(t, ct)
+			otherBefore := closureRows(t, gdb, ct, tenant2)
+
+			if err := ct.DeleteRecurse(ctx, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			if got := countTenant(t, gdb, ct, tenant1); got != (tenantCounts{Lock: 1}) {
+				t.Errorf("after DeleteRecurse of id 0: %+v", got)
+			}
+			if diff := cmp.Diff(otherBefore, closureRows(t, gdb, ct, tenant2)); diff != "" {
+				t.Errorf("tenant 2 changed (-before +after):\n%s", diff)
+			}
+			if err := ct.DeleteRecurse(ctx, 0, tenant1); !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("empty tenant: want ErrNodeNotFound, got %v", err)
+			}
+		})
+	}
+}
+
 func TestIsDescendant(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
