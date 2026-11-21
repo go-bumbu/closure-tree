@@ -65,11 +65,13 @@ var (
 // anchor upsert. SQLite callers should set a busy_timeout so a waiting writer blocks briefly instead
 // of failing immediately with SQLITE_BUSY.
 //
-// Tenants: the database compares tenants with the collation of the tenant columns, and the library
-// sets none, so the columns get the database's default. PostgreSQL and SQLite compare exactly.
-// MySQL's default collation, utf8mb4_0900_ai_ci, ignores case and accents, so "Acme", "acme" and
-// "acmé" are one tenant for every read, write and lock, and DeleteTenant deletes all of them. Pass
-// tenants in one normalised form.
+// Tenants: the database compares tenants with the collation of the tenant columns. The library sets
+// no collation, so the tenant columns get the table's default: the database's default collation, or
+// the one the caller's table options (gorm:table_options) set. PostgreSQL and SQLite compare
+// exactly. MySQL's default collation, utf8mb4_0900_ai_ci, ignores case and accents, so with it
+// "Acme", "acme" and "acmé" are one tenant for every read, write and lock, and DeleteTenant deletes
+// all of them. Tenants must not differ only in case or accents: use one spelling for each tenant,
+// such as ids or lower-case ASCII names.
 type Tree struct {
 	db *gorm.DB
 	// table names, allows multiple trees
