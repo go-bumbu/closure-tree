@@ -14,7 +14,7 @@ var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; us
 // to a transaction (see WithTx) failed and could not then be rolled back to its savepoint, for
 // example because the write's context ended during a statement and the driver dropped the
 // connection. The caller's transaction can no longer be used, and its earlier work may be lost:
-// roll it back.
+// roll it back. Its absence does not prove the transaction survived; see WithTx.
 var ErrSavepointRollback = errors.New("the transaction can no longer be used; roll it back")
 
 // WithTx returns a copy of the Tree that runs every read and write on tx, usually a transaction
@@ -33,10 +33,15 @@ var ErrSavepointRollback = errors.New("the transaction can no longer be used; ro
 // and the outer transaction stays usable, unless errors.Is(err, ErrSavepointRollback): then the
 // rollback to the savepoint failed, for example because the write's context ended during a
 // statement and the driver dropped the connection, which loses the transaction's earlier work too,
-// and the caller must roll the transaction back. A successful write keeps the tenant lock until the
-// outer transaction ends (PostgreSQL and MySQL).
+// and the caller must roll the transaction back. ErrSavepointRollback covers only the statements
+// inside the savepoint: reads on the copy, and the statements a write runs before its savepoint
+// (SAVEPOINT itself, the first reads of DeleteTenant and RenormalizeAll), fail like a statement of
+// the caller's own, without it. So the caller should also roll the transaction back after an error
+// from a call whose context has ended (ctx.Err() != nil): the driver may have dropped the
+// connection. A successful write keeps the tenant lock until the outer transaction ends
+// (PostgreSQL and MySQL).
 //
-// The other exception is a deadlock on MySQL (error 1213): the server has already rolled back the
+// A further exception is a deadlock on MySQL (error 1213): the server has already rolled back the
 // whole outer transaction, so the caller must roll it back and retry it; continuing would run the
 // following statements outside any transaction. The returned error contains the driver's error,
 // so it can be tested with errors.As. On MySQL at its default isolation level (REPEATABLE READ),

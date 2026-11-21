@@ -45,7 +45,8 @@ func (ct *Tree) writeTx(ctx context.Context, tenant string, fn func(tx *gorm.DB)
 func (ct *Tree) savepointTx(tx *gorm.DB, tenant string, fn func(tx *gorm.DB) error) (err error) {
 	name := fmt.Sprintf("ct_sp_%d", savepointSeq.Add(1))
 	if err := execSavepointStmt(tx, "SAVEPOINT "+name); err != nil {
-		// Nothing to roll back: the caller's transaction is untouched.
+		// Nothing to roll back, so no ErrSavepointRollback. A context already done is refused before
+		// the statement is sent; one that ends while it runs may cost the connection (see WithTx).
 		return fmt.Errorf("unable to create savepoint: %w", err)
 	}
 	panicked := true

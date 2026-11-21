@@ -126,8 +126,12 @@ func TestWriteTxDoneContextKeepsTransactionUsable(t *testing.T) {
 			err := ct.db.Transaction(func(tx *gorm.DB) error {
 				// The failing write's statements would be logged as errors; keep the output clean.
 				tt := ct.WithTx(tx.Session(&gorm.Session{Logger: logger.Discard}))
-				if err := tt.Add(done, &txSample{Name: "done"}, nil, nil, tenant); !errors.Is(err, context.Canceled) {
-					t.Errorf("want context.Canceled from the write with a done context, got %v", err)
+				err := tt.Add(done, &txSample{Name: "done"}, nil, nil, tenant)
+				if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "unable to create savepoint") {
+					t.Errorf("want context.Canceled from the savepoint of the write with a done context, got %v", err)
+				}
+				if errors.Is(err, ErrSavepointRollback) {
+					t.Errorf("no savepoint was taken, want no ErrSavepointRollback, got %v", err)
 				}
 				return tt.Add(context.Background(), &txSample{Name: "after"}, nil, nil, tenant)
 			})

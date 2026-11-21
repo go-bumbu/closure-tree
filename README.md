@@ -427,12 +427,17 @@ err := db.Transaction(func(tx *gorm.DB) error {
 * Inside the transaction, use the copy returned by `WithTx` for that tenant: calling the original
   tree for the same tenant from inside the transaction waits on the transaction's own lock, so it
   blocks: forever, or until a lock or busy timeout fails it.
-* A tree error rolls back only the tree's own work (to a savepoint the tree takes) and leaves your
-  transaction usable; you decide whether to commit or roll back. This holds for every tree error
-  except a MySQL deadlock (below) and an error for which `errors.Is(err, closuretree.ErrSavepointRollback)`
-  is true: the tree could not roll back to its savepoint, for example because the context ended
-  during a statement and the driver dropped the connection, which loses your transaction's earlier
-  work too. Roll your transaction back then.
+* A failed tree write rolls back only the tree's own work (to a savepoint the tree takes) and leaves
+  your transaction usable; you decide whether to commit or roll back. Roll your transaction back
+  instead after a MySQL deadlock (below); when `errors.Is(err, closuretree.ErrSavepointRollback)` is
+  true: the tree could not roll back to its savepoint, for example because the context ended during
+  a statement and the driver dropped the connection, which loses your transaction's earlier work
+  too; and when the context you passed has ended (`ctx.Err() != nil`), because the driver may have
+  dropped the connection and the tree reports that only for statements inside its savepoint.
+* Reads on the copy, and the statements a write runs before its savepoint (`SAVEPOINT` itself, the
+  first reads of `DeleteTenant` and `RenormalizeAll`), are outside the savepoint: their failure
+  affects your transaction like a failed statement of your own, and never returns
+  `ErrSavepointRollback`.
 * MySQL: a deadlock error (error 1213) means the server has already rolled back your whole
   transaction. Roll back and retry the transaction; continuing would run the following statements
   outside any transaction. The tree's error contains the driver's error, so you can test for it with
