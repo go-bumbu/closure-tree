@@ -163,7 +163,8 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 //
 // On MySQL, as its last step, Migrate gives the tenant column of the four tables the collation
 // utf8mb4_0900_bin while none of them has a row, so that tenants are compared exactly (see Tree);
-// that needs the ALTER privilege. It never alters a table of a tree with rows.
+// that needs the ALTER privilege. It never alters a table of a tree with rows, and returns
+// ErrTenantCollation when the tenant columns of such a tree do not share one collation.
 func (ct *Tree) Migrate() error {
 	if err := ct.db.AutoMigrate(ct.model); err != nil {
 		return fmt.Errorf("unable to migrate node table: %w", err)

@@ -1,14 +1,22 @@
 package closuretree
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // tenantCollation is the collation Migrate gives the tenant columns on MySQL: binary, so tenants
 // that differ in case or accents are different, and NO PAD, so a trailing space counts too. That
 // is how PostgreSQL and SQLite compare them by default.
 const tenantCollation = "utf8mb4_0900_bin"
+
+// ErrTenantCollation is returned by Migrate on MySQL when the tenant columns of the tree's four
+// tables do not share one collation; the error names each column and its collation. The tables would
+// compare tenants differently, so that DeleteTenant could delete a tenant's nodes and keep their
+// closure rows. See Tree for the statement that gives all four the exact collation.
+var ErrTenantCollation = errors.New("the tenant columns of the tree do not share one collation")
 
 // tenantColumn is the tenant column of one of the tree's tables, as information_schema describes it.
 type tenantColumn struct {
@@ -41,9 +49,27 @@ func inexactTenantColumns(cols []tenantColumn) []tenantColumn {
 	return out
 }
 
+// sameTenantCollation returns ErrTenantCollation, naming each column and its collation, unless all
+// columns of cols have the same collation.
+func sameTenantCollation(cols []tenantColumn) error {
+	same := true
+	for _, c := range cols {
+		same = same && c.Collation == cols[0].Collation
+	}
+	if same {
+		return nil
+	}
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = c.Table + ".tenant " + c.Collation
+	}
+	return fmt.Errorf("%w: %s", ErrTenantCollation, strings.Join(parts, ", "))
+}
+
 // ensureTenantCollation is the last step of Migrate. On MySQL it gives the tenant column of each of
 // the tree's four tables the collation tenantCollation while none of the tables has a row; a tree
-// with rows keeps the collation it has. The other dialects compare tenants exactly already.
+// with rows keeps the collation it has, and gets ErrTenantCollation when its tenant columns do not
+// share one. The other dialects compare tenants exactly already.
 func (ct *Tree) ensureTenantCollation() error {
 	if ct.dialect != dialectMySQL {
 		return nil
@@ -57,8 +83,11 @@ func (ct *Tree) ensureTenantCollation() error {
 		return nil
 	}
 	empty, err := ct.treeIsEmpty()
-	if err != nil || !empty {
+	if err != nil {
 		return err
+	}
+	if !empty {
+		return sameTenantCollation(cols)
 	}
 	for _, c := range inexact {
 		stmt, err := alterTenantCollationSQL(ct.quoteTable(c.Table), c.Type)

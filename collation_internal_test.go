@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -38,6 +39,27 @@ func TestAlterTenantCollationSQL(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("type %q:\nwant %s\ngot  %s", tt.columnType, tt.want, got)
 		}
+	}
+}
+
+// TestSameTenantCollation pins that tenant columns which do not share one collation give
+// ErrTenantCollation, in an error that names each column and its collation.
+func TestSameTenantCollation(t *testing.T) {
+	exact := tenantColumn{Table: "a", Type: "varchar(191)", Collation: "utf8mb4_0900_bin"}
+	ci := tenantColumn{Table: "b", Type: "varchar(191)", Collation: "utf8mb4_0900_ai_ci"}
+	ci2 := tenantColumn{Table: "c", Type: "varchar(191)", Collation: "utf8mb4_0900_ai_ci"}
+	for _, cols := range [][]tenantColumn{nil, {exact}, {ci, ci2}} {
+		if err := sameTenantCollation(cols); err != nil {
+			t.Errorf("%v: want nil, got %v", cols, err)
+		}
+	}
+	err := sameTenantCollation([]tenantColumn{exact, ci, ci2})
+	if !errors.Is(err, ErrTenantCollation) {
+		t.Fatalf("want ErrTenantCollation, got %v", err)
+	}
+	want := ErrTenantCollation.Error() + ": a.tenant utf8mb4_0900_bin, b.tenant utf8mb4_0900_ai_ci, c.tenant utf8mb4_0900_ai_ci"
+	if err.Error() != want {
+		t.Errorf("message:\nwant %s\ngot  %s", want, err)
 	}
 }
 

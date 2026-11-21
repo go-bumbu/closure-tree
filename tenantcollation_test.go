@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	closuretree "github.com/go-bumbu/closure-tree"
@@ -133,7 +134,8 @@ func TestTenantSpellingsStaySeparate(t *testing.T) {
 
 // TestMigrateTenantCollation pins when Migrate gives the tenant columns the exact collation on
 // MySQL: while no table of the tree has a row, also when the caller's AutoMigrate created the node
-// table first. A tree with rows keeps the collation it has.
+// table first. A tree with rows keeps the collation it has, and Migrate returns ErrTenantCollation
+// when its tenant columns disagree.
 func TestMigrateTenantCollation(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -203,6 +205,31 @@ func TestMigrateTenantCollation(t *testing.T) {
 					t.Fatalf("the database default is %s: the test cannot tell it from the exact one", dbDefault)
 				}
 				assertTenantCollation(t, gdb, ct, dbDefault)
+			})
+
+			t.Run("disagree", func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, TestPayload{})
+				ct, err := newTestTree(gdb, TestPayload{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := ct.Add(ctx, &TestPayload{Name: "a"}, nil, nil, tenant1); err != nil {
+					t.Fatal(err)
+				}
+				if err := gdb.Exec(`ALTER TABLE test_payloads MODIFY COLUMN tenant varchar(191)
+					CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL`).Error; err != nil {
+					t.Fatal(err)
+				}
+				err = ct.Migrate()
+				if !errors.Is(err, closuretree.ErrTenantCollation) {
+					t.Fatalf("want ErrTenantCollation, got %v", err)
+				}
+				for _, want := range []string{"test_payloads.tenant utf8mb4_0900_ai_ci", "closure_tree_rel_test_payloads.tenant utf8mb4_0900_bin"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not name %q", err, want)
+					}
+				}
 			})
 		})
 	}
