@@ -18,7 +18,11 @@ import (
 // column names), resolved on match's own type as the read options resolve a column: a column name
 // wins, and a Go field name that fields of several columns share, such as the model's own Name and
 // the Name of a struct embedded with a column prefix, returns ErrUnknownMatchField: use the column
-// name. Each is matched by its actual value, INCLUDING zero values (false/0/""). A nil
+// name. Two differences from the read options remain: the columns of Node do not count when a Go
+// field name is resolved, so a model's own Tenant field on another column resolves to that column,
+// where the read options find the name ambiguous; and a read-only field excluded from migration is
+// accepted, so the query fails when the table has no such column. Each is matched by its actual
+// value, INCLUDING zero values (false/0/""). A nil
 // pointer field, or a driver.Valuer field whose Value is nil (such as an invalid sql.NullString),
 // matches as IS NULL; an error from Value is returned. A non-nil pointer field is matched by the
 // value it points to, unless the pointer is a driver.Valuer (its Value method may have a pointer
@@ -27,8 +31,10 @@ import (
 //
 // Each value is bound as one value and checked as Eq checks its value: a field whose value is a
 // slice or an array (other than a byte slice or a driver.Valuer), or whose type is a gorm.Valuer
-// (also as a nil pointer), returns an error before any query. A field with a gorm serializer is
-// matched by its serialized value. Such fields can still be added; they cannot be match fields.
+// (also as a nil pointer), returns an error before any query. Such a field cannot be a match field,
+// but an item with a gorm.Valuer field can still be added. gorm expands a list into several values
+// on insert as well, so an item whose list field holds more than one element cannot be added; give
+// such a field a serializer. A field with a gorm serializer is matched by its serialized value.
 //
 // out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the same
 // way GetNode does (including NodeId and the read-only ParentId) and found is true. When nothing

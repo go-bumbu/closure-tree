@@ -35,6 +35,9 @@ var (
 	// column of the match type, that is a field of the embedded Node, or that is a Go field name
 	// that fields of several columns share, such as the model's own Name and the Name of a struct
 	// embedded with a column prefix: use the column name. A column name wins over a Go field name.
+	// The names resolve as in the read options, except that the columns of Node do not count when a
+	// Go field name is resolved (a model's own Tenant field on another column resolves to that
+	// column), and that a read-only field excluded from migration is accepted.
 	ErrUnknownMatchField = errors.New("match field not found on the model")
 	ErrNoOp              = errors.New("update called with no item, no new parent, and no new sort order")
 	ErrInvalidAfterNode  = errors.New("afterNodeID is not a sibling of the target parent")

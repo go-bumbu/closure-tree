@@ -962,6 +962,13 @@ type gormCodeNode struct {
 	Code gormCode
 }
 
+// gormCodePtrNode has a pointer to a gorm.Valuer type, which gorm renders as SQL when it is not nil.
+type gormCodePtrNode struct {
+	closuretree.Node
+	Name string
+	Code *gormCode
+}
+
 // tagsNode has a list column, which gorm binds as a list.
 type tagsNode struct {
 	closuretree.Node
@@ -970,7 +977,8 @@ type tagsNode struct {
 }
 
 // A match field whose value gorm would not bind as one value fails before any query, as Eq does:
-// a list and a gorm.Valuer. GetOrAdd creates nothing.
+// a list and a gorm.Valuer, also as a nil pointer, which is checked by its type. GetOrAdd creates
+// nothing.
 func TestMatchRejectsUnboundValues(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -980,6 +988,7 @@ func TestMatchRejectsUnboundValues(t *testing.T) {
 	}{
 		{"list", tagsNode{}, "Tags", func() any { return &tagsNode{Name: "a", Tags: []string{}} }},
 		{"gorm.Valuer", gormCodeNode{}, "Code", func() any { return &gormCodeNode{Name: "a", Code: "x"} }},
+		{"nil pointer to a gorm.Valuer", gormCodePtrNode{}, "Code", func() any { return &gormCodePtrNode{Name: "a"} }},
 	}
 	for _, db := range testdbs.DBs() {
 		for _, c := range cases {
@@ -1013,6 +1022,34 @@ func TestMatchRejectsUnboundValues(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A gorm.Valuer field is checked only when it is a match field: GetOrAdd matching on another field
+// adds the item with it, and finds that item the second time.
+func TestGetOrAddStoresValuerThatIsNotMatched(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, gormCodeNode{})
+			ct, err := newTestTree(gdb, gormCodeNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			first := &gormCodeNode{Name: "a", Code: "x"}
+			if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, []string{"Name"}); err != nil || !created {
+				t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+			}
+			second := &gormCodeNode{Name: "a", Code: "y"}
+			if created, err := ct.GetOrAdd(ctx, second, 0, tenant1, []string{"Name"}); err != nil || created || second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.NodeId, first.NodeId, err)
+			}
+			var got gormCodeNode
+			if err := ct.GetNode(ctx, first.NodeId, tenant1, &got); err != nil || got.Code != "x" {
+				t.Errorf("stored node: %+v, err=%v; want Code x", got, err)
+			}
+		})
 	}
 }
 

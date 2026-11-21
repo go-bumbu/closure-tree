@@ -148,14 +148,20 @@ for _, name := range []string{"a", "b", "c"} {
 child; each is matched by its actual value, including zero values, and the embedded `Node` fields
 cannot be used. A name is resolved as in the read options: a column name wins, and a Go field name
 that fields of several columns share, such as the model's own `Name` and the `Name` of a struct
-embedded with a column prefix, returns `ErrUnknownMatchField`: use the column name. A nil pointer
-field and a `driver.Valuer` field whose `Value` is nil (such as an invalid `sql.NullString`) match
-NULL. Each value is bound as one value, as with `Eq`: a field whose value is a slice or an array
-(other than a byte slice or a `driver.Valuer`), or whose type is a `gorm.Valuer` (such as a JSON
-column type), returns an error before any query; such a field can still be added, but cannot be a
-match field. A field with a gorm serializer (`gorm:"serializer:json"`) is matched by its
-serialized value. The match is scoped to the tenant; `parentID = 0` operates on the root level.
-Use `FindChild` for the lookup alone:
+embedded with a column prefix, returns `ErrUnknownMatchField`: use the column name. Two
+differences from the read options remain: the `Node` columns do not count when a Go field name is
+resolved, so a model's own `Tenant` field on another column resolves to that column, where the read
+options find the name ambiguous; and a read-only field excluded from migration
+(`gorm:"->;-:migration"`) is accepted, so the query fails when the table has no such column. A nil
+pointer field and a `driver.Valuer` field whose `Value` is nil (such as an invalid
+`sql.NullString`) match NULL. Each value is bound as one value, as with `Eq`: a field whose value
+is a slice or an array (other than a byte slice or a `driver.Valuer`), or whose type is a
+`gorm.Valuer` (such as a JSON column type, also as a nil pointer), returns an error before any
+query. Such a field cannot be a match field, but an item with a `gorm.Valuer` field can still be
+added. gorm expands a list into several values on insert as well, so an item whose list field
+holds more than one element cannot be added; give such a field a serializer. A field with a gorm
+serializer (`gorm:"serializer:json"`) is matched by its serialized value. The match is scoped to
+the tenant; `parentID = 0` operates on the root level. Use `FindChild` for the lookup alone:
 
 ```GO
 var out Tag
