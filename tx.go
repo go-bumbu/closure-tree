@@ -59,8 +59,8 @@ func (ct *Tree) WithTx(tx *gorm.DB) *Tree {
 		panic("closuretree: WithTx called with a nil *gorm.DB")
 	}
 	cp := *ct
-	// A new statement that keeps only the connection and the context, then a session so that each
-	// tree query clones that clean statement. NewDB alone is not enough: WithContext would clone
+	// A new, clean statement on the same connection and context, then a session so that each tree
+	// query clones that clean statement. NewDB alone is not enough: WithContext would clone
 	// the old statement.
 	cp.db = tx.Session(&gorm.Session{NewDB: true, Initialized: true}).Session(&gorm.Session{})
 	return &cp
