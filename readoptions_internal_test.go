@@ -1,6 +1,8 @@
 package closuretree
 
 import (
+	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"reflect"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
@@ -197,23 +200,46 @@ type valuerList []string
 
 func (v valuerList) Value() (driver.Value, error) { return strings.Join(v, ","), nil }
 
+// sqlValuer is a gorm.Valuer: gorm renders the SQL it returns instead of binding it.
+type sqlValuer struct{ sql string }
+
+func (v sqlValuer) GormValue(context.Context, *gorm.DB) clause.Expr { return clause.Expr{SQL: v.sql} }
+
+// sqlDriverValuer is a gorm.Valuer and a driver.Valuer; gorm uses GormValue.
+type sqlDriverValuer struct{ sqlValuer }
+
+func (v sqlDriverValuer) Value() (driver.Value, error) { return v.sql, nil }
+
+// ptrValuer is a driver.Valuer through its pointer only.
+type ptrValuer struct{ s string }
+
+func (v *ptrValuer) Value() (driver.Value, error) { return v.s, nil }
+
 // A filter value that gorm would expand into several placeholders, or render as SQL, is rejected
 // before querying; a byte slice and a driver.Valuer bind as one value and are accepted.
 func TestFilterRejectsValuesThatAreNotOneValue(t *testing.T) {
 	ct := newInternalTree(t, optNode{})
 	words := []string{"a"}
+	named := sql.Named("x", "a")
 	bad := map[string]Cond{
-		"Eq with a slice":               Eq("name", []string{"a"}),
-		"Eq with an array":              Eq("name", [2]string{"a", "b"}),
-		"Eq with a pointer to a slice":  Eq("name", &words),
-		"In with a slice":               In("name", "a", []any{"b"}),
-		"In with a pointer to a slice":  In("name", &words),
-		"Eq with an expression":         Eq("name", clause.Expr{SQL: "name"}),
-		"In with an expression":         In("name", clause.Expr{SQL: "name"}),
-		"Eq with a column":              Eq("name", clause.Column{Name: "kind"}),
-		"Eq with a *gorm.DB":            Eq("name", ct.db),
-		"In with a *gorm.DB":            In("name", ct.db.Table("x")),
-		"Eq with a gorm expression ptr": Eq("name", &clause.Expr{SQL: "name"}),
+		"Eq with a gorm.Valuer":                  Eq("name", sqlValuer{"'a' OR 1=1"}),
+		"In with a gorm.Valuer":                  In("name", "a", sqlValuer{"'a' OR 1=1"}),
+		"Eq with a pointer to a gorm.Valuer":     Eq("name", &sqlValuer{"'a' OR 1=1"}),
+		"Eq with a gorm.Valuer that is driver's": Eq("name", sqlDriverValuer{sqlValuer{"'a' OR 1=1"}}),
+		"Eq with a sql.NamedArg":                 Eq("name", named),
+		"In with a sql.NamedArg":                 In("name", named),
+		"Eq with a pointer to a sql.NamedArg":    Eq("name", &named),
+		"Eq with a slice":                        Eq("name", []string{"a"}),
+		"Eq with an array":                       Eq("name", [2]string{"a", "b"}),
+		"Eq with a pointer to a slice":           Eq("name", &words),
+		"In with a slice":                        In("name", "a", []any{"b"}),
+		"In with a pointer to a slice":           In("name", &words),
+		"Eq with an expression":                  Eq("name", clause.Expr{SQL: "name"}),
+		"In with an expression":                  In("name", clause.Expr{SQL: "name"}),
+		"Eq with a column":                       Eq("name", clause.Column{Name: "kind"}),
+		"Eq with a *gorm.DB":                     Eq("name", ct.db),
+		"In with a *gorm.DB":                     In("name", ct.db.Table("x")),
+		"Eq with a gorm expression ptr":          Eq("name", &clause.Expr{SQL: "name"}),
 	}
 	for what, c := range bad {
 		if _, err := ct.planRead([]ReadOption{Filter(c)}); err == nil || !strings.Contains(err.Error(), "name") {
@@ -224,13 +250,20 @@ func TestFilterRejectsValuesThatAreNotOneValue(t *testing.T) {
 		}
 	}
 	for what, c := range map[string]Cond{
-		"Eq with []byte":         Eq("name", []byte("a")),
-		"In with []byte":         In("name", []byte("a"), []byte("b")),
-		"Eq with a Valuer slice": Eq("name", valuerList{"a"}),
+		"Eq with []byte":           Eq("name", []byte("a")),
+		"In with []byte":           In("name", []byte("a"), []byte("b")),
+		"Eq with a Valuer slice":   Eq("name", valuerList{"a"}),
+		"Eq with a pointer Valuer": Eq("name", &ptrValuer{"a"}),
+		"In with a pointer Valuer": In("name", &ptrValuer{"a"}),
 	} {
 		if _, err := ct.planRead([]ReadOption{Filter(c)}); err != nil {
 			t.Errorf("%s: %v", what, err)
 		}
+	}
+	// a pointer that is a driver.Valuer is bound as it is: its element is not one
+	pv := &ptrValuer{"a"}
+	if p, err := ct.planRead([]ReadOption{Filter(Eq("name", pv))}); err != nil || len(p.conds) != 1 || p.conds[0].values[0] != any(pv) {
+		t.Errorf("Eq with a pointer Valuer must bind the pointer: %+v, %v", p, err)
 	}
 }
 

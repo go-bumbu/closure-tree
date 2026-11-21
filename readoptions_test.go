@@ -2,6 +2,7 @@ package closuretree_test
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"sort"
@@ -811,6 +812,41 @@ func TestFilterOnFlatReads(t *testing.T) {
 			both("no options", everything, "", 0)
 			both("an empty Filter", everything, "", 0, closuretree.Filter())
 			both("PerNode without a filter", everything, "", 0, per)
+		})
+	}
+}
+
+// namePtr is a driver.Valuer through its pointer only.
+type namePtr struct{ s string }
+
+func (v *namePtr) Value() (driver.Value, error) { return v.s, nil }
+
+// Eq and In bind a driver.Valuer as one value; a pointer that is one is not dereferenced.
+func TestFilterBindsValuers(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			_, ct, _ := filterTree(t, db)
+			ctx := context.Background()
+			cases := []struct {
+				name string
+				cond closuretree.Cond
+				want []string
+			}{
+				{"Eq with a pointer Valuer", closuretree.Eq("name", &namePtr{"a1"}), []string{"a1"}},
+				{"In with pointer Valuers", closuretree.In("name", &namePtr{"a1"}, &namePtr{"b"}), []string{"a1", "b"}},
+			}
+			for _, c := range cases {
+				var items []filterNode
+				err := ct.Descendants(ctx, 0, 0, tenantF, &items, closuretree.Filter(c.cond), closuretree.PerNode())
+				got := []string{}
+				for _, n := range items {
+					got = append(got, n.Name)
+				}
+				sort.Strings(got)
+				if diff := cmp.Diff(c.want, got); err != nil || diff != "" {
+					t.Errorf("%s: err %v (-want +got):\n%s", c.name, err, diff)
+				}
+			}
 		})
 	}
 }

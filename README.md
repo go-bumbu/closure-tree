@@ -194,12 +194,14 @@ err = visible.Descendants(ctx, 0, 1, "user1", &all, ct.Unfiltered()) // hidden t
 ```
 
 * `Filter(conds ...Cond)` keeps the nodes that match every cond. The conds are `Eq`, `IsNull`,
-  `NotNull` and `In`. `Eq` with `nil` means `IsNull`, and `Eq` dereferences a non-nil pointer. `In`
-  with no values matches nothing, and `In` never matches NULL: `In("note", nil)` matches nothing,
-  use `IsNull`. Values are passed one by one; a slice or an array (other than a byte slice or a
-  `driver.Valuer`) or a gorm expression is rejected with an error before any query runs. A tree
-  read binds the values of `In` up to three times, so a very long list reaches the database's limit
-  of bound values sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per statement).
+  `NotNull` and `In`. `Eq` with `nil` means `IsNull`, and `Eq` dereferences a non-nil pointer that
+  is not a `driver.Valuer`. `In` with no values matches nothing, and `In` never matches NULL:
+  `In("note", nil)` matches nothing, use `IsNull`. Values are passed one by one and each is bound
+  as one value; a slice or an array (other than a byte slice or a `driver.Valuer`), a gorm
+  expression, a `gorm.Valuer` or a `sql.NamedArg` is rejected with an error before any query
+  runs. A tree read binds the values of `In` up to three times, so a very long list reaches the
+  database's limit of bound values sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per
+  statement).
 * A column is named by its column name or its Go field name. A column can be named when its field
   has a column name and is not both read-only and excluded from migration; the computed parent
   cannot be named. An unknown name returns `ErrUnknownColumn` before any query runs, from every

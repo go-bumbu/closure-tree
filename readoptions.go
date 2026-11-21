@@ -1,6 +1,7 @@
 package closuretree
 
 import (
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -40,9 +41,9 @@ type Cond struct {
 }
 
 // Eq matches the nodes whose column equals value. A nil value, or a nil pointer, matches NULL
-// instead; a non-nil pointer is dereferenced. The value is bound as one value: a slice or an array
-// (other than a byte slice or a driver.Valuer), a gorm expression or a *gorm.DB is rejected with
-// an error before the read queries.
+// instead; a non-nil pointer is dereferenced, unless it is a driver.Valuer. The value is bound as
+// one value: a slice or an array (other than a byte slice or a driver.Valuer), a gorm expression, a
+// *gorm.DB, a gorm.Valuer or a sql.NamedArg is rejected with an error before the read queries.
 func Eq(column string, value any) Cond {
 	return Cond{column: column, op: opEq, values: []any{value}}
 }
@@ -57,9 +58,10 @@ func NotNull(column string) Cond { return Cond{column: column, op: opNotNull} }
 // It never matches NULL, so In(column, nil) matches nothing; use IsNull. The values are copied, so
 // changing the slice afterwards does not change the condition. Pass the values one by one: a value
 // that is itself a slice or an array (other than a byte slice or a driver.Valuer), a gorm
-// expression or a *gorm.DB is rejected with an error before the read queries. A tree read binds
-// the values up to three times, so a very long list reaches the database's limit of bound values
-// sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per statement).
+// expression, a *gorm.DB, a gorm.Valuer or a sql.NamedArg is rejected with an error before the
+// read queries. A tree read binds the values up to three times, so a very long list reaches the
+// database's limit of bound values sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per
+// statement).
 func In(column string, values ...any) Cond {
 	return Cond{column: column, op: opIn, values: slices.Clone(values)}
 }
@@ -209,7 +211,7 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 			if rv := reflect.ValueOf(v); v != nil && rv.Kind() == reflect.Pointer {
 				if rv.IsNil() {
 					v = nil
-				} else {
+				} else if _, ok := v.(driver.Valuer); !ok {
 					v = rv.Elem().Interface()
 				}
 			}
@@ -234,14 +236,18 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 }
 
 // checkFilterValue rejects a value that gorm would not bind as one value: a list, which gorm
-// expands into several placeholders, and a gorm expression or *gorm.DB, which gorm renders as SQL.
-// A byte slice and a driver.Valuer are bound as one value. A non-nil pointer is checked through.
+// expands into several placeholders; a gorm expression, a *gorm.DB or a gorm.Valuer, which gorm
+// renders as SQL; and a sql.NamedArg, which gorm binds without a placeholder. A byte slice and a
+// driver.Valuer that is not a gorm.Valuer are bound as one value. A non-nil pointer is checked
+// through.
 func checkFilterValue(column string, v any) error {
 	switch v.(type) {
 	case nil:
 		return nil
-	case *gorm.DB, clause.Expression, clause.Column, clause.Table:
+	case *gorm.DB, clause.Expression, clause.Column, clause.Table, gorm.Valuer:
 		return fmt.Errorf("filter on %q: a value of type %T is rendered as SQL, not bound", column, v)
+	case sql.NamedArg:
+		return fmt.Errorf("filter on %q: a value of type %T is not bound as one value", column, v)
 	case driver.Valuer:
 		return nil
 	}
