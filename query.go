@@ -200,7 +200,10 @@ const absMaxDepth = 2147483647
 // type as in Descendants. Children are linked through the node id and parent id of the scanned
 // row, so the element type does not have to embed Node. With an element type without a Children
 // field only the top-level nodes of the read come back, the direct children of parent; deeper nodes
-// are not returned. One whose Children field is not a []*T returns an error before querying.
+// are not returned. One whose Children field is not a []*T returns an error before querying. A
+// Children field promoted through an embedded pointer struct is reached on every element, leaves
+// included, by allocating the nil pointer; when it cannot be allocated (a pointer to an unexported
+// type), the read behaves as without Children.
 //
 // TreeDescendants honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A
 // node that does not match the filter is left out with its whole subtree; its children are never
@@ -219,8 +222,12 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 
 	sliceVal := reflect.ValueOf(items).Elem()
 	elemType := sliceVal.Type().Elem()
-	if f, ok := elemType.Elem().FieldByName("Children"); ok && f.Type != reflect.SliceOf(elemType) {
-		return fmt.Errorf("cannot read a tree into %s: its field Children is %s, not %s", elemType.Elem(), f.Type, reflect.SliceOf(elemType))
+	var children []int
+	if f, ok := elemType.Elem().FieldByName("Children"); ok {
+		if f.Type != reflect.SliceOf(elemType) {
+			return fmt.Errorf("cannot read a tree into %s: its field Children is %s, not %s", elemType.Elem(), f.Type, reflect.SliceOf(elemType))
+		}
+		children = f.Index
 	}
 
 	tenant, err = validateTenant(tenant)
@@ -249,7 +256,7 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 		return err
 	}
 
-	for _, node := range linkTree(entries) {
+	for _, node := range linkTree(entries, children) {
 		sliceVal.Set(reflect.Append(sliceVal, node))
 	}
 	return nil

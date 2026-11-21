@@ -619,6 +619,87 @@ func TestTreeDescendantsWithoutChildrenReturnsTopLevel(t *testing.T) {
 	}
 }
 
+// TreeLinks holds the Children of linkedNode, which embeds it by pointer.
+type TreeLinks struct {
+	Children []*linkedNode
+}
+
+type linkedNode struct {
+	closuretree.Node
+	Name string
+	*TreeLinks
+}
+
+// treeLinks holds the Children of hiddenLinksNode, which embeds it by pointer. Reflection cannot
+// allocate a pointer to an unexported embedded type.
+type treeLinks struct {
+	Children []*hiddenLinksNode
+}
+
+type hiddenLinksNode struct {
+	closuretree.Node
+	Name string
+	*treeLinks
+}
+
+// A Children field promoted through an embedded pointer struct is reached by allocating the
+// pointer on every element, so the chain a > b > c comes back linked and the Children of a leaf can
+// be read. When the pointer is unexported and cannot be allocated, the elements are not linked: only
+// the top-level nodes come back, as for an element type without Children.
+func TestTreeDescendantsChildrenThroughEmbeddedPointer(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			var parent *uint
+			for _, name := range []string{"a", "b", "c"} {
+				n := &TestPayload{Name: name}
+				if err := ct.Add(ctx, n, parent, nil, tenant1); err != nil {
+					t.Fatal(err)
+				}
+				parent = up(n.NodeId)
+			}
+
+			var linked []*linkedNode
+			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &linked); err != nil {
+				t.Fatal(err)
+			}
+			if len(linked) != 1 || linked[0].Name != "a" || len(linked[0].Children) != 1 {
+				t.Fatalf("want root a with one child, got %d roots", len(linked))
+			}
+			b := linked[0].Children[0]
+			if b.Name != "b" || len(b.Children) != 1 || b.Children[0].Name != "c" {
+				t.Fatalf("want b with child c, got %q with %d children", b.Name, len(b.Children))
+			}
+			if leaf := b.Children[0]; len(leaf.Children) != 0 {
+				t.Errorf("leaf c: want no children, got %d", len(leaf.Children))
+			}
+
+			var top []*linkedNode
+			if err := ct.TreeDescendants(ctx, 0, 1, tenant1, &top); err != nil || len(top) != 1 || len(top[0].Children) != 0 {
+				t.Errorf("maxDepth 1: want a without children, got %d roots, %v", len(top), err)
+			}
+
+			var hidden []*hiddenLinksNode
+			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &hidden); err != nil {
+				t.Fatal(err)
+			}
+			names := make([]string, len(hidden))
+			for i, n := range hidden {
+				names[i] = n.Name
+			}
+			if diff := cmp.Diff([]string{"a"}, names); diff != "" {
+				t.Errorf("unexported embedded pointer (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 type kindName string
 
 type convertedNode struct {

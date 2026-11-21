@@ -282,14 +282,23 @@ type treeEntry struct {
 }
 
 // linkTree appends every element to the Children field of its parent, found through the Node of
-// the scanned rows, and returns the elements whose parent is not among them. An element whose
-// parent is among them but has no Children field is neither linked nor returned, so it is dropped;
-// TreeDescendants rejects a Children field of another type than []*T before the query runs.
-// Siblings, and the returned roots, are ordered by sort_order, then node id.
-func linkTree(entries []treeEntry) []reflect.Value {
-	byID := make(map[uint]reflect.Value, len(entries))
+// the scanned rows, and returns the elements whose parent is not among them. children is the index
+// path of the Children field in the element type, nil when it has none; TreeDescendants rejects a
+// Children field of another type than []*T before the query runs. The field is reached on every
+// element, leaves included, allocating nil embedded pointers on the way; when one cannot be
+// allocated, as one to an unexported type, the element has no Children field to link into. An
+// element whose parent is among them but has no Children field is neither linked nor returned, so
+// it is dropped. Siblings, and the returned roots, are ordered by sort_order, then node id.
+func linkTree(entries []treeEntry, children []int) []reflect.Value {
+	childrenOf := make(map[uint]reflect.Value, len(entries))
 	for _, e := range entries {
-		byID[e.node.NodeId] = e.elem
+		var field reflect.Value
+		if children != nil {
+			if f, ok := settableField(e.elem.Elem(), children); ok && f.CanSet() {
+				field = f
+			}
+		}
+		childrenOf[e.node.NodeId] = field
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].node.SortOrder != entries[j].node.SortOrder {
@@ -300,14 +309,13 @@ func linkTree(entries []treeEntry) []reflect.Value {
 
 	var roots []reflect.Value
 	for _, e := range entries {
-		parent, found := byID[e.node.ParentId]
+		siblings, found := childrenOf[e.node.ParentId]
 		if !found {
 			roots = append(roots, e.elem)
 			continue
 		}
-		children := parent.Elem().FieldByName("Children")
-		if children.IsValid() && children.CanSet() && children.Type() == reflect.SliceOf(e.elem.Type()) {
-			children.Set(reflect.Append(children, e.elem))
+		if siblings.IsValid() {
+			siblings.Set(reflect.Append(siblings, e.elem))
 		}
 	}
 	return roots
