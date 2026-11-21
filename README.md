@@ -436,6 +436,12 @@ err := db.Transaction(func(tx *gorm.DB) error {
 * MySQL at its default isolation level (REPEATABLE READ): while your transaction is open, tree writes
   of different tenants can wait on each other, and deadlock. Keep such transactions short, or run
   them at READ COMMITTED.
+* MySQL at its default isolation level (REPEATABLE READ): `DeleteRecurse`, `DeleteRecurseMany`,
+  `DeleteTenant` and `BuildFromParents` lock closure rows of other tenants, because no closure-table
+  index leads with the tenant. They can therefore deadlock with other tenants' writes, inside or
+  outside your transaction. Error 1213 means the whole transaction was rolled back: on a tree bound
+  with `WithTx` roll back and retry your transaction; on a tree not bound to a transaction retry
+  the call.
 * After a successful tree write the tenant lock is held until your transaction ends, so do not hold
   the transaction across slow work. After a failed tree write the lock may already be released;
   `LockTenant` holds it for the whole transaction.
@@ -461,7 +467,9 @@ and `_busy_timeout=5000` for `gorm.io/driver/sqlite`, `_txlock=immediate` and
 first and then writes fails with a busy error that the timeout does not retry.
 
 On PostgreSQL the transactions the library opens itself (any write on a tree not bound to a
-transaction) run at READ COMMITTED, whatever the connection's default level is.
+transaction) run at READ COMMITTED, whatever the connection's default level is. On MySQL they run at
+the connection's default level, so at REPEATABLE READ the four calls named above can deadlock with
+other tenants' writes there too.
 
 ### Adopting an existing table
 

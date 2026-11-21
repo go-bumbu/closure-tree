@@ -36,12 +36,15 @@ var ErrSavepointRollback = errors.New("the transaction can no longer be used; ro
 // and the caller must roll the transaction back. A successful write keeps the tenant lock until the
 // outer transaction ends (PostgreSQL and MySQL).
 //
-// The one exception is a deadlock on MySQL (error 1213): the server has already rolled back the
+// The other exception is a deadlock on MySQL (error 1213): the server has already rolled back the
 // whole outer transaction, so the caller must roll it back and retry it; continuing would run the
 // following statements outside any transaction. The returned error contains the driver's error,
 // so it can be tested with errors.As. On MySQL at its default isolation level (REPEATABLE READ),
 // tree writes of different tenants can wait on each other, and deadlock, while a caller's
-// transaction is open: keep such transactions short, or run them at READ COMMITTED.
+// transaction is open: keep such transactions short, or run them at READ COMMITTED. DeleteRecurse,
+// DeleteRecurseMany, DeleteTenant and BuildFromParents can deadlock with other tenants' writes
+// there inside or outside a caller's transaction: no closure-table index leads with the tenant, so
+// their deletes lock closure rows of other tenants (see the concurrency note on Tree).
 //
 // Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
 // the transaction waits on the transaction's own lock, so it blocks: forever, or until a lock or
