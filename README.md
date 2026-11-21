@@ -194,8 +194,9 @@ err = visible.Descendants(ctx, 0, 1, "user1", &all, ct.Unfiltered()) // hidden t
 ```
 
 * `Filter(conds ...Cond)` keeps the nodes that match every cond. The conds are `Eq`, `IsNull`,
-  `NotNull` and `In`. `Eq` with `nil` means `IsNull`, and `Eq` dereferences a non-nil pointer that
-  is not a `driver.Valuer`. `In` with no values matches nothing, and `In` never matches NULL:
+  `NotNull` and `In`. `Eq` with `nil`, a nil pointer, or a `driver.Valuer` whose `Value` is nil
+  (such as `sql.NullString{}`) means `IsNull`, and `Eq` dereferences a non-nil pointer that is
+  not a `driver.Valuer`. `In` with no values matches nothing, and `In` never matches NULL:
   `In("note", nil)` matches nothing, use `IsNull`. Values are passed one by one and each is bound
   as one value; a slice or an array (other than a byte slice or a `driver.Valuer`), a gorm
   expression, a `gorm.Valuer` or a `sql.NamedArg` is rejected with an error before any query

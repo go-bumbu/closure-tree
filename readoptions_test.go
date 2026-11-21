@@ -2,6 +2,7 @@ package closuretree_test
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -821,7 +822,8 @@ type namePtr struct{ s string }
 
 func (v *namePtr) Value() (driver.Value, error) { return v.s, nil }
 
-// Eq and In bind a driver.Valuer as one value; a pointer that is one is not dereferenced.
+// Eq and In bind a driver.Valuer as one value; a pointer that is one is not dereferenced. In Eq a
+// Valuer holding NULL matches NULL.
 func TestFilterBindsValuers(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -834,6 +836,11 @@ func TestFilterBindsValuers(t *testing.T) {
 			}{
 				{"Eq with a pointer Valuer", closuretree.Eq("name", &namePtr{"a1"}), []string{"a1"}},
 				{"In with pointer Valuers", closuretree.In("name", &namePtr{"a1"}, &namePtr{"b"}), []string{"a1", "b"}},
+				// a Valuer holding NULL is IS NULL in Eq; note is NULL on x only
+				{"Eq with a NULL Valuer", closuretree.Eq("note", sql.NullString{}), []string{"x"}},
+				{"Eq with a pointer to a NULL Valuer", closuretree.Eq("note", &sql.NullString{}), []string{"x"}},
+				{"Eq with a Valuer", closuretree.Eq("note", sql.NullString{String: "keep", Valid: true}),
+					[]string{"a", "a1", "b", "b1", "x1", "x2", "x21"}},
 			}
 			for _, c := range cases {
 				var items []filterNode

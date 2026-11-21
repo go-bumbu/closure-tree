@@ -14,9 +14,10 @@ import (
 // matches among the root nodes.
 //
 // match must embed Node. matchFields names the fields that form the match key (Go field names or
-// column names); each is matched by its actual value, INCLUDING zero values (false/0/""), and a nil
-// pointer field matches as IS NULL. An empty matchFields returns ErrEmptyMatch; an unknown or
-// Node-owned field returns ErrUnknownMatchField.
+// column names); each is matched by its actual value, INCLUDING zero values (false/0/""). A nil
+// pointer field, or a driver.Valuer field whose Value is nil (such as an invalid sql.NullString),
+// matches as IS NULL; an error from Value is returned. An empty matchFields returns ErrEmptyMatch;
+// an unknown or Node-owned field returns ErrUnknownMatchField.
 //
 // out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the same
 // way GetNode does (including NodeId and the read-only ParentId) and found is true. When nothing
@@ -137,8 +138,8 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // buildMatchConditions builds the WHERE fragment and bind args for a query-by-example match on the
 // fields named in matchFields. Each name is resolved against the model schema (Go field name or
 // column name) and matched by its ACTUAL value — including zero values (false/0/"") — so a key that
-// is legitimately zero is honored rather than silently dropped; a nil pointer field matches as
-// IS NULL. Node-owned fields (NodeId/Tenant/SortOrder/ParentId) and unknown fields are rejected with
+// is legitimately zero is honored rather than silently dropped; a value that eqValue reports as
+// NULL matches as IS NULL. Node-owned fields (NodeId/Tenant/SortOrder/ParentId) and unknown fields are rejected with
 // ErrUnknownMatchField. An empty matchFields returns ErrEmptyMatch. Column identifiers are
 // dialect-quoted, so a field mapping to a reserved-word column still produces valid SQL.
 func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields []string) (string, []any, error) {
@@ -166,13 +167,13 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 		col := b.String()
 
 		val, _ := f.ValueOf(ctx, rv)
-		rvVal := reflect.ValueOf(val)
-		if val == nil || (rvVal.Kind() == reflect.Pointer && rvVal.IsNil()) {
+		val, null, err := eqValue(val)
+		if err != nil {
+			return "", nil, fmt.Errorf("match field %q: %w", name, err)
+		}
+		if null {
 			conds = append(conds, col+" IS NULL")
 			continue
-		}
-		if rvVal.Kind() == reflect.Pointer {
-			val = rvVal.Elem().Interface() // bind the dereferenced value, not the pointer
 		}
 		conds = append(conds, col+" = ?")
 		args = append(args, val)

@@ -90,9 +90,14 @@ func TestPlanReadFilter(t *testing.T) {
 	s := "x"
 	eq([]resolvedCond{{"kind", opEq, []any{"doc"}}, {"archived_at", opIsNull, nil}},
 		conds(Filter(Eq("Kind", "doc"), IsNull("archived_at"))))
-	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", nil))))            // nil is IS NULL
-	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", (*string)(nil))))) // so is a nil pointer
-	eq([]resolvedCond{{"note", opEq, []any{"x"}}}, conds(Filter(Eq("note", &s))))          // a pointer is dereferenced
+	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", nil))))              // nil is IS NULL
+	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", (*string)(nil)))))   // so is a nil pointer
+	eq([]resolvedCond{{"note", opEq, []any{"x"}}}, conds(Filter(Eq("note", &s))))            // a pointer is dereferenced
+	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", sql.NullString{})))) // a Valuer holding NULL is IS NULL
+	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", &sql.NullString{}))))
+	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", (*sql.NullString)(nil)))))
+	valid := sql.NullString{String: "x", Valid: true} // a Valuer holding a value is bound as it is
+	eq([]resolvedCond{{"note", opEq, []any{valid}}}, conds(Filter(Eq("note", valid))))
 	eq([]resolvedCond{{"note", opNotNull, nil}, {"name", opIn, []any{"a", "b"}}}, conds(Filter(NotNull("note"), In("name", "a", "b"))))
 	eq([]resolvedCond{{"name", opIn, nil}}, conds(Filter(In("name"))))
 	eq([]resolvedCond{{"kind", opEq, []any{"doc"}}, {"hidden", opEq, []any{false}}}, // two Filter options are joined
@@ -264,6 +269,33 @@ func TestFilterRejectsValuesThatAreNotOneValue(t *testing.T) {
 	pv := &ptrValuer{"a"}
 	if p, err := ct.planRead([]ReadOption{Filter(Eq("name", pv))}); err != nil || len(p.conds) != 1 || p.conds[0].values[0] != any(pv) {
 		t.Errorf("Eq with a pointer Valuer must bind the pointer: %+v, %v", p, err)
+	}
+}
+
+var errBadValue = errors.New("bad value")
+
+// badValuer is a driver.Valuer whose Value fails.
+type badValuer string
+
+func (badValuer) Value() (driver.Value, error) { return nil, errBadValue }
+
+type badValuerNode struct {
+	Node
+	Code badValuer
+}
+
+// Eq and the match of FindChild and GetOrAdd ask a driver.Valuer for its value, to match NULL as
+// IS NULL; an error from Value is returned.
+func TestEqReturnsValuerError(t *testing.T) {
+	ct := newInternalTree(t, optNode{})
+	if _, err := ct.planRead([]ReadOption{Filter(Eq("name", badValuer("x")))}); !errors.Is(err, errBadValue) {
+		t.Errorf("Eq: want the Value error, got %v", err)
+	}
+	if _, err := ct.WithFilter(Eq("name", badValuer("x"))); !errors.Is(err, errBadValue) {
+		t.Errorf("WithFilter: want the Value error, got %v", err)
+	}
+	if _, _, err := ct.buildMatchConditions(t.Context(), &badValuerNode{Code: "x"}, []string{"Code"}); !errors.Is(err, errBadValue) {
+		t.Errorf("match: want the Value error, got %v", err)
 	}
 }
 

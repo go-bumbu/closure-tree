@@ -2,6 +2,7 @@ package closuretree_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"runtime"
 	"strings"
@@ -709,6 +710,52 @@ func TestGetOrAddParentIdBothPaths(t *testing.T) {
 			}
 			if child2.ParentId != root.NodeId {
 				t.Errorf("found path: ParentId = %d, want %d", child2.ParentId, root.NodeId)
+			}
+		})
+	}
+}
+
+type nullNoteNode struct {
+	closuretree.Node
+	Name string
+	Note sql.NullString
+}
+
+// A match field that is a driver.Valuer holding NULL matches as IS NULL, so GetOrAdd stays
+// idempotent and FindChild finds the child.
+func TestGetOrAddMatchesNullValuer(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, nullNoteNode{})
+			ct, err := newTestTree(gdb, nullNoteNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			match := []string{"Name", "Note"}
+
+			first := &nullNoteNode{Name: "a"}
+			if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+			}
+			second := &nullNoteNode{Name: "a"}
+			created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+			if err != nil || created || second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.NodeId, first.NodeId, err)
+			}
+			if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+				t.Errorf("want one node, got %d", n)
+			}
+
+			var out nullNoteNode
+			found, err := ct.FindChild(ctx, 0, tenant1, &nullNoteNode{Name: "a"}, match, &out)
+			if err != nil || !found || out.NodeId != first.NodeId {
+				t.Errorf("FindChild with a NULL Valuer: found=%v id=%d err=%v", found, out.NodeId, err)
+			}
+			valid := &nullNoteNode{Name: "a", Note: sql.NullString{String: "n", Valid: true}}
+			if found, err := ct.FindChild(ctx, 0, tenant1, valid, match, &out); err != nil || found {
+				t.Errorf("FindChild with a non-NULL Valuer must not find the NULL row: found=%v err=%v", found, err)
 			}
 		})
 	}

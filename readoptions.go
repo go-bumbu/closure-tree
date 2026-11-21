@@ -40,9 +40,9 @@ type Cond struct {
 	values []any
 }
 
-// Eq matches the nodes whose column equals value. A nil value, or a nil pointer, matches NULL
-// instead; a non-nil pointer is dereferenced, unless it is a driver.Valuer. The value is bound as
-// one value: a slice or an array (other than a byte slice or a driver.Valuer), a gorm expression, a
+// Eq matches the nodes whose column equals value. A nil value, a nil pointer, or a driver.Valuer
+// whose Value is nil matches NULL instead; an error from Value is returned by the read. A non-nil
+// pointer is dereferenced, unless it is a driver.Valuer. The value is bound as one value: a slice or an array (other than a byte slice or a driver.Valuer), a gorm expression, a
 // *gorm.DB, a gorm.Valuer or a sql.NamedArg is rejected with an error before the read queries.
 func Eq(column string, value any) Cond {
 	return Cond{column: column, op: opEq, values: []any{value}}
@@ -204,18 +204,14 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 		rc := resolvedCond{column: col, op: c.op}
 		switch c.op {
 		case opEq:
-			v := c.values[0]
-			if err := checkFilterValue(c.column, v); err != nil {
+			if err := checkFilterValue(c.column, c.values[0]); err != nil {
 				return nil, err
 			}
-			if rv := reflect.ValueOf(v); v != nil && rv.Kind() == reflect.Pointer {
-				if rv.IsNil() {
-					v = nil
-				} else if _, ok := v.(driver.Valuer); !ok {
-					v = rv.Elem().Interface()
-				}
+			v, null, err := eqValue(c.values[0])
+			if err != nil {
+				return nil, fmt.Errorf("filter on %q: %w", c.column, err)
 			}
-			if v == nil {
+			if null {
 				rc.op = opIsNull
 			} else {
 				rc.values = []any{oneValue(v)}
@@ -262,6 +258,27 @@ func checkFilterValue(column string, v any) error {
 		return fmt.Errorf("filter on %q: a value of type %T is a list; pass the values one by one", column, v)
 	}
 	return nil
+}
+
+// eqValue prepares the value of an equality match, as gorm's eqNil does: a nil value or a nil
+// pointer is NULL; a driver.Valuer is NULL when its Value is nil, and is kept as it is otherwise;
+// any other pointer is dereferenced. An error from Value is returned.
+func eqValue(v any) (val any, null bool, err error) {
+	rv := reflect.ValueOf(v)
+	if v == nil || (rv.Kind() == reflect.Pointer && rv.IsNil()) {
+		return nil, true, nil
+	}
+	if valuer, ok := v.(driver.Valuer); ok {
+		dv, err := valuer.Value()
+		if err != nil {
+			return nil, false, err
+		}
+		return v, dv == nil, nil
+	}
+	if rv.Kind() == reflect.Pointer {
+		return rv.Elem().Interface(), false, nil
+	}
+	return v, false, nil
 }
 
 // bytesValue binds a byte slice as one value. gorm renders a subquery again when it embeds it in
