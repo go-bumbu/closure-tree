@@ -13,7 +13,7 @@ Features:
 ## DBs
 while all the Gorm supported databases should work, since closure-tree relies  heavily on Raw queries, 
 it might not be the case; currently it's tested with:
-* mysql
+* mysql (8.0 or later; with binary logging on, `binlog_format` must be `ROW`, the default, or `MIXED`)
 * postgres
 * sqlite ("gorm.io/driver/sqlite")
 * sqlite without CGO ("github.com/glebarez/sqlite")
@@ -452,12 +452,11 @@ err := db.Transaction(func(tx *gorm.DB) error {
   Inside a tree write the deadlock error also matches `ErrSavepointRollback`, because the savepoint
   went with the transaction: if you retry, test for the deadlock first.
 * MySQL at its default isolation level (REPEATABLE READ): while your transaction is open, tree writes
-  of different tenants can wait on each other, and deadlock. Keep such transactions short, or run
-  them at READ COMMITTED.
-* MySQL at its default isolation level (REPEATABLE READ): writes that delete closure rows, such as
-  `DeleteRecurse`, `DeleteRecurseMany`, `DeleteTenant` and `BuildFromParents`, lock closure rows of
-  other tenants, because no closure-table index leads with the tenant. They can therefore deadlock
-  with other tenants' writes, inside or outside your transaction. Error 1213 means the whole
+  of different tenants can wait on each other, and deadlock, also with writes on a tree not bound to
+  a transaction, which the server may roll back instead of yours. Writes that delete closure rows,
+  such as `DeleteRecurse`, `DeleteRecurseMany`, `DeleteTenant` and `BuildFromParents`, lock closure
+  rows of other tenants in such a transaction, because no closure-table index leads with the tenant.
+  Keep such transactions short, or run them at READ COMMITTED. Error 1213 means the whole
   transaction was rolled back: on a tree bound with `WithTx` roll back and retry your transaction;
   on a tree not bound to a transaction retry the call.
 * After a successful tree write the tenant lock is held until your transaction ends, so do not hold
@@ -484,10 +483,10 @@ and `_busy_timeout=5000` for `gorm.io/driver/sqlite`, `_txlock=immediate` and
 `_pragma=busy_timeout(5000)` for `github.com/glebarez/sqlite`). A deferred transaction that reads
 first and then writes fails with a busy error that the timeout does not retry.
 
-On PostgreSQL the transactions the library opens itself (any write on a tree not bound to a
-transaction) run at READ COMMITTED, whatever the connection's default level is. On MySQL they run at
-the connection's default level, so at REPEATABLE READ the writes that delete closure rows can
-deadlock with other tenants' writes there too.
+On PostgreSQL and MySQL the transactions the library opens itself (any write on a tree not bound to
+a transaction) run at READ COMMITTED, whatever the connection's default level is. A MySQL server
+with binary logging on and `binlog_format=STATEMENT` refuses InnoDB writes at READ COMMITTED (error
+1665), so that setup is not supported; `ROW`, the default, and `MIXED` work.
 
 ### Adopting an existing table
 
@@ -565,7 +564,7 @@ tenant, such as ids or lower-case ASCII names.
 * `ClosureTableName() string` — Return the table name of the closure tree relationship
 
 **Write operations**
-On MySQL at its default isolation level, writes that delete closure rows, such as the deletes and `BuildFromParents`, can deadlock with other tenants' writes, also on a tree not bound to a transaction (see "Using closure-tree inside your own transaction").
+On MySQL, while a caller's transaction at the default isolation level (REPEATABLE READ) is open, writes of different tenants can deadlock, also writes on a tree not bound to a transaction: retry them after error 1213 (see "Using closure-tree inside your own transaction").
 * `Add(ctx, item, parentID, afterNodeID, tenant, opts ...AddOption)` — Add a new node; it is placed first among its siblings unless `afterNodeID` names a sibling or the `PlaceLast()` option is given
 * `GetOrAdd(ctx, item, parentID, tenant, matchFields, opts ...AddOption) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths; takes the same placement options as `Add`
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect

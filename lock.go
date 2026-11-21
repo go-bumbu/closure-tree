@@ -17,7 +17,7 @@ var savepointSeq atomic.Uint64
 // mutating operation (Add, GetOrAdd, Update, DeleteRecurse, DeleteRecurseMany, DeleteTenant,
 // Renormalize, BuildFromParents) and LockTenant go through here. The dialect-specific lock
 // acquisition lives in dialect.lockTenant; see the concurrency note on Tree.
-// The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL).
+// The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL and MySQL).
 //
 // When the Tree is bound to a caller's transaction (WithTx), writeTx opens no transaction of its
 // own: it runs the lock and fn inside a savepoint, see savepointTx.

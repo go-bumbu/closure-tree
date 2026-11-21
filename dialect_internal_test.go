@@ -27,16 +27,16 @@ func TestDialectFromName(t *testing.T) {
 }
 
 // TestTxOptions pins the options the library passes to the transactions it opens itself: READ
-// COMMITTED on PostgreSQL, the connection's default elsewhere.
+// COMMITTED on PostgreSQL and MySQL, the connection's default on SQLite.
 func TestTxOptions(t *testing.T) {
-	pg := dialectPostgres.txOptions()
-	if len(pg) != 1 || pg[0].Isolation != sql.LevelReadCommitted {
-		t.Errorf("postgres: want one option at READ COMMITTED, got %+v", pg)
-	}
-	for _, d := range []dialect{dialectMySQL, dialectSQLite} {
-		if got := d.txOptions(); got != nil {
-			t.Errorf("dialect %d: want no options, got %+v", d, got)
+	for _, d := range []dialect{dialectPostgres, dialectMySQL} {
+		got := d.txOptions()
+		if len(got) != 1 || got[0].Isolation != sql.LevelReadCommitted {
+			t.Errorf("dialect %d: want one option at READ COMMITTED, got %+v", d, got)
 		}
+	}
+	if got := dialectSQLite.txOptions(); got != nil {
+		t.Errorf("sqlite: want no options, got %+v", got)
 	}
 }
 
