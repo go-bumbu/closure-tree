@@ -94,7 +94,7 @@ type Tree struct {
 // New returns a Tree for the given item on the specified gorm database. It parses and validates the
 // schema and the derived table names but does NOT create any tables: call Migrate to create or
 // update the schema. Separating the two means New needs no DDL privilege and callers decide when
-// (and how often) migration runs. On MySQL, New verifies the server is 8.0+.
+// (and how often) migration runs. On MySQL, New verifies the server is 8.0.17 or later.
 func New(db *gorm.DB, item any) (*Tree, error) {
 	ct, err := newTree(db, item)
 	if err != nil {

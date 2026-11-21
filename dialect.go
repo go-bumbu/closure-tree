@@ -4,8 +4,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strconv"
-	"strings"
 
 	"gorm.io/gorm"
 )
@@ -40,8 +41,9 @@ func dialectFromName(name string) dialect {
 	}
 }
 
-// checkVersion enforces any minimum server version the dialect requires. Only MySQL has one (8.0+,
-// for recursive CTEs and the upsert syntax used here); the other dialects return nil.
+// checkVersion enforces any minimum server version the dialect requires. Only MySQL has one
+// (8.0.17+, for recursive CTEs, the upsert syntax used here and the collation utf8mb4_0900_bin of
+// the tenant columns); the other dialects return nil.
 func (d dialect) checkVersion(db *gorm.DB) error {
 	if d != dialectMySQL {
 		return nil
@@ -50,13 +52,31 @@ func (d dialect) checkVersion(db *gorm.DB) error {
 	if err := db.Raw("SELECT VERSION()").Scan(&version).Error; err != nil {
 		return fmt.Errorf("unable to check MySQL version: %w", err)
 	}
-	// SplitN with a non-empty separator always returns at least one element, so parts[0] is safe.
-	parts := strings.SplitN(version, ".", 2)
-	major, err := strconv.Atoi(parts[0])
-	if err != nil || major < 8 {
-		return fmt.Errorf("MySQL 8.0+ required; got %s", version)
+	if !mysqlVersionOK(version) {
+		return fmt.Errorf("MySQL 8.0.17 or later required; got %s", version)
 	}
 	return nil
+}
+
+// mysqlVersionPrefix matches the major, minor and patch number at the start of a version string as
+// SELECT VERSION() returns it; a suffix such as "-log" may follow.
+var mysqlVersionPrefix = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
+
+// mysqlVersionOK reports whether version, as SELECT VERSION() returns it, is 8.0.17 or later.
+func mysqlVersionOK(version string) bool {
+	m := mysqlVersionPrefix.FindStringSubmatch(version)
+	if m == nil {
+		return false
+	}
+	var got [3]int
+	for i, s := range m[1:] {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return false
+		}
+		got[i] = n
+	}
+	return slices.Compare(got[:], []int{8, 0, 17}) >= 0
 }
 
 // metaUpsertSQL returns the statement that inserts a sort-order meta row or, on conflict, keeps the

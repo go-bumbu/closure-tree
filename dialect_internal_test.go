@@ -26,6 +26,36 @@ func TestDialectFromName(t *testing.T) {
 	}
 }
 
+// TestMySQLVersionOK pins which server versions New accepts on MySQL: 8.0.17 and later, the first
+// release with the collation utf8mb4_0900_bin, with any suffix after the patch number.
+func TestMySQLVersionOK(t *testing.T) {
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"5.7.44", false},
+		{"8.0.0", false},
+		{"8.0.16", false},
+		{"8.0.11-TiDB-v7.5.0", false},
+		{"8.0.17", true},
+		{"8.0.17-log", true},
+		{"8.0.45-0ubuntu0.22.04.1", true},
+		{"8.1.0", true},
+		{"8.4.0", true},
+		{"9.1.0", true},
+		{"10.11.6-MariaDB", true},
+		{"8.0", false},
+		{"8", false},
+		{"", false},
+		{"unknown", false},
+	}
+	for _, tt := range tests {
+		if got := mysqlVersionOK(tt.version); got != tt.want {
+			t.Errorf("mysqlVersionOK(%q) = %v, want %v", tt.version, got, tt.want)
+		}
+	}
+}
+
 // TestTxOptions pins the options the library passes to the transactions it opens itself: READ
 // COMMITTED on PostgreSQL and MySQL, the connection's default on SQLite.
 func TestTxOptions(t *testing.T) {

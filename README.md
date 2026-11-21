@@ -13,7 +13,7 @@ Features:
 ## DBs
 while all the Gorm supported databases should work, since closure-tree relies  heavily on Raw queries, 
 it might not be the case; currently it's tested with:
-* mysql (8.0 or later; with binary logging on, `binlog_format` must be `ROW`, the default, or `MIXED`)
+* mysql (8.0.17 or later; with binary logging on, `binlog_format` must be `ROW`, the default, or `MIXED`)
 * postgres
 * sqlite ("gorm.io/driver/sqlite")
 * sqlite without CGO ("github.com/glebarez/sqlite")

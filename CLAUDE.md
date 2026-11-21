@@ -51,7 +51,7 @@ LOCAL_SQLITE=true go test -run TestTreeGetNode ./...
 - **Transactions**: a write on a Tree bound to a transaction (`WithTx`) runs in its own savepoint, and a failed rollback to it is wrapped in `ErrSavepointRollback` (the caller's transaction is then unusable); on PostgreSQL and MySQL the library's own transactions run at READ COMMITTED.
 - **`New` rejects a model with its own field mapped to `parent_id`** (`ErrParentIDColumn`); only `Node.ParentId` may use that column.
 - **`TreeDescendants`/`TreeDescendantsIds`** use `WITH RECURSIVE` CTEs. The internal depth counter is named `cte_depth` (not `depth`) to avoid shadowing any `depth` column in the user struct.
-- **MySQL 8.0+** is enforced at `New` time via `checkMySQLVersion`.
+- **MySQL 8.0.17+** is enforced at `New` time via `checkVersion` in `dialect.go`.
 
 ### `TreeDescendants` requirements
 
