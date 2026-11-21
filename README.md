@@ -4,7 +4,8 @@ A closure tree is a read efficient way to define tree dependencies of items, e.g
 
 Features:
 * store any basic struct information in a tree structure (Uses GORM under the hood)
-* multi-user/tenant: allows to perform all the operations on a specific user or tenant
+* multi-user/tenant: allows to perform all the operations on a specific user or tenant (on MySQL,
+  tenants that differ only in case or accents are one tenant; see "Tenants" below)
 * retrieve all the nested descendants of a node
 * control display order of siblings via float64 fractional indexing (`sort_order`)
 
@@ -527,6 +528,13 @@ For detailed usage check out the examples in [example_test.go]
 ##  Closure Tree methods
 
 this is a quick overview of the exposed methods, check the actual signature/doc for details.
+
+**Tenants**
+The database compares tenants with the collation of the tenant columns, and the library sets none,
+so the columns get the database's default. PostgreSQL and SQLite compare exactly. MySQL's default
+collation, `utf8mb4_0900_ai_ci`, ignores case and accents, so "Acme", "acme" and "acmé" are one
+tenant for every read, write and lock, and `DeleteTenant(ctx, "acme")` deletes all three. Pass
+tenants in one normalised form.
 
 **Tree management**
 * `New(db *gorm.DB, item any) (*Tree, error)` — Return a new tree instance; it validates the model and table names but does not create tables

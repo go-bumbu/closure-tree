@@ -108,6 +108,10 @@ WHERE tenant = ?
 // nothing is written. That existence check runs before the lock is taken; on a Tree bound to a
 // transaction (WithTx) it reads that transaction's snapshot. It returns ErrEmptyTenant if tenant is
 // empty.
+//
+// The tenant is compared with the collation of the tenant columns (see Tree). With MySQL's default
+// collation, tenants that differ only in case or accents are one tenant, and all of them are
+// deleted.
 func (ct *Tree) DeleteTenant(ctx context.Context, tenant string) error {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

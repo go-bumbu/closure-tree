@@ -63,6 +63,12 @@ var (
 // when the transaction ends); on SQLite, which already serializes writers per database, it is the
 // anchor upsert. SQLite callers should set a busy_timeout so a waiting writer blocks briefly instead
 // of failing immediately with SQLITE_BUSY.
+//
+// Tenants: the database compares tenants with the collation of the tenant columns, and the library
+// sets none, so the columns get the database's default. PostgreSQL and SQLite compare exactly.
+// MySQL's default collation, utf8mb4_0900_ai_ci, ignores case and accents, so "Acme", "acme" and
+// "acmé" are one tenant for every read, write and lock, and DeleteTenant deletes all of them. Pass
+// tenants in one normalised form.
 type Tree struct {
 	db *gorm.DB
 	// table names, allows multiple trees

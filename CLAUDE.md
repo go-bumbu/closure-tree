@@ -45,7 +45,7 @@ LOCAL_SQLITE=true go test -run TestTreeGetNode ./...
 
 ### Key invariants
 
-- **Multi-tenancy**: every operation requires a non-empty `tenant` string. Empty string returns `ErrEmptyTenant`. Use `closuretree.DefaultTenant` as the fallback constant.
+- **Multi-tenancy**: every operation requires a non-empty `tenant` string. Empty string returns `ErrEmptyTenant`. Use `closuretree.DefaultTenant` as the fallback constant. Tenants are compared with the tenant columns' collation, and the library sets none: PostgreSQL and SQLite compare exactly, but MySQL's default (`utf8mb4_0900_ai_ci`) ignores case and accents, so "Acme", "acme" and "acmé" are one tenant for every read, write and lock, and `DeleteTenant` deletes all of them. Callers should pass tenants in one normalised form.
 - **Schema**: the closure table has a unique constraint on `(ancestor_id, descendant_id, tenant, depth)`. A reflexive self-row at `depth=0` exists for every node; root nodes also have an ancestor row with `ancestor_id=0, depth=1`.
 - **`Add`/`Update` use reflection** to copy only non-`Node` fields, using a `map[string]any` for `Update` to preserve zero values. Fields with `gorm:"-"` (empty `DBName`) are excluded.
 - **Transactions**: a write on a Tree bound to a transaction (`WithTx`) runs in its own savepoint, and a failed rollback to it is wrapped in `ErrSavepointRollback` (the caller's transaction is then unusable); on PostgreSQL the library's own transactions run at READ COMMITTED.
