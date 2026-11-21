@@ -261,8 +261,8 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 // expands into several placeholders; a gorm expression, a *gorm.DB or a gorm.Valuer, which gorm
 // renders as SQL; and a sql.NamedArg, which gorm binds without a placeholder. A byte slice and a
 // driver.Valuer that is not a gorm.Valuer are bound as one value. A non-nil pointer is checked
-// through. The check is by type and comes before any nil check, so a nil pointer of a gorm.Valuer
-// type is rejected too.
+// through. The check is by type and comes before the nil pointer check, so a nil pointer of a
+// gorm.Valuer type is rejected too.
 func checkFilterValue(column string, v any) error {
 	switch v.(type) {
 	case nil:
