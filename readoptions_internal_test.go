@@ -88,11 +88,13 @@ func TestPlanReadFilter(t *testing.T) {
 		}
 	}
 	s := "x"
+	var none any
 	eq([]resolvedCond{{"kind", opEq, []any{"doc"}}, {"archived_at", opIsNull, nil}},
 		conds(Filter(Eq("Kind", "doc"), IsNull("archived_at"))))
 	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", nil))))              // nil is IS NULL
 	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", (*string)(nil)))))   // so is a nil pointer
 	eq([]resolvedCond{{"note", opEq, []any{"x"}}}, conds(Filter(Eq("note", &s))))            // a pointer is dereferenced
+	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", &none))))            // to a nil interface, it is IS NULL
 	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", sql.NullString{})))) // a Valuer holding NULL is IS NULL
 	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", &sql.NullString{}))))
 	eq([]resolvedCond{{"note", opIsNull, nil}}, conds(Filter(Eq("note", (*sql.NullString)(nil)))))

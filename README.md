@@ -147,8 +147,9 @@ for _, name := range []string{"a", "b", "c"} {
 
 `matchFields` names the fields of the item (Go field names or column names) that identify the
 child; each is matched by its actual value, including zero values, and the embedded `Node` fields
-cannot be used. The match is scoped to the tenant; `parentID = 0` operates on the root level. Use
-`FindChild` for the lookup alone:
+cannot be used. A nil pointer field and a `driver.Valuer` field whose `Value` is nil (such as an
+invalid `sql.NullString`) match NULL. The match is scoped to the tenant; `parentID = 0` operates
+on the root level. Use `FindChild` for the lookup alone:
 
 ```GO
 var out Tag
@@ -235,7 +236,9 @@ subqueries" and "Querying leaves".
   table, `GetLeaves` included.
   It replaces any default the Tree already has; with no conds the copy keeps the same default. A
   `Filter` with at least one cond replaces the default for one call; `Unfiltered()` switches it off
-  for one call; an empty `Filter()` has no effect.
+  for one call; an empty `Filter()` has no effect. The conds are resolved when `WithFilter` is
+  called, including whether an `Eq` value is NULL; a pointer `driver.Valuer` is bound as it is and
+  read again by every query, so it must not change afterwards.
 * Writes are never filtered, also on a filtered Tree. `GetOrAdd` therefore returns an existing child
   that `FindChild` on the same Tree does not see. `afterNodeID` may name a sibling the filter hides,
   and the placement of a new or moved node counts hidden siblings.

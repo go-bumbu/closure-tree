@@ -3,7 +3,9 @@ package closuretree_test
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"runtime"
 	"strings"
 	"sync"
@@ -756,6 +758,69 @@ func TestGetOrAddMatchesNullValuer(t *testing.T) {
 			valid := &nullNoteNode{Name: "a", Note: sql.NullString{String: "n", Valid: true}}
 			if found, err := ct.FindChild(ctx, 0, tenant1, valid, match, &out); err != nil || found {
 				t.Errorf("FindChild with a non-NULL Valuer must not find the NULL row: found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
+// ptrCode is a driver.Valuer and a sql.Scanner through its pointer only.
+type ptrCode struct{ s string }
+
+func (c *ptrCode) Value() (driver.Value, error) { return c.s, nil }
+
+func (c *ptrCode) Scan(src any) error {
+	switch v := src.(type) {
+	case string:
+		c.s = v
+	case []byte:
+		c.s = string(v)
+	default:
+		return fmt.Errorf("ptrCode: cannot scan %T", src)
+	}
+	return nil
+}
+
+type ptrCodeNode struct {
+	closuretree.Node
+	Name string
+	Code *ptrCode
+}
+
+// A match field that is a pointer driver.Valuer is matched by its Value, not by the struct it
+// points to, which the driver cannot bind.
+func TestGetOrAddMatchesPointerValuer(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, ptrCodeNode{})
+			ct, err := newTestTree(gdb, ptrCodeNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			match := []string{"Name", "Code"}
+
+			first := &ptrCodeNode{Name: "a", Code: &ptrCode{"x"}}
+			if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+			}
+			second := &ptrCodeNode{Name: "a", Code: &ptrCode{"x"}}
+			created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+			if err != nil || created || second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.NodeId, first.NodeId, err)
+			}
+			if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+				t.Errorf("want one node, got %d", n)
+			}
+
+			var out ptrCodeNode
+			found, err := ct.FindChild(ctx, 0, tenant1, &ptrCodeNode{Name: "a", Code: &ptrCode{"x"}}, match, &out)
+			if err != nil || !found || out.NodeId != first.NodeId || out.Code == nil || out.Code.s != "x" {
+				t.Errorf("FindChild with a pointer Valuer: found=%v out=%+v err=%v", found, out, err)
+			}
+			other := &ptrCodeNode{Name: "a", Code: &ptrCode{"y"}}
+			if found, err := ct.FindChild(ctx, 0, tenant1, other, match, &out); err != nil || found {
+				t.Errorf("FindChild with another Value must not find the row: found=%v err=%v", found, err)
 			}
 		})
 	}

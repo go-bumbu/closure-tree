@@ -44,10 +44,12 @@ type Cond struct {
 }
 
 // Eq matches the nodes whose column equals value. A nil value, a nil pointer, or a driver.Valuer
-// whose Value is nil matches NULL instead; an error from Value is returned by the read. A non-nil
-// pointer is dereferenced, unless it is a driver.Valuer. The value is bound as one value: a slice or an array (other than a byte slice or a driver.Valuer), a gorm expression, a
-// *gorm.DB, a gorm.Valuer or a sql.NamedArg is rejected with an error before the read queries. The
-// check is by type, so a nil pointer of a gorm.Valuer type is rejected too.
+// whose Value is nil matches NULL instead; an error from Value is returned by the read, or by
+// WithFilter when the condition is a default filter. A non-nil pointer is dereferenced, unless it
+// is a driver.Valuer. The value is bound as one value: a slice or an array (other than a byte slice
+// or a driver.Valuer), a gorm expression, a *gorm.DB, a gorm.Valuer or a sql.NamedArg is rejected
+// with an error before the read queries. The check is by type, so a nil pointer of a gorm.Valuer
+// type is rejected too.
 func Eq(column string, value any) Cond {
 	return Cond{column: column, op: opEq, values: []any{value}}
 }
@@ -282,7 +284,8 @@ func checkFilterValue(column string, v any) error {
 
 // eqValue prepares the value of an equality match, as gorm's eqNil does: a nil value or a nil
 // pointer is NULL; a driver.Valuer is NULL when its Value is nil, and is kept as it is otherwise;
-// any other pointer is dereferenced. An error from Value is returned.
+// any other pointer is dereferenced, and is NULL when it points to a nil interface. An error from
+// Value is returned.
 func eqValue(v any) (val any, null bool, err error) {
 	rv := reflect.ValueOf(v)
 	if v == nil || (rv.Kind() == reflect.Pointer && rv.IsNil()) {
@@ -296,7 +299,8 @@ func eqValue(v any) (val any, null bool, err error) {
 		return v, dv == nil, nil
 	}
 	if rv.Kind() == reflect.Pointer {
-		return rv.Elem().Interface(), false, nil
+		e := rv.Elem().Interface()
+		return e, e == nil, nil
 	}
 	return v, false, nil
 }
@@ -385,7 +389,9 @@ func (ct *Tree) plainPlan() *readPlan {
 // filter the Tree already has; with no conds the copy keeps the same default filter. A read can
 // replace the default with its own Filter that has conditions, or switch it off with Unfiltered.
 // The original Tree is not changed. It returns ErrUnknownColumn when a condition names an unknown
-// column, and an error for a value that Eq or In rejects.
+// column, and an error for a value that Eq or In rejects. The conditions are resolved when
+// WithFilter is called, including whether an Eq value is NULL; a pointer driver.Valuer is bound as
+// it is and read again by every query, so it must not change afterwards.
 func (ct *Tree) WithFilter(conds ...Cond) (*Tree, error) {
 	cp := *ct
 	if len(conds) == 0 {
