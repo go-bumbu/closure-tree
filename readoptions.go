@@ -46,7 +46,8 @@ type Cond struct {
 // Eq matches the nodes whose column equals value. A nil value, a nil pointer, or a driver.Valuer
 // whose Value is nil matches NULL instead; an error from Value is returned by the read. A non-nil
 // pointer is dereferenced, unless it is a driver.Valuer. The value is bound as one value: a slice or an array (other than a byte slice or a driver.Valuer), a gorm expression, a
-// *gorm.DB, a gorm.Valuer or a sql.NamedArg is rejected with an error before the read queries.
+// *gorm.DB, a gorm.Valuer or a sql.NamedArg is rejected with an error before the read queries. The
+// check is by type, so a nil pointer of a gorm.Valuer type is rejected too.
 func Eq(column string, value any) Cond {
 	return Cond{column: column, op: opEq, values: []any{value}}
 }
@@ -253,7 +254,8 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 // expands into several placeholders; a gorm expression, a *gorm.DB or a gorm.Valuer, which gorm
 // renders as SQL; and a sql.NamedArg, which gorm binds without a placeholder. A byte slice and a
 // driver.Valuer that is not a gorm.Valuer are bound as one value. A non-nil pointer is checked
-// through.
+// through. The check is by type and comes before any nil check, so a nil pointer of a gorm.Valuer
+// type is rejected too.
 func checkFilterValue(column string, v any) error {
 	switch v.(type) {
 	case nil:

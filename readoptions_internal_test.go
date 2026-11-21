@@ -220,8 +220,9 @@ type ptrValuer struct{ s string }
 
 func (v *ptrValuer) Value() (driver.Value, error) { return v.s, nil }
 
-// A filter value that gorm would expand into several placeholders, or render as SQL, is rejected
-// before querying; a byte slice and a driver.Valuer bind as one value and are accepted.
+// A filter value that gorm would expand into several placeholders, render as SQL, or bind without
+// a placeholder (a sql.NamedArg) is rejected before querying, also a nil pointer of a gorm.Valuer
+// type; a byte slice and a driver.Valuer bind as one value and are accepted.
 func TestFilterRejectsValuesThatAreNotOneValue(t *testing.T) {
 	ct := newInternalTree(t, optNode{})
 	words := []string{"a"}
@@ -230,6 +231,8 @@ func TestFilterRejectsValuesThatAreNotOneValue(t *testing.T) {
 		"Eq with a gorm.Valuer":                  Eq("name", sqlValuer{"'a' OR 1=1"}),
 		"In with a gorm.Valuer":                  In("name", "a", sqlValuer{"'a' OR 1=1"}),
 		"Eq with a pointer to a gorm.Valuer":     Eq("name", &sqlValuer{"'a' OR 1=1"}),
+		"Eq with a nil pointer to a gorm.Valuer": Eq("name", (*sqlValuer)(nil)),
+		"In with a nil pointer to a gorm.Valuer": In("name", (*sqlValuer)(nil)),
 		"Eq with a gorm.Valuer that is driver's": Eq("name", sqlDriverValuer{sqlValuer{"'a' OR 1=1"}}),
 		"Eq with a sql.NamedArg":                 Eq("name", named),
 		"In with a sql.NamedArg":                 In("name", named),
