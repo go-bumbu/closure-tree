@@ -272,6 +272,45 @@ func TestFilterRejectsValuesThatAreNotOneValue(t *testing.T) {
 	}
 }
 
+type person struct{ Name string }
+
+// ownerLastDoc and ownerFirstDoc share the Go name Name between their own column name and the
+// column owner_name of the embedded Owner, declared after and before their own field.
+type ownerLastDoc struct {
+	Node
+	Name  string
+	Owner person `gorm:"embedded;embeddedPrefix:owner_"`
+}
+
+type ownerFirstDoc struct {
+	Node
+	Owner person `gorm:"embedded;embeddedPrefix:owner_"`
+	Name  string
+}
+
+// A Go name that several columns share is rejected in either declaration order; the column names
+// resolve.
+func TestColumnRejectsSharedGoName(t *testing.T) {
+	for what, model := range map[string]any{"own field first": ownerLastDoc{}, "own field last": ownerFirstDoc{}} {
+		ct := newInternalTree(t, model)
+		for _, opt := range []ReadOption{Filter(Eq("Name", "a")), Columns("Name")} {
+			_, err := ct.planRead([]ReadOption{opt})
+			if !errors.Is(err, ErrUnknownColumn) || !strings.Contains(err.Error(), "owner_name") {
+				t.Errorf("%s: want ErrUnknownColumn naming the columns, got %v", what, err)
+			}
+		}
+		if _, err := ct.WithFilter(Eq("Name", "a")); !errors.Is(err, ErrUnknownColumn) {
+			t.Errorf("%s: WithFilter: want ErrUnknownColumn, got %v", what, err)
+		}
+		for _, col := range []string{"name", "owner_name"} {
+			p, err := ct.planRead([]ReadOption{Filter(Eq(col, "a")), Columns(col)})
+			if err != nil || p.conds[0].column != col || !cmp.Equal(append(append([]string{}, baseColumns...), col), p.columns) {
+				t.Errorf("%s: %q: %+v, %v", what, col, p, err)
+			}
+		}
+	}
+}
+
 var errBadValue = errors.New("bad value")
 
 // badValuer is a driver.Valuer whose Value fails.

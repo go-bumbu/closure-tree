@@ -1296,6 +1296,76 @@ func TestReadIntoWrapperWithEmbeddedPrefix(t *testing.T) {
 	}
 }
 
+type docOwner struct{ Name string }
+
+// docOwnerLast and docOwnerFirst share the Go name Name between their own column name and the
+// column owner_name of the embedded Owner, declared after and before their own field.
+type docOwnerLast struct {
+	closuretree.Node
+	Name  string
+	Owner docOwner `gorm:"embedded;embeddedPrefix:owner_"`
+}
+
+type docOwnerFirst struct {
+	closuretree.Node
+	Owner docOwner `gorm:"embedded;embeddedPrefix:owner_"`
+	Name  string
+}
+
+// A read option that names a Go name several columns share fails, whatever the declaration order;
+// each column name filters its own column.
+func TestReadOptionsRejectSharedGoName(t *testing.T) {
+	models := []struct {
+		name  string
+		model any
+		add   func(ct *closuretree.Tree, name, owner string) (uint, error)
+	}{
+		{"own field first", docOwnerLast{}, func(ct *closuretree.Tree, name, owner string) (uint, error) {
+			d := &docOwnerLast{Name: name, Owner: docOwner{owner}}
+			err := ct.Add(context.Background(), d, nil, nil, tenant1)
+			return d.NodeId, err
+		}},
+		{"own field last", docOwnerFirst{}, func(ct *closuretree.Tree, name, owner string) (uint, error) {
+			d := &docOwnerFirst{Name: name, Owner: docOwner{owner}}
+			err := ct.Add(context.Background(), d, nil, nil, tenant1)
+			return d.NodeId, err
+		}},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, m := range models {
+			t.Run(db.DbType()+"/"+m.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, m.model)
+				ct, err := newTestTree(gdb, m.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				// want: the doc whose own name is alice, and the doc whose owner is alice
+				want := map[string]uint{}
+				for col, d := range map[string][2]string{"name": {"alice", "bob"}, "owner_name": {"carol", "alice"}} {
+					if want[col], err = m.add(ct, d[0], d[1]); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, opt := range []closuretree.ReadOption{
+					closuretree.Filter(closuretree.Eq("Name", "alice")), closuretree.Columns("Name"),
+				} {
+					if _, err := ct.DescendantIds(ctx, 0, 0, tenant1, opt); !errors.Is(err, closuretree.ErrUnknownColumn) {
+						t.Errorf("want ErrUnknownColumn, got %v", err)
+					}
+				}
+				for col, id := range want {
+					got, err := ct.DescendantIds(ctx, 0, 0, tenant1, closuretree.Filter(closuretree.Eq(col, "alice")))
+					if err != nil || !cmp.Equal([]uint{id}, got) {
+						t.Errorf("Eq(%q, alice): want [%d], got %v, %v", col, id, got, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 type uintChildren struct {
 	closuretree.Node
 	Name     string

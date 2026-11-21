@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -14,9 +15,11 @@ import (
 )
 
 // ErrUnknownColumn is returned when a read option names a column that cannot be named. The name
-// may be the database column name or the Go field name. A column can be named when its field has a
-// column name and is not both read-only and excluded from migration; the computed parent cannot be
-// named.
+// may be the database column name or the Go field name; a column name wins. A column can be named
+// when its field has a column name and is not both read-only and excluded from migration; the
+// computed parent cannot be named. A Go field name that fields of several columns share, such as
+// the model's own Name and the Name of a struct embedded with a column prefix, cannot be named
+// either: use the column name.
 var ErrUnknownColumn = errors.New("unknown column")
 
 // ErrInvalidDepthRange is returned by every read when DepthRange has a negative minimum, or a
@@ -174,9 +177,24 @@ type readPlan struct {
 }
 
 // column resolves a column or Go field name to the database column name of a column that exists
-// in the node table.
+// in the node table. A column name wins. A Go field name that fields of several columns share, such
+// as the model's own Name and the Name of a struct embedded with a column prefix, is rejected:
+// gorm's own lookup by Go name returns the last field declared.
 func (ct *Tree) column(name string) (string, error) {
-	f := ct.schema.LookUpField(name)
+	f, ok := ct.schema.FieldsByDBName[name]
+	if !ok {
+		var cols []string
+		for _, sf := range ct.schema.Fields {
+			if sf.Name == name && sf.DBName != "" && !slices.Contains(cols, sf.DBName) {
+				f = sf
+				cols = append(cols, sf.DBName)
+			}
+		}
+		if len(cols) > 1 {
+			return "", fmt.Errorf("%w: %q is the Go name of the columns %s; use the column name",
+				ErrUnknownColumn, name, strings.Join(cols, ", "))
+		}
+	}
 	if f == nil || !hasColumn(f) {
 		return "", fmt.Errorf("%w: %q", ErrUnknownColumn, name)
 	}
