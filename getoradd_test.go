@@ -826,6 +826,127 @@ func TestGetOrAddMatchesPointerValuer(t *testing.T) {
 	}
 }
 
+// A match field that names a Go name several columns share fails in either declaration order,
+// before GetOrAdd creates anything; the column name matches its own column.
+func TestMatchRejectsSharedGoName(t *testing.T) {
+	models := []struct {
+		name  string
+		model any
+		item  func(name, owner string) any
+	}{
+		{"own field first", docOwnerLast{}, func(name, owner string) any {
+			return &docOwnerLast{Name: name, Owner: docOwner{owner}}
+		}},
+		{"own field last", docOwnerFirst{}, func(name, owner string) any {
+			return &docOwnerFirst{Name: name, Owner: docOwner{owner}}
+		}},
+	}
+	id := func(item any) uint { return item.(interface{ Id() uint }).Id() }
+	for _, db := range testdbs.DBs() {
+		for _, m := range models {
+			t.Run(db.DbType()+"/"+m.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, m.model)
+				ct, err := newTestTree(gdb, m.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				shared := func(what string, err error) {
+					t.Helper()
+					if !errors.Is(err, closuretree.ErrUnknownMatchField) || !strings.Contains(err.Error(), "owner_name") {
+						t.Errorf("%s by Name: want ErrUnknownMatchField naming the columns, got %v", what, err)
+					}
+				}
+
+				// the same own name with two owners
+				for _, owner := range []string{"x", "y"} {
+					_, err := ct.GetOrAdd(ctx, m.item("a", owner), 0, tenant1, []string{"Name"})
+					shared("GetOrAdd", err)
+				}
+				if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 0 {
+					t.Fatalf("GetOrAdd by Name must create nothing, got %d nodes", n)
+				}
+				_, err = ct.FindChild(ctx, 0, tenant1, m.item("a", "x"), []string{"Name"}, m.item("", ""))
+				shared("FindChild", err)
+
+				first := m.item("a", "x")
+				if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, []string{"name"}); err != nil || !created {
+					t.Fatalf("first GetOrAdd by name: created=%v err=%v", created, err)
+				}
+				second := m.item("a", "y")
+				created, err := ct.GetOrAdd(ctx, second, 0, tenant1, []string{"name"})
+				if err != nil || created || id(second) != id(first) {
+					t.Errorf("second GetOrAdd by name: created=%v id=%d (first %d) err=%v", created, id(second), id(first), err)
+				}
+				out := m.item("", "")
+				if found, err := ct.FindChild(ctx, 0, tenant1, m.item("b", "x"), []string{"owner_name"}, out); err != nil || !found || id(out) != id(first) {
+					t.Errorf("FindChild by owner_name: found=%v id=%d err=%v", found, id(out), err)
+				}
+			})
+		}
+	}
+}
+
+type matchNameBase struct{ Name string }
+
+// matchBaseFirst and matchBaseLast embed a Name without a column prefix, on the column name of
+// their own Name, declared before and after it.
+type matchBaseFirst struct {
+	closuretree.Node
+	Base matchNameBase `gorm:"embedded"`
+	Name string
+}
+
+type matchBaseLast struct {
+	closuretree.Node
+	Name string
+	Base matchNameBase `gorm:"embedded"`
+}
+
+// A Go name that several fields of one column share is not ambiguous as a match field.
+func TestMatchGoNameOfOneColumn(t *testing.T) {
+	models := []struct {
+		name  string
+		model any
+		item  func(name string) any
+	}{
+		{"embedded first", matchBaseFirst{}, func(name string) any {
+			return &matchBaseFirst{Base: matchNameBase{name}, Name: name}
+		}},
+		{"embedded last", matchBaseLast{}, func(name string) any {
+			return &matchBaseLast{Name: name, Base: matchNameBase{name}}
+		}},
+	}
+	id := func(item any) uint { return item.(interface{ Id() uint }).Id() }
+	for _, db := range testdbs.DBs() {
+		for _, m := range models {
+			t.Run(db.DbType()+"/"+m.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, m.model)
+				ct, err := newTestTree(gdb, m.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				first := m.item("a")
+				if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, []string{"Name"}); err != nil || !created {
+					t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+				}
+				second := m.item("a")
+				created, err := ct.GetOrAdd(ctx, second, 0, tenant1, []string{"Name"})
+				if err != nil || created || id(second) != id(first) {
+					t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, id(second), id(first), err)
+				}
+				out := m.item("")
+				if found, err := ct.FindChild(ctx, 0, tenant1, m.item("a"), []string{"Name"}, out); err != nil || !found || id(out) != id(first) {
+					t.Errorf("FindChild by Name: found=%v id=%d err=%v", found, id(out), err)
+				}
+			})
+		}
+	}
+}
+
 func mustAdd(t *testing.T, ct *closuretree.Tree, item any, parentID uint, tenant string) {
 	t.Helper()
 	if err := ct.Add(context.Background(), item, up(parentID), nil, tenant); err != nil {

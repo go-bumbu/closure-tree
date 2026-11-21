@@ -147,9 +147,12 @@ for _, name := range []string{"a", "b", "c"} {
 
 `matchFields` names the fields of the item (Go field names or column names) that identify the
 child; each is matched by its actual value, including zero values, and the embedded `Node` fields
-cannot be used. A nil pointer field and a `driver.Valuer` field whose `Value` is nil (such as an
-invalid `sql.NullString`) match NULL. The match is scoped to the tenant; `parentID = 0` operates
-on the root level. Use `FindChild` for the lookup alone:
+cannot be used. A name is resolved as in the read options: a column name wins, and a Go field name
+that fields of several columns share, such as the model's own `Name` and the `Name` of a struct
+embedded with a column prefix, returns `ErrUnknownMatchField`: use the column name. A nil pointer
+field and a `driver.Valuer` field whose `Value` is nil (such as an invalid `sql.NullString`) match
+NULL. The match is scoped to the tenant; `parentID = 0` operates on the root level. Use
+`FindChild` for the lookup alone:
 
 ```GO
 var out Tag

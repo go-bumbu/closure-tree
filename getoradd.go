@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 // FindChild looks up a single DIRECT child of parentID (depth=1 in the closure table) whose fields
@@ -14,7 +15,10 @@ import (
 // matches among the root nodes.
 //
 // match must embed Node. matchFields names the fields that form the match key (Go field names or
-// column names); each is matched by its actual value, INCLUDING zero values (false/0/""). A nil
+// column names), resolved on match's own type as the read options resolve a column: a column name
+// wins, and a Go field name that fields of several columns share, such as the model's own Name and
+// the Name of a struct embedded with a column prefix, returns ErrUnknownMatchField: use the column
+// name. Each is matched by its actual value, INCLUDING zero values (false/0/""). A nil
 // pointer field, or a driver.Valuer field whose Value is nil (such as an invalid sql.NullString),
 // matches as IS NULL; an error from Value is returned. A non-nil pointer field is matched by the
 // value it points to, unless the pointer is a driver.Valuer (its Value method may have a pointer
@@ -60,9 +64,10 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // last with the PlaceLast option) and returns created=true. parentID=0 operates on the root level.
 //
 // The match key is read from item itself (there is no separate match struct): matchFields names the
-// fields — Go field names or column names — that identify the child, matched by their actual value
-// including zero values (see FindChild). An empty matchFields returns ErrEmptyMatch; an unknown or
-// Node-owned field returns ErrUnknownMatchField.
+// fields — Go field names or column names — that identify the child, resolved and matched by their
+// actual value including zero values as in FindChild. An empty matchFields returns ErrEmptyMatch;
+// an unknown or Node-owned field, or a Go field name that fields of several columns share, returns
+// ErrUnknownMatchField before anything is added.
 //
 // When item is a pointer, its embedded Node — including NodeId — is populated on BOTH paths, so the
 // returned node id can be chained as the parentID of the next level down.
@@ -138,8 +143,10 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 }
 
 // buildMatchConditions builds the WHERE fragment and bind args for a query-by-example match on the
-// fields named in matchFields. Each name is resolved against the model schema (Go field name or
-// column name) and matched by its ACTUAL value — including zero values (false/0/"") — so a key that
+// fields named in matchFields. Each name is resolved on the schema of match by the rule of the read
+// options (lookUpColumn): a column name wins; a Go field name counts the columns of fields that are
+// not Node-owned, and one that several such columns share is rejected with ErrUnknownMatchField.
+// Each field is matched by its ACTUAL value — including zero values (false/0/"") — so a key that
 // is legitimately zero is honored rather than silently dropped; a value that eqValue reports as
 // NULL matches as IS NULL. Node-owned fields (NodeId/Tenant/SortOrder/ParentId) and unknown fields
 // are rejected with ErrUnknownMatchField. An empty matchFields returns ErrEmptyMatch. Column
@@ -153,16 +160,25 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 	if err := stmt.Parse(match); err != nil {
 		return "", nil, fmt.Errorf("unable to parse match schema: %w", err)
 	}
+	s := stmt.Schema
+	matchable := func(f *schema.Field) bool { return !nodeOwned(s.ModelType, f) }
 
 	rv := reflect.Indirect(reflect.ValueOf(match))
 	var conds []string
 	var args []any
 	for _, name := range matchFields {
-		f := stmt.Schema.LookUpField(name)
-		if f == nil || f.DBName == "" { // unknown field, or gorm:"-" (no column)
-			return "", nil, fmt.Errorf("%w: %q on %T", ErrUnknownMatchField, name, match)
+		f, err := lookUpColumn(s, name, matchable)
+		if err != nil {
+			return "", nil, fmt.Errorf("%w: %w", ErrUnknownMatchField, err)
 		}
-		if nodeOwned(stmt.Schema.ModelType, f) {
+		if f == nil {
+			// no column: an unknown name, a gorm:"-" field, or the Go name of a Node-owned field
+			f = s.LookUpField(name)
+			if f == nil || !nodeOwned(s.ModelType, f) {
+				return "", nil, fmt.Errorf("%w: %q on %T", ErrUnknownMatchField, name, match)
+			}
+		}
+		if nodeOwned(s.ModelType, f) {
 			return "", nil, fmt.Errorf("%w: %q is a Node-owned field", ErrUnknownMatchField, name)
 		}
 		var b strings.Builder

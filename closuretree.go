@@ -31,11 +31,15 @@ var (
 	ErrInvalidMove            = errors.New("invalid move")
 	ErrItemNotPointerToStruct = errors.New("item needs to be a pointer to a struct")
 	ErrEmptyMatch             = errors.New("no match fields provided")
-	ErrUnknownMatchField      = errors.New("match field not found on the model")
-	ErrNoOp                   = errors.New("update called with no item, no new parent, and no new sort order")
-	ErrInvalidAfterNode       = errors.New("afterNodeID is not a sibling of the target parent")
-	ErrAfterNodeIsSelf        = errors.New("afterNodeID cannot be the node itself")
-	ErrParentIDColumn         = errors.New("the model maps a field other than Node.ParentId to column parent_id")
+	// ErrUnknownMatchField is returned by FindChild and GetOrAdd for a match field that is not a
+	// column of the match type, that is a field of the embedded Node, or that is a Go field name
+	// that fields of several columns share, such as the model's own Name and the Name of a struct
+	// embedded with a column prefix: use the column name. A column name wins over a Go field name.
+	ErrUnknownMatchField = errors.New("match field not found on the model")
+	ErrNoOp              = errors.New("update called with no item, no new parent, and no new sort order")
+	ErrInvalidAfterNode  = errors.New("afterNodeID is not a sibling of the target parent")
+	ErrAfterNodeIsSelf   = errors.New("afterNodeID cannot be the node itself")
+	ErrParentIDColumn    = errors.New("the model maps a field other than Node.ParentId to column parent_id")
 
 	ErrItemsNil                    = errors.New("items cannot be nil")
 	ErrItemsNotPointerToSlice      = errors.New("items must be a pointer to a slice")

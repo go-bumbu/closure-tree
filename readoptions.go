@@ -180,33 +180,44 @@ type readPlan struct {
 }
 
 // column resolves a column or Go field name to the database column name of a column that exists
-// in the node table. A column name wins. A column is judged by the field gorm maps it to, also when
-// it is found by a Go name that another field of the column has. A Go field name that fields of
-// several columns that can be named share, such as the model's own Name and the Name of a struct
-// embedded with a column prefix, is rejected: gorm's own lookup by Go name returns the last field
-// declared.
+// in the node table, by the rule of lookUpColumn with the columns that can be named (hasColumn).
 func (ct *Tree) column(name string) (string, error) {
-	f, ok := ct.schema.FieldsByDBName[name]
-	if !ok {
-		var cols []string
-		for _, sf := range ct.schema.Fields {
-			if sf.Name != name || sf.DBName == "" || slices.Contains(cols, sf.DBName) {
-				continue
-			}
-			if mf := ct.schema.FieldsByDBName[sf.DBName]; mf != nil && hasColumn(mf) {
-				f = mf
-				cols = append(cols, sf.DBName)
-			}
-		}
-		if len(cols) > 1 {
-			return "", fmt.Errorf("%w: %q is the Go name of the columns %s; use the column name",
-				ErrUnknownColumn, name, strings.Join(cols, ", "))
-		}
+	f, err := lookUpColumn(ct.schema, name, hasColumn)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrUnknownColumn, err)
 	}
 	if f == nil || !hasColumn(f) {
 		return "", fmt.Errorf("%w: %q", ErrUnknownColumn, name)
 	}
 	return f.DBName, nil
+}
+
+// lookUpColumn resolves a column or Go field name on s to the field gorm maps the column to; the
+// read options and the match of FindChild and GetOrAdd share it. A column name wins, and its field
+// is returned whatever nameable says. Otherwise name is a Go field name, and a column counts when
+// nameable accepts the field gorm maps it to, also when another field of the column has the name.
+// It returns nil when no column counts, and an error naming the columns when several do, such as
+// the model's own Name and the Name of a struct embedded with a column prefix: gorm's own lookup
+// by Go name returns the last field declared.
+func lookUpColumn(s *schema.Schema, name string, nameable func(*schema.Field) bool) (*schema.Field, error) {
+	if f, ok := s.FieldsByDBName[name]; ok {
+		return f, nil
+	}
+	var f *schema.Field
+	var cols []string
+	for _, sf := range s.Fields {
+		if sf.Name != name || sf.DBName == "" || slices.Contains(cols, sf.DBName) {
+			continue
+		}
+		if mf := s.FieldsByDBName[sf.DBName]; mf != nil && nameable(mf) {
+			f = mf
+			cols = append(cols, sf.DBName)
+		}
+	}
+	if len(cols) > 1 {
+		return nil, fmt.Errorf("%q is the Go name of the columns %s; use the column name", name, strings.Join(cols, ", "))
+	}
+	return f, nil
 }
 
 // hasColumn tells whether the field can be named in a read option: it has a column name and is not
