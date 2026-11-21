@@ -160,6 +160,10 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 // New so that construction needs no DDL privilege and so migration can be run explicitly (e.g. once
 // at startup, guarded against concurrent runners). AutoMigrate is additive: it will not drop or
 // alter an existing index, so see the note on closureTree when upgrading a pre-0.10 schema.
+//
+// On MySQL, as its last step, Migrate gives the tenant column of the four tables the collation
+// utf8mb4_0900_bin while none of them has a row, so that tenants are compared exactly (see Tree);
+// that needs the ALTER privilege. It never alters a table of a tree with rows.
 func (ct *Tree) Migrate() error {
 	if err := ct.db.AutoMigrate(ct.model); err != nil {
 		return fmt.Errorf("unable to migrate node table: %w", err)
@@ -173,7 +177,7 @@ func (ct *Tree) Migrate() error {
 	if err := ct.db.Table(ct.lockTbl).AutoMigrate(closureTreeLock{}); err != nil {
 		return fmt.Errorf("unable to migrate lock table: %w", err)
 	}
-	return nil
+	return ct.ensureTenantCollation()
 }
 
 // NodeTableName returns the table name of the stored Nodes, used if you need to interact directly

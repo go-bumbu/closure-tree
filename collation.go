@@ -1,0 +1,111 @@
+package closuretree
+
+import (
+	"fmt"
+	"regexp"
+)
+
+// tenantCollation is the collation Migrate gives the tenant columns on MySQL: binary, so tenants
+// that differ in case or accents are different, and NO PAD, so a trailing space counts too. That
+// is how PostgreSQL and SQLite compare them by default.
+const tenantCollation = "utf8mb4_0900_bin"
+
+// tenantColumn is the tenant column of one of the tree's tables, as information_schema describes it.
+type tenantColumn struct {
+	Table     string `gorm:"column:table_name"`
+	Type      string `gorm:"column:column_type"`
+	Collation string `gorm:"column:collation_name"`
+}
+
+// tenantColumnType is the only column type alterTenantCollationSQL writes into its statement.
+var tenantColumnType = regexp.MustCompile(`^varchar\(\d+\)$`)
+
+// alterTenantCollationSQL returns the statement that gives the tenant column of table, already
+// quoted, the collation tenantCollation and keeps its type columnType, which must be a varchar.
+func alterTenantCollationSQL(table, columnType string) (string, error) {
+	if !tenantColumnType.MatchString(columnType) {
+		return "", fmt.Errorf("unexpected type %q of the tenant column of %s: want varchar(n)", columnType, table)
+	}
+	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN tenant %s CHARACTER SET utf8mb4 COLLATE %s NOT NULL",
+		table, columnType, tenantCollation), nil
+}
+
+// inexactTenantColumns returns the columns of cols whose collation is not tenantCollation.
+func inexactTenantColumns(cols []tenantColumn) []tenantColumn {
+	var out []tenantColumn
+	for _, c := range cols {
+		if c.Collation != tenantCollation {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ensureTenantCollation is the last step of Migrate. On MySQL it gives the tenant column of each of
+// the tree's four tables the collation tenantCollation while none of the tables has a row; a tree
+// with rows keeps the collation it has. The other dialects compare tenants exactly already.
+func (ct *Tree) ensureTenantCollation() error {
+	if ct.dialect != dialectMySQL {
+		return nil
+	}
+	cols, err := ct.tenantColumns()
+	if err != nil {
+		return err
+	}
+	inexact := inexactTenantColumns(cols)
+	if len(inexact) == 0 {
+		return nil
+	}
+	empty, err := ct.treeIsEmpty()
+	if err != nil || !empty {
+		return err
+	}
+	for _, c := range inexact {
+		stmt, err := alterTenantCollationSQL(ct.quoteTable(c.Table), c.Type)
+		if err != nil {
+			return err
+		}
+		if err := ct.db.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("unable to set the collation of the tenant column of %s: %w", c.Table, err)
+		}
+	}
+	return nil
+}
+
+// treeTables returns the names of the tree's four tables.
+func (ct *Tree) treeTables() []string {
+	return []string{ct.nodesTbl, ct.relationsTbl, ct.metaTbl, ct.lockTbl}
+}
+
+// tenantColumns reads the type and collation of the tenant column of each of the tree's four
+// tables from information_schema (MySQL), ordered by table name.
+func (ct *Tree) tenantColumns() ([]tenantColumn, error) {
+	tables := ct.treeTables()
+	var cols []tenantColumn
+	if err := ct.db.Raw(`SELECT TABLE_NAME AS table_name, COLUMN_TYPE AS column_type,
+		COALESCE(COLLATION_NAME, '') AS collation_name
+		FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'tenant' AND TABLE_NAME IN ?
+		ORDER BY TABLE_NAME`, tables).Scan(&cols).Error; err != nil {
+		return nil, fmt.Errorf("unable to read the tenant columns: %w", err)
+	}
+	if len(cols) != len(tables) {
+		return nil, fmt.Errorf("unable to read the tenant columns: found %d of the %d tables %v", len(cols), len(tables), tables)
+	}
+	return cols, nil
+}
+
+// treeIsEmpty reports whether none of the tree's four tables has a row.
+func (ct *Tree) treeIsEmpty() (bool, error) {
+	for _, tbl := range ct.treeTables() {
+		var one int
+		res := ct.db.Raw("SELECT 1 FROM " + ct.quoteTable(tbl) + " LIMIT 1").Scan(&one)
+		if res.Error != nil {
+			return false, fmt.Errorf("unable to check for rows in %s: %w", tbl, res.Error)
+		}
+		if res.RowsAffected > 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
