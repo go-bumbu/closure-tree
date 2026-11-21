@@ -15,6 +15,8 @@ import (
 	closuretree "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
 	"github.com/google/go-cmp/cmp"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // TestFindChild covers the query-by-example direct-child lookup: it must match only
@@ -944,6 +946,114 @@ func TestMatchGoNameOfOneColumn(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// gormCode is a gorm.Valuer: gorm renders its GormValue as SQL instead of binding it.
+type gormCode string
+
+func (c gormCode) GormValue(context.Context, *gorm.DB) clause.Expr {
+	return clause.Expr{SQL: "?", Vars: []any{string(c)}}
+}
+
+type gormCodeNode struct {
+	closuretree.Node
+	Name string
+	Code gormCode
+}
+
+// tagsNode has a list column, which gorm binds as a list.
+type tagsNode struct {
+	closuretree.Node
+	Name string
+	Tags []string `gorm:"type:text"`
+}
+
+// A match field whose value gorm would not bind as one value fails before any query, as Eq does:
+// a list and a gorm.Valuer. GetOrAdd creates nothing.
+func TestMatchRejectsUnboundValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		model any
+		field string
+		item  func() any
+	}{
+		{"list", tagsNode{}, "Tags", func() any { return &tagsNode{Name: "a", Tags: []string{}} }},
+		{"gorm.Valuer", gormCodeNode{}, "Code", func() any { return &gormCodeNode{Name: "a", Code: "x"} }},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, c := range cases {
+			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, c.model)
+				ct, err := newTestTree(gdb, c.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fields := []string{"Name", c.field}
+				rejected := func(what string, err error) {
+					t.Helper()
+					if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), c.field) {
+						t.Errorf("%s: want an error naming %s before any query, got %v", what, c.field, err)
+					}
+				}
+				cancelled, cancel := context.WithCancel(context.Background())
+				cancel() // a query would fail with context.Canceled, so the check must come first
+				_, err = ct.GetOrAdd(cancelled, c.item(), 0, tenant1, fields)
+				rejected("GetOrAdd", err)
+				_, err = ct.FindChild(cancelled, 0, tenant1, c.item(), fields, c.item())
+				rejected("FindChild", err)
+
+				for range 2 {
+					_, err := ct.GetOrAdd(context.Background(), c.item(), 0, tenant1, fields)
+					rejected("GetOrAdd", err)
+				}
+				if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 0 {
+					t.Errorf("GetOrAdd must create nothing, got %d nodes", n)
+				}
+			})
+		}
+	}
+}
+
+// labelsNode has a field with a gorm serializer, which gorm binds as one value.
+type labelsNode struct {
+	closuretree.Node
+	Name   string
+	Labels []string `gorm:"serializer:json"`
+}
+
+// A match field with a serializer is matched by its serialized value.
+func TestMatchSerializerField(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, labelsNode{})
+			ct, err := newTestTree(gdb, labelsNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			match := []string{"Name", "Labels"}
+
+			first := &labelsNode{Name: "a", Labels: []string{"x", "y"}}
+			if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+			}
+			second := &labelsNode{Name: "a", Labels: []string{"x", "y"}}
+			created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+			if err != nil || created || second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.NodeId, first.NodeId, err)
+			}
+			var out labelsNode
+			other := &labelsNode{Name: "a", Labels: []string{"x"}}
+			if found, err := ct.FindChild(ctx, 0, tenant1, other, match, &out); err != nil || found {
+				t.Errorf("FindChild with other labels must not find the row: found=%v err=%v", found, err)
+			}
+			if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+				t.Errorf("want one node, got %d", n)
+			}
+		})
 	}
 }
 

@@ -241,8 +241,8 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 		rc := resolvedCond{column: col, op: c.op}
 		switch c.op {
 		case opEq:
-			if err := checkFilterValue(c.column, c.values[0]); err != nil {
-				return nil, err
+			if err := checkBindValue(c.values[0]); err != nil {
+				return nil, fmt.Errorf("filter on %q: %w", c.column, err)
 			}
 			v, null, err := eqValue(c.values[0])
 			if err != nil {
@@ -255,8 +255,8 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 			}
 		case opIn:
 			for _, v := range c.values {
-				if err := checkFilterValue(c.column, v); err != nil {
-					return nil, err
+				if err := checkBindValue(v); err != nil {
+					return nil, fmt.Errorf("filter on %q: %w", c.column, err)
 				}
 			}
 			for _, v := range c.values {
@@ -268,20 +268,20 @@ func (ct *Tree) resolveConds(conds []Cond) ([]resolvedCond, error) {
 	return out, nil
 }
 
-// checkFilterValue rejects a value that gorm would not bind as one value: a list, which gorm
-// expands into several placeholders; a gorm expression, a *gorm.DB or a gorm.Valuer, which gorm
-// renders as SQL; and a sql.NamedArg, which gorm binds without a placeholder. A byte slice and a
-// driver.Valuer that is not a gorm.Valuer are bound as one value. A non-nil pointer is checked
-// through. The check is by type and comes before the nil pointer check, so a nil pointer of a
-// gorm.Valuer type is rejected too.
-func checkFilterValue(column string, v any) error {
+// checkBindValue rejects a value that gorm would not bind as one value, for Eq, In and the match
+// of FindChild and GetOrAdd: a list, which gorm expands into several placeholders; a gorm
+// expression, a *gorm.DB or a gorm.Valuer, which gorm renders as SQL; and a sql.NamedArg, which
+// gorm binds without a placeholder. A byte slice and a driver.Valuer that is not a gorm.Valuer are
+// bound as one value. A non-nil pointer is checked through. The check is by type and comes before
+// the nil pointer check, so a nil pointer of a gorm.Valuer type is rejected too.
+func checkBindValue(v any) error {
 	switch v.(type) {
 	case nil:
 		return nil
 	case *gorm.DB, clause.Expression, clause.Column, clause.Table, gorm.Valuer:
-		return fmt.Errorf("filter on %q: a value of type %T is rendered as SQL, not bound", column, v)
+		return fmt.Errorf("a value of type %T is rendered as SQL, not bound", v)
 	case sql.NamedArg:
-		return fmt.Errorf("filter on %q: a value of type %T is not bound as one value", column, v)
+		return fmt.Errorf("a value of type %T is not bound as one value", v)
 	case driver.Valuer:
 		return nil
 	}
@@ -289,11 +289,11 @@ func checkFilterValue(column string, v any) error {
 		if rv.IsNil() {
 			return nil
 		}
-		return checkFilterValue(column, rv.Elem().Interface())
+		return checkBindValue(rv.Elem().Interface())
 	}
 	t := reflect.TypeOf(v)
 	if t.Kind() == reflect.Array || (t.Kind() == reflect.Slice && t.Elem() != reflect.TypeFor[byte]()) {
-		return fmt.Errorf("filter on %q: a value of type %T is a list; pass the values one by one", column, v)
+		return fmt.Errorf("a value of type %T is a list, not one value", v)
 	}
 	return nil
 }

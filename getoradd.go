@@ -25,6 +25,11 @@ import (
 // receiver): then its Value is matched. An empty matchFields returns ErrEmptyMatch; an unknown or
 // Node-owned field returns ErrUnknownMatchField.
 //
+// Each value is bound as one value and checked as Eq checks its value: a field whose value is a
+// slice or an array (other than a byte slice or a driver.Valuer), or whose type is a gorm.Valuer
+// (also as a nil pointer), returns an error before any query. A field with a gorm serializer is
+// matched by its serialized value. Such fields can still be added; they cannot be match fields.
+//
 // out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the same
 // way GetNode does (including NodeId and the read-only ParentId) and found is true. When nothing
 // matches, found is false and err is nil.
@@ -67,7 +72,8 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // fields — Go field names or column names — that identify the child, resolved and matched by their
 // actual value including zero values as in FindChild. An empty matchFields returns ErrEmptyMatch;
 // an unknown or Node-owned field, or a Go field name that fields of several columns share, returns
-// ErrUnknownMatchField before anything is added.
+// ErrUnknownMatchField before anything is added. A match field whose value is a list or a
+// gorm.Valuer returns an error before any query, as in FindChild.
 //
 // When item is a pointer, its embedded Node — including NodeId — is populated on BOTH paths, so the
 // returned node id can be chained as the parentID of the next level down.
@@ -148,7 +154,9 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // not Node-owned, and one that several such columns share is rejected with ErrUnknownMatchField.
 // Each field is matched by its ACTUAL value — including zero values (false/0/"") — so a key that
 // is legitimately zero is honored rather than silently dropped; a value that eqValue reports as
-// NULL matches as IS NULL. Node-owned fields (NodeId/Tenant/SortOrder/ParentId) and unknown fields
+// NULL matches as IS NULL. The value gorm reads from the field (for a field with a serializer, a
+// driver.Valuer that serializes it) is checked as Eq checks its value (checkBindValue), so a list
+// or a gorm.Valuer is rejected before any query. Node-owned fields (NodeId/Tenant/SortOrder/ParentId) and unknown fields
 // are rejected with ErrUnknownMatchField. An empty matchFields returns ErrEmptyMatch. Column
 // identifiers are dialect-quoted, so a field mapping to a reserved-word column still produces
 // valid SQL.
@@ -186,6 +194,9 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 		col := b.String()
 
 		val, _ := f.ValueOf(ctx, rv)
+		if err := checkBindValue(val); err != nil {
+			return "", nil, fmt.Errorf("match field %q: %w", name, err)
+		}
 		val, null, err := eqValue(val)
 		if err != nil {
 			return "", nil, fmt.Errorf("match field %q: %w", name, err)

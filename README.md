@@ -151,8 +151,12 @@ cannot be used. A name is resolved as in the read options: a column name wins, a
 that fields of several columns share, such as the model's own `Name` and the `Name` of a struct
 embedded with a column prefix, returns `ErrUnknownMatchField`: use the column name. A nil pointer
 field and a `driver.Valuer` field whose `Value` is nil (such as an invalid `sql.NullString`) match
-NULL. The match is scoped to the tenant; `parentID = 0` operates on the root level. Use
-`FindChild` for the lookup alone:
+NULL. Each value is bound as one value, as with `Eq`: a field whose value is a slice or an array
+(other than a byte slice or a `driver.Valuer`), or whose type is a `gorm.Valuer` (such as a JSON
+column type), returns an error before any query; such a field can still be added, but cannot be a
+match field. A field with a gorm serializer (`gorm:"serializer:json"`) is matched by its
+serialized value. The match is scoped to the tenant; `parentID = 0` operates on the root level.
+Use `FindChild` for the lookup alone:
 
 ```GO
 var out Tag
