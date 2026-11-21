@@ -399,7 +399,7 @@ func (ct *Tree) plainPlan() *readPlan {
 }
 
 // WithFilter returns a copy of the Tree with a default filter. GetNode, FindChild, Descendants,
-// DescendantIds, TreeDescendants, TreeDescendantsIds, Ancestors, AncestorIds, ChildCounts,
+// DescendantIds, TreeDescendants, TreeDescendantsIds, Ancestors, AncestorIDs, ChildCounts,
 // SubtreeIDs, SubtreeIDsOf, ClosurePairs and GetLeaves apply it; IsDescendant and IsChildOf take no
 // read options and are not filtered, and writes are never filtered. conds replace any default
 // filter the Tree already has; with no conds the copy keeps the same default filter. A read can

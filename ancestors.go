@@ -40,13 +40,13 @@ func (ct *Tree) Ancestors(ctx context.Context, nodeID uint, tenant string, items
 	return ct.scanEach(ctx, sqlstr, args, toElem, "failed to fetch ancestors", add)
 }
 
-// AncestorIds returns the ids of the ancestors of nodeID, root first, as Ancestors does. A root
+// AncestorIDs returns the ids of the ancestors of nodeID, root first, as Ancestors does. A root
 // node returns an empty, non-nil slice.
 //
-// AncestorIds honours the read options Filter and Unfiltered, with the meaning they have in
+// AncestorIDs honours the read options Filter and Unfiltered, with the meaning they have in
 // Ancestors; PerNode and Columns are ignored. Column names of every option are validated, so an
 // unknown one returns ErrUnknownColumn.
-func (ct *Tree) AncestorIds(ctx context.Context, nodeID uint, tenant string, opts ...ReadOption) ([]uint, error) {
+func (ct *Tree) AncestorIDs(ctx context.Context, nodeID uint, tenant string, opts ...ReadOption) ([]uint, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {
 		return nil, err

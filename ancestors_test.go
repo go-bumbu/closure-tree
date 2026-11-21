@@ -13,7 +13,7 @@ import (
 )
 
 // ancestorNames reads the ancestors of the named node with Ancestors (into []filterNode) and with
-// AncestorIds, fails the test when the two disagree, and returns the names, root first.
+// AncestorIDs, fails the test when the two disagree, and returns the names, root first.
 func ancestorNames(t *testing.T, ct *closuretree.Tree, id map[string]uint, node string, opts ...closuretree.ReadOption) []string {
 	t.Helper()
 	ctx := context.Background()
@@ -21,9 +21,9 @@ func ancestorNames(t *testing.T, ct *closuretree.Tree, id map[string]uint, node 
 	if err := ct.Ancestors(ctx, id[node], tenantF, &items, opts...); err != nil {
 		t.Fatalf("Ancestors of %s: %v", node, err)
 	}
-	ids, err := ct.AncestorIds(ctx, id[node], tenantF, opts...)
+	ids, err := ct.AncestorIDs(ctx, id[node], tenantF, opts...)
 	if err != nil {
-		t.Fatalf("AncestorIds of %s: %v", node, err)
+		t.Fatalf("AncestorIDs of %s: %v", node, err)
 	}
 	names := make([]string, 0, len(items))
 	got := make([]uint, 0, len(items))
@@ -32,7 +32,7 @@ func ancestorNames(t *testing.T, ct *closuretree.Tree, id map[string]uint, node 
 		got = append(got, it.NodeId)
 	}
 	if !slices.Equal(ids, got) {
-		t.Fatalf("Ancestors and AncestorIds of %s disagree: %v and %v", node, got, ids)
+		t.Fatalf("Ancestors and AncestorIDs of %s disagree: %v and %v", node, got, ids)
 	}
 	return names
 }
@@ -107,14 +107,14 @@ func checkHiddenStart(t *testing.T, ftree *closuretree.Tree, node uint) {
 	if err := ftree.Ancestors(ctx, node, tenantF, &items); !errors.Is(err, closuretree.ErrNodeNotFound) {
 		t.Errorf("Ancestors of a node the default filter hides: %v", err)
 	}
-	if _, err := ftree.AncestorIds(ctx, node, tenantF); !errors.Is(err, closuretree.ErrNodeNotFound) {
-		t.Errorf("AncestorIds of a node the default filter hides: %v", err)
+	if _, err := ftree.AncestorIDs(ctx, node, tenantF); !errors.Is(err, closuretree.ErrNodeNotFound) {
+		t.Errorf("AncestorIDs of a node the default filter hides: %v", err)
 	}
 	if err := ftree.Ancestors(ctx, node, tenantF, &items, closuretree.Unfiltered()); err != nil {
 		t.Errorf("Ancestors with Unfiltered: %v", err)
 	}
-	if _, err := ftree.AncestorIds(ctx, node, tenantF, closuretree.Unfiltered()); err != nil {
-		t.Errorf("AncestorIds with Unfiltered: %v", err)
+	if _, err := ftree.AncestorIDs(ctx, node, tenantF, closuretree.Unfiltered()); err != nil {
+		t.Errorf("AncestorIDs with Unfiltered: %v", err)
 	}
 }
 
@@ -130,8 +130,8 @@ func TestAncestorsOfUnknownNodes(t *testing.T) {
 				"the virtual root":         ct.Ancestors(ctx, 0, tenantF, &items),
 				"a node of another tenant": ct.Ancestors(ctx, id["x21"], "other", &items),
 			}
-			_, notFound["AncestorIds of an unknown id"] = ct.AncestorIds(ctx, 99999, tenantF)
-			_, notFound["AncestorIds in another tenant"] = ct.AncestorIds(ctx, id["x21"], "other")
+			_, notFound["AncestorIDs of an unknown id"] = ct.AncestorIDs(ctx, 99999, tenantF)
+			_, notFound["AncestorIDs in another tenant"] = ct.AncestorIDs(ctx, id["x21"], "other")
 			for what, err := range notFound {
 				if !errors.Is(err, closuretree.ErrNodeNotFound) {
 					t.Errorf("%s: want ErrNodeNotFound, got %v", what, err)
@@ -140,10 +140,10 @@ func TestAncestorsOfUnknownNodes(t *testing.T) {
 			if err := ct.Ancestors(ctx, id["a"], "", &items); !errors.Is(err, closuretree.ErrEmptyTenant) {
 				t.Errorf("empty tenant: %v", err)
 			}
-			if _, err := ct.AncestorIds(ctx, id["a"], ""); !errors.Is(err, closuretree.ErrEmptyTenant) {
-				t.Errorf("AncestorIds with an empty tenant: %v", err)
+			if _, err := ct.AncestorIDs(ctx, id["a"], ""); !errors.Is(err, closuretree.ErrEmptyTenant) {
+				t.Errorf("AncestorIDs with an empty tenant: %v", err)
 			}
-			if ids, err := ct.AncestorIds(ctx, id["a"], tenantF); err != nil || ids == nil || len(ids) != 0 {
+			if ids, err := ct.AncestorIDs(ctx, id["a"], tenantF); err != nil || ids == nil || len(ids) != 0 {
 				t.Errorf("a root node: want an empty, non-nil slice, got %v, %v", ids, err)
 			}
 			cancelled, cancel := context.WithCancel(ctx)
@@ -151,8 +151,8 @@ func TestAncestorsOfUnknownNodes(t *testing.T) {
 			if err := ct.Ancestors(cancelled, id["x21"], tenantF, &items, closuretree.Columns("nope")); !errors.Is(err, closuretree.ErrUnknownColumn) {
 				t.Errorf("unknown column: %v", err)
 			}
-			if _, err := ct.AncestorIds(cancelled, id["x21"], tenantF, closuretree.Columns("nope")); !errors.Is(err, closuretree.ErrUnknownColumn) {
-				t.Errorf("AncestorIds with an unknown column: %v", err)
+			if _, err := ct.AncestorIDs(cancelled, id["x21"], tenantF, closuretree.Columns("nope")); !errors.Is(err, closuretree.ErrUnknownColumn) {
+				t.Errorf("AncestorIDs with an unknown column: %v", err)
 			}
 		})
 	}
@@ -174,8 +174,8 @@ func TestAncestorsWithOptions(t *testing.T) {
 				if err := ct.Ancestors(ctx, id["x"], tenantF, &items, f); !errors.Is(err, closuretree.ErrNodeNotFound) {
 					t.Errorf("%s: a start node that does not match: want ErrNodeNotFound, got %v", name, err)
 				}
-				if _, err := ct.AncestorIds(ctx, id["x"], tenantF, f); !errors.Is(err, closuretree.ErrNodeNotFound) {
-					t.Errorf("%s: AncestorIds of a start node that does not match: %v", name, err)
+				if _, err := ct.AncestorIDs(ctx, id["x"], tenantF, f); !errors.Is(err, closuretree.ErrNodeNotFound) {
+					t.Errorf("%s: AncestorIDs of a start node that does not match: %v", name, err)
 				}
 			}
 
@@ -219,7 +219,7 @@ func TestAncestorsOfADeepChain(t *testing.T) {
 				chain = append(chain, n.NodeId)
 				parent = up(n.NodeId)
 			}
-			ids, err := ct.AncestorIds(ctx, chain[49], tenant1)
+			ids, err := ct.AncestorIDs(ctx, chain[49], tenant1)
 			if err != nil || !slices.Equal(chain[:49], ids) {
 				t.Errorf("want %v, got %v, %v", chain[:49], ids, err)
 			}
@@ -241,7 +241,7 @@ func TestAncestorsOnLargeTree(t *testing.T) {
 			read := func(what string, node uint, want []uint, opts ...closuretree.ReadOption) {
 				t.Helper()
 				within(t, what, func() error {
-					ids, err := ct.AncestorIds(ctx, node, tenantF, opts...)
+					ids, err := ct.AncestorIDs(ctx, node, tenantF, opts...)
 					if err == nil && !slices.Equal(want, ids) {
 						t.Errorf("%s: want %v, got %v", what, want, ids)
 					}

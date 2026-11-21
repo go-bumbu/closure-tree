@@ -186,7 +186,7 @@ columns they fill. `IsDescendant` and `IsChildOf` take no read options and are n
 | `TreeDescendants` | yes | - | yes | - | |
 | `TreeDescendantsIds` | yes | - | - | - | |
 | `Ancestors` | yes | - | yes | - | |
-| `AncestorIds`, `ChildCounts` | yes | - | - | - | |
+| `AncestorIDs`, `ChildCounts` | yes | - | - | - | |
 | `SubtreeIDs`, `SubtreeIDsOf` | yes | yes | - | yes | |
 | `ClosurePairs` | yes | - | - | yes | `ForAncestors`, `IncludeVirtualRoot` |
 | `GetLeaves` | yes | yes | - | yes | `Relation`, `NoPreload` |
@@ -262,13 +262,13 @@ var path []*Tag
 err := tree.Ancestors(ctx, warmColor.Id(), "user1", &path) // [colors]: root first, the node itself left out
 // handle error
 
-ids, err := tree.AncestorIds(ctx, warmColor.Id(), "user1") // the same, ids only
+ids, err := tree.AncestorIDs(ctx, warmColor.Id(), "user1") // the same, ids only
 
 counts, err := tree.ChildCounts(ctx, []uint{0, colorTag.Id()}, "user1")
 // counts[0] is the number of root nodes, counts[colorTag.Id()] the number of children of "colors"
 ```
 
-* `Ancestors` and `AncestorIds` return the ancestors root first and the direct parent last. The node
+* `Ancestors` and `AncestorIDs` return the ancestors root first and the direct parent last. The node
   itself and the virtual root are left out, so a root node gives an empty result. An unknown node,
   or a node of another tenant, is `ErrNodeNotFound`. `Ancestors` fills the parent of each ancestor
   and appends to the slice like `Descendants`.
@@ -623,7 +623,7 @@ Every read below except `IsDescendant` and `IsChildOf` takes trailing `opts ...R
 * `TreeDescendants(ctx, parent, maxDepth, tenant, items, opts ...ReadOption)` — Nested tree via `Children []*T` field
 * `TreeDescendantsIds(ctx, parent, maxDepth, tenant, opts ...ReadOption) ([]*TreeNode, error)` — Nested `TreeNode` structs
 * `Ancestors(ctx, nodeID, tenant, items, opts ...ReadOption) error` — Ancestors of a node, root first, into `[]T` or `[]*T`
-* `AncestorIds(ctx, nodeID, tenant, opts ...ReadOption) ([]uint, error)` — Same, IDs only
+* `AncestorIDs(ctx, nodeID, tenant, opts ...ReadOption) ([]uint, error)` — Same, IDs only
 * `ChildCounts(ctx, ids, tenant, opts ...ReadOption) (map[uint]int64, error)` — Number of direct children per id; ids without counted children are absent
 * `SubtreeIDs(tenant, ancestors []uint, opts ...ReadOption) (*gorm.DB, error)` — Subquery of the node ids in the subtrees of the ancestors, to embed in your own query
 * `SubtreeIDsOf(tenant, ancestors *gorm.DB, opts ...ReadOption) (*gorm.DB, error)` — Same, with the ancestors given as a subquery
