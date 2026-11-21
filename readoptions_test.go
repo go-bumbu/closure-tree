@@ -576,6 +576,49 @@ func TestTreeDescendantsLinksElementsWithoutNode(t *testing.T) {
 	}
 }
 
+type childlessNode struct {
+	closuretree.Node
+	Name string
+}
+
+// An element type without a Children field gets only the top-level nodes of the read: the deeper
+// nodes of the chain a > b > c are not returned.
+func TestTreeDescendantsWithoutChildrenReturnsTopLevel(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			var parent *uint
+			for _, name := range []string{"a", "b", "c"} {
+				n := &TestPayload{Name: name}
+				if err := ct.Add(ctx, n, parent, nil, tenant1); err != nil {
+					t.Fatal(err)
+				}
+				parent = up(n.NodeId)
+			}
+
+			for _, maxDepth := range []int{0, 1} {
+				var items []*childlessNode
+				if err := ct.TreeDescendants(ctx, 0, maxDepth, tenant1, &items); err != nil {
+					t.Fatalf("maxDepth %d: %v", maxDepth, err)
+				}
+				names := make([]string, len(items))
+				for i, it := range items {
+					names[i] = it.Name
+				}
+				if diff := cmp.Diff([]string{"a"}, names); diff != "" {
+					t.Errorf("maxDepth %d (-want +got):\n%s", maxDepth, diff)
+				}
+			}
+		})
+	}
+}
+
 type kindName string
 
 type convertedNode struct {

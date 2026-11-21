@@ -198,8 +198,9 @@ const absMaxDepth = 2147483647
 //
 // Each row is scanned with gorm's scanner into the Tree's model and then copied into the element
 // type as in Descendants. Children are linked through the node id and parent id of the scanned
-// row, so the element type does not have to embed Node. An element type without a Children field
-// comes back unlinked; one whose Children field is not a []*T returns an error before querying.
+// row, so the element type does not have to embed Node. With an element type without a Children
+// field only the top-level nodes of the read come back, the direct children of parent; deeper nodes
+// are not returned. One whose Children field is not a []*T returns an error before querying.
 //
 // TreeDescendants honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A
 // node that does not match the filter is left out with its whole subtree; its children are never

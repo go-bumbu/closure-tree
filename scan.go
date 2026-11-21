@@ -283,9 +283,9 @@ type treeEntry struct {
 
 // linkTree appends every element to the Children field of its parent, found through the Node of
 // the scanned rows, and returns the elements whose parent is not among them. An element whose
-// parent has no Children field is left unlinked; TreeDescendants rejects a Children field of
-// another type than []*T before the query runs. Siblings, and the returned roots,
-// are ordered by sort_order, then node id.
+// parent is among them but has no Children field is neither linked nor returned, so it is dropped;
+// TreeDescendants rejects a Children field of another type than []*T before the query runs.
+// Siblings, and the returned roots, are ordered by sort_order, then node id.
 func linkTree(entries []treeEntry) []reflect.Value {
 	byID := make(map[uint]reflect.Value, len(entries))
 	for _, e := range entries {
