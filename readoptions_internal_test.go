@@ -316,6 +316,78 @@ func TestColumnRejectsSharedGoName(t *testing.T) {
 	}
 }
 
+// resolvesTo checks that Eq and Columns with name resolve to the column col.
+func resolvesTo(t *testing.T, ct *Tree, what, name, col string) {
+	t.Helper()
+	p, err := ct.planRead([]ReadOption{Filter(Eq(name, 1)), Columns(name)})
+	if err != nil || p.conds[0].column != col || !cmp.Equal(append(append([]string{}, baseColumns...), col), p.columns) {
+		t.Errorf("%s: %q: want the column %s, got %+v, %v", what, name, col, p, err)
+	}
+}
+
+// nameBase is embedded without a column prefix, so its Name has the column name.
+type nameBase struct{ Name string }
+
+type baseFirstDoc struct {
+	Node
+	Base nameBase `gorm:"embedded"`
+	Name string
+}
+
+type baseLastDoc struct {
+	Node
+	Name string
+	Base nameBase `gorm:"embedded"`
+}
+
+// A Go name that several fields of one column share is not ambiguous, in either declaration order.
+func TestColumnGoNameOfOneColumn(t *testing.T) {
+	for what, model := range map[string]any{"embedded first": baseFirstDoc{}, "embedded last": baseLastDoc{}} {
+		resolvesTo(t, newInternalTree(t, model), what, "Name", "name")
+	}
+}
+
+// shadowedNameDoc embeds a writable Name, declared first, and has its own read-only Name excluded
+// from migration on the same column, which gorm maps the column to.
+type shadowedNameDoc struct {
+	Node
+	Base nameBase `gorm:"embedded"`
+	Name string   `gorm:"->;-:migration"`
+}
+
+// A Go name is judged by the field gorm maps its column to, not by the first field declared, so it
+// resolves exactly when the column name does.
+func TestColumnGoNameUsesMappedField(t *testing.T) {
+	ct := newInternalTree(t, shadowedNameDoc{})
+	for _, name := range []string{"name", "Name"} {
+		for _, opt := range []ReadOption{Filter(Eq(name, "a")), Columns(name)} {
+			if _, err := ct.planRead([]ReadOption{opt}); !errors.Is(err, ErrUnknownColumn) {
+				t.Errorf("%q: want ErrUnknownColumn, got %v", name, err)
+			}
+		}
+	}
+}
+
+// legacyParentAfter and legacyParentBefore have their own ParentId on another column, declared
+// after and before Node.
+type legacyParentAfter struct {
+	Node
+	ParentId uint `gorm:"column:legacy_parent"`
+}
+
+type legacyParentBefore struct {
+	ParentId uint `gorm:"column:legacy_parent"`
+	Node
+}
+
+// A Go name counts only the columns that can be named, so the model's own ParentId resolves next
+// to Node.ParentId.
+func TestColumnGoNameSkipsUnnameableColumns(t *testing.T) {
+	for what, model := range map[string]any{"after Node": legacyParentAfter{}, "before Node": legacyParentBefore{}} {
+		resolvesTo(t, newInternalTree(t, model), what, "ParentId", "legacy_parent")
+	}
+}
+
 var errBadValue = errors.New("bad value")
 
 // badValuer is a driver.Valuer whose Value fails.

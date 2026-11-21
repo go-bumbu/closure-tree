@@ -206,10 +206,10 @@ err = visible.Descendants(ctx, 0, 1, "user1", &all, ct.Unfiltered()) // hidden t
   read binds the values of `In` up to three times, so a very long list reaches the database's
   limit of bound values sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per statement).
 * A column is named by its column name or its Go field name; a column name wins. A column can be
-  named when its field has a column name and is not both read-only and excluded from migration;
-  the computed parent cannot be named. A Go field name that fields of several columns share, such
-  as the model's own `Name` and the `Name` of a struct embedded with a column prefix, cannot be
-  named either: use the column name. An unknown name returns `ErrUnknownColumn` before any query
+  named when the field gorm maps it to has a column name and is not both read-only and excluded
+  from migration; the computed parent cannot be named. A Go field name that fields of several
+  columns that can be named share, such as the model's own `Name` and the `Name` of a struct
+  embedded with a column prefix, cannot be named either: use the column name. An unknown name returns `ErrUnknownColumn` before any query
   runs, from every read, also one that ignores the option.
 * A node does not match when the predicate is not true, which includes NULL.
 * Meaning of the filter per read:
