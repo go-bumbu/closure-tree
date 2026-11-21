@@ -154,9 +154,11 @@ resolved, so a model's own `Tenant` field on another column resolves to that col
 options find the name ambiguous; and a read-only field excluded from migration
 (`gorm:"->;-:migration"`) is accepted, so the query fails when the table has no such column. A nil
 pointer field and a `driver.Valuer` field whose `Value` is nil (such as an invalid
-`sql.NullString`) match NULL. A byte-slice field that `Add` stores as NULL matches NULL too: a nil
-one, also behind a pointer, and an empty one of a named type such as `json.RawMessage` that is not
-behind a pointer, which gorm writes as NULL; an empty `[]byte` matches empty bytes. `Eq` binds the
+`sql.NullString`) match NULL. A byte-slice field that is not a `driver.Valuer` and that `Add`
+stores as NULL matches NULL too: a nil one, also behind a pointer, and an empty one of a named type
+such as `json.RawMessage` that is not behind a pointer, which gorm writes as NULL; an empty
+`[]byte` matches empty bytes. A `driver.Valuer` is matched by what its `Value` returns, and matches
+NULL only when that is nil, not when it is a nil byte slice. `Eq` binds the
 value it is given, so use `IsNull` there. Every other value is bound as one value, as with `Eq`,
 and every value is checked as `Eq` checks it: a field whose value is a slice or an array (other
 than a byte slice or a `driver.Valuer`), or whose type is a `gorm.Valuer` (such as a JSON column
@@ -560,11 +562,11 @@ err = tree.BuildFromParents(ctx, "user1", links)
   the transaction implicitly: drop the column there after the commit.
 * MySQL: the node table has rows before the first `Migrate`, so `Migrate` does not give the tenant
   columns the exact collation (see "Tenants"): its own collation step never changes the tenant
-  collation of a tree with rows. gorm's `AutoMigrate`, which `Migrate` runs first, can: when the
-  type or size of the tenant column of the node table or the closure table differs from the model
-  (your table's own type, a changed `DefaultStringSize`), it modifies the column without a
-  collation, which gives it the default collation of its table. It leaves the tenant columns of the
-  meta and lock tables alone, as they are part of the primary key, so `Migrate` then returns
+  collation of a tree with rows. gorm's `AutoMigrate`, which `Migrate` runs first, can: it
+  modifies the tenant column of the node table or the closure table when its type, size, default
+  or comment differs from the model (your table's own type, a changed `DefaultStringSize`), and
+  does so without a collation, which gives it the default collation of its table. It leaves the
+  tenant columns of the meta and lock tables alone, as they are part of the primary key, so `Migrate` then returns
   `ErrTenantCollation` unless that default is the collation of the other tenant columns. To compare
   tenants exactly, run the four statements of "Tenants" after `Migrate` and before
   `BuildFromParents`.
@@ -589,7 +591,8 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 **Tenants**
 Tenants are compared exactly on every database: "Acme", "acme", "acmé" and "acme " are four
 tenants. On MySQL, `Migrate` sets the collation `utf8mb4_0900_bin` on the tenant column of the
-tree's four tables while the tree holds no rows. A tree with rows keeps its collation; under
+tree's four tables while the tree holds no rows. A tree with rows keeps its collation unless gorm's
+`AutoMigrate` modifies its tenant column (see "Adopting an existing table"); under
 MySQL's default, `utf8mb4_0900_ai_ci`, tenants that differ only in case or accents are one tenant,
 and `DeleteTenant(ctx, "acme")` deletes all of them. To change it, stop writes to the tree, store
 one spelling per tenant, then run the statement below on each of the four tables, with the column's

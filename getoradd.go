@@ -27,11 +27,13 @@ import (
 // pointer field, or a driver.Valuer field whose Value is nil (such as an invalid sql.NullString),
 // matches as IS NULL; an error from Value is returned. A non-nil pointer field is matched by the
 // value it points to, unless the pointer is a driver.Valuer (its Value method may have a pointer
-// receiver): then its Value is matched. A byte-slice field that Add stores as NULL matches as IS
-// NULL too: a nil one, also behind a pointer, and an empty one of a named type such as
-// json.RawMessage that is not behind a pointer, which gorm writes as NULL; an empty []byte matches
-// empty bytes. Eq binds the value it is given, so use IsNull there. An empty matchFields returns
-// ErrEmptyMatch; an unknown or Node-owned field returns ErrUnknownMatchField.
+// receiver): then its Value is matched. A byte-slice field that is not a driver.Valuer and that Add
+// stores as NULL matches as IS NULL too: a nil one, also behind a pointer, and an empty one of a
+// named type such as json.RawMessage that is not behind a pointer, which gorm writes as NULL; an
+// empty []byte matches empty bytes. A driver.Valuer is matched by what its Value returns, and
+// matches NULL only when that is nil, not when it is a nil byte slice. Eq binds the value it is
+// given, so use IsNull there. An empty matchFields returns ErrEmptyMatch; an unknown or Node-owned
+// field returns ErrUnknownMatchField.
 //
 // Every other value is bound as one value. Every value is checked as Eq checks its value: a field
 // whose value is a slice or an array (other than a byte slice or a driver.Valuer), or whose type is
@@ -225,11 +227,12 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 }
 
 // addedAsNull reports whether Add stores the byte slice that a match field holds as NULL, so that
-// the match is IS NULL: a nil byte slice of any type, also behind a non-nil pointer; and an empty
-// one of a named type, such as json.RawMessage, in a field that is not a pointer, which gorm's
-// AddVar writes as an empty list, (NULL), where it binds an empty []byte as empty bytes. raw is the
-// value read from the field and val the value eqValue made of it; a driver.Valuer is stored as its
-// Value, which eqValue has already checked for NULL.
+// the match is IS NULL: a nil byte slice of any type that is not a driver.Valuer, also behind a
+// non-nil pointer; and an empty one of a named type, such as json.RawMessage, in a field that is not
+// a pointer, which gorm's AddVar writes as an empty list, (NULL), where it binds an empty []byte as
+// empty bytes. raw is the value read from the field and val the value eqValue made of it. A
+// driver.Valuer is never reported: it is matched by its Value, which eqValue reports as NULL only
+// when it is nil, not when it is a nil byte slice.
 func addedAsNull(raw, val any) bool {
 	if _, ok := val.(driver.Valuer); ok {
 		return false
