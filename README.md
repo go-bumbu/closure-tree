@@ -450,14 +450,13 @@ err := db.Transaction(func(tx *gorm.DB) error {
   `errors.As` (for `github.com/go-sql-driver/mysql`, a `*mysql.MySQLError` with `Number` 1213).
   Inside a tree write the deadlock error also matches `ErrSavepointRollback`, because the savepoint
   went with the transaction: if you retry, test for the deadlock first.
-* MySQL at its default isolation level (REPEATABLE READ): while your transaction is open, tree writes
-  of different tenants can wait on each other, and deadlock, also with writes on a tree not bound to
-  a transaction, which the server may roll back instead of yours. Writes that delete closure rows,
-  such as `DeleteRecurse`, `DeleteRecurseMany`, `DeleteTenant` and `BuildFromParents`, lock closure
-  rows of other tenants in such a transaction, because no closure-table index leads with the tenant.
-  Keep such transactions short, or run them at READ COMMITTED. Error 1213 means the whole
-  transaction was rolled back: on a tree bound with `WithTx` roll back and retry your transaction;
-  on a tree not bound to a transaction retry the call.
+* MySQL: tree writes of different tenants can deadlock at any isolation level (see "Concurrent
+  writes on MySQL" below). At the default isolation level (REPEATABLE READ) your transaction keeps
+  the locks of the closure rows its tree writes scanned until it ends, so writes of other tenants
+  wait on it more, also writes on a tree not bound to a transaction, which the server may roll back
+  instead of yours. Keep such transactions short, or run them at READ COMMITTED. Error 1213 means
+  the whole transaction was rolled back: on a tree bound with `WithTx` roll back and retry your
+  transaction; on a tree not bound to a transaction retry the call.
 * After a successful tree write the tenant lock is held until your transaction ends, so do not hold
   the transaction across slow work. After a failed tree write the lock may already be released;
   `LockTenant` holds it for the whole transaction.
@@ -486,6 +485,28 @@ On PostgreSQL and MySQL the transactions the library opens itself (any write on 
 a transaction) run at READ COMMITTED, whatever the connection's default level is. A MySQL server
 with binary logging on and `binlog_format=STATEMENT` refuses InnoDB writes at READ COMMITTED (error
 1665), so that setup is not supported; `ROW`, the default, and `MIXED` work.
+
+#### Concurrent writes on MySQL
+
+No closure-table index leads with the tenant, so on MySQL a write that deletes closure rows, such
+as `DeleteRecurse`, `DeleteRecurseMany`, `DeleteTenant`, `BuildFromParents` with `Rebuild()`, or
+an `Update` that moves a node, locks the closure rows it scans, also rows of other tenants, and
+waits for a row that another transaction holds. Running the library's own transactions at READ
+COMMITTED removed the deadlocks between these writes and other tenants' adds, but two of them on
+different tenants at once can still deadlock. In the library's tests, on trees not bound to a transaction, each of two or three tenants
+repeated one such write at the same time (ten runs of 30 calls per write):
+
+| Writes at the same time, each on its own tenant | MySQL | PostgreSQL |
+|---|---|---|
+| `DeleteTenant` (after adding nodes), on three tenants | no call failed | no call failed |
+| `BuildFromParents(Rebuild())` and `BuildFromParents(Rebuild())` | no call failed | no call failed |
+| `DeleteRecurseMany` of 600 ids and `BuildFromParents(Rebuild())` | the rebuild deadlocked in 90 of 300 calls | no call failed |
+| `Update` moving a subtree and `DeleteRecurse` | `Update` deadlocked in 41, `DeleteRecurse` in 39 of 300 calls | no call failed |
+
+InnoDB locks the rows a delete scans at every isolation level, so the library makes no promise that
+writes of different tenants do not deadlock on MySQL. A deadlock (error 1213) can be retried: the
+server has rolled back the whole transaction, so repeat a call on a tree not bound to a transaction,
+and roll back and retry your transaction on one bound with `WithTx`.
 
 ### Adopting an existing table
 
@@ -575,7 +596,7 @@ model that embeds `Leaf` keeps the collation of your table; it is nullable, so f
 * `ClosureTableName() string` — Return the table name of the closure tree relationship
 
 **Write operations**
-On MySQL, while a caller's transaction at the default isolation level (REPEATABLE READ) is open, writes of different tenants can deadlock, also writes on a tree not bound to a transaction: retry them after error 1213 (see "Using closure-tree inside your own transaction").
+On MySQL, writes of different tenants can deadlock, on a tree bound to a transaction or not: retry them after error 1213 (see "Concurrent writes on MySQL").
 * `Add(ctx, item, parentID, afterNodeID, tenant, opts ...AddOption)` — Add a new node; it is placed first among its siblings unless `afterNodeID` names a sibling or the `PlaceLast()` option is given
 * `GetOrAdd(ctx, item, parentID, tenant, matchFields, opts ...AddOption) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths; takes the same placement options as `Add`
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect

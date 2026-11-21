@@ -56,13 +56,21 @@ var (
 // DeleteRecurse of the same parent leaving orphaned nodes or stale closure rows, and two GetOrAdd
 // calls creating duplicate siblings. Writes for different tenants run concurrently, and reads never
 // take the lock. The transactions the library opens itself run at READ COMMITTED on PostgreSQL and
-// MySQL. The exception is MySQL at its default isolation level (REPEATABLE READ) while a caller's
-// transaction is open (see WithTx): there tree writes of different tenants can wait on each other,
-// and deadlock, also with writes on a Tree not bound to a transaction, which MySQL may roll back
-// instead. Writes that delete closure rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant
-// and BuildFromParents, lock closure rows of other tenants in such a transaction, because no
-// closure-table index leads with the tenant. A deadlock (error 1213) means MySQL has already rolled
-// back the whole transaction: retry the call on a Tree not bound to a transaction, or roll back and
+// MySQL.
+//
+// On MySQL, tree writes of different tenants can still deadlock, and no write is promised to be
+// free of deadlocks. No closure-table index leads with the tenant, so a write that deletes closure
+// rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant, BuildFromParents with Rebuild, or
+// an Update that moves a node, locks the closure rows it scans, also other tenants' rows, and
+// waits for a row that another transaction holds. READ COMMITTED removed the deadlocks between
+// these writes and other tenants' adds, but two of them on different tenants at once can deadlock:
+// in the library's tests a rebuild against a DeleteRecurseMany, and a move against a DeleteRecurse,
+// did; three DeleteTenant or two rebuilds at once did not. While a caller's transaction at MySQL's
+// default isolation level (REPEATABLE READ) is open (see WithTx), its tree writes keep the locks
+// of the rows they scanned until it ends, so more writes of other tenants wait on it and can
+// deadlock with it, also writes on a Tree not bound to a transaction, which MySQL may roll back
+// instead. A deadlock (error 1213) means MySQL has already rolled back the whole transaction, and
+// the work can be retried: repeat the call on a Tree not bound to a transaction, or roll back and
 // retry the caller's transaction on one bound with WithTx.
 //
 // The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MySQL (released

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -563,7 +562,7 @@ func TestPostgresOwnTransactionsUnderRepeatableReadDefault(t *testing.T) {
 }
 
 // On a Tree not bound to a transaction, writes that delete closure rows must not deadlock with
-// other tenants' writes. No closure-table index leads with the tenant, so on MySQL at REPEATABLE
+// other tenants' adds. No closure-table index leads with the tenant, so on MySQL at REPEATABLE
 // READ their deletes locked closure rows of other tenants, and concurrent adds failed with error
 // 1213, until the library's own transactions ran at READ COMMITTED there too. One goroutine repeats
 // the write on tenant a while two others repeat Add on tenants b and c; no call may fail.
@@ -579,12 +578,7 @@ func TestOwnTransactionsDoNotDeadlockAcrossTenants(t *testing.T) {
 		prepare func(t *testing.T, ctx context.Context, ct *closuretree.Tree) func(ctx context.Context) error
 	}{
 		{"DeleteTenant", func(_ *testing.T, _ context.Context, ct *closuretree.Tree) func(context.Context) error {
-			return func(ctx context.Context) error {
-				if _, err := addRootAndChild(ctx, ct, "a"); err != nil {
-					return err
-				}
-				return ct.DeleteTenant(ctx, "a")
-			}
+			return addAndDeleteTenant(ct, "a")
 		}},
 		{"DeleteRecurseMany", func(_ *testing.T, _ context.Context, ct *closuretree.Tree) func(context.Context) error {
 			return func(ctx context.Context) error {
@@ -597,13 +591,7 @@ func TestOwnTransactionsDoNotDeadlockAcrossTenants(t *testing.T) {
 			}
 		}},
 		{"DeleteRecurse", func(_ *testing.T, _ context.Context, ct *closuretree.Tree) func(context.Context) error {
-			return func(ctx context.Context) error {
-				root, err := addRootAndChild(ctx, ct, "a")
-				if err != nil {
-					return err
-				}
-				return ct.DeleteRecurse(ctx, root, "a")
-			}
+			return addAndDeleteRecurse(ct, "a")
 		}},
 		{"BuildFromParents", func(t *testing.T, ctx context.Context, ct *closuretree.Tree) func(context.Context) error {
 			var links []closuretree.ParentLink // a chain of ten nodes
@@ -621,26 +609,7 @@ func TestOwnTransactionsDoNotDeadlockAcrossTenants(t *testing.T) {
 			}
 		}},
 		{"Update moving a subtree", func(t *testing.T, ctx context.Context, ct *closuretree.Tree) func(context.Context) error {
-			p, err := addRootAndChild(ctx, ct, "a")
-			if err != nil {
-				t.Fatal(err)
-			}
-			q, err := addRootAndChild(ctx, ct, "a")
-			if err != nil {
-				t.Fatal(err)
-			}
-			x, err := addRootAndChild(ctx, ct, "a") // x and its child move between p and q
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := ct.Update(ctx, x, nil, up(p), nil, "a"); err != nil {
-				t.Fatal(err)
-			}
-			parents, i := [2]uint{p, q}, 0
-			return func(ctx context.Context) error {
-				i++
-				return ct.Update(ctx, x, nil, up(parents[i%2]), nil, "a")
-			}
+			return moveSubtree(t, ctx, ct, "a")
 		}},
 	}
 	for _, db := range testdbs.DBs() {
@@ -675,9 +644,9 @@ func TestOwnTransactionsDoNotDeadlockAcrossTenants(t *testing.T) {
 }
 
 // seedRootWithChildren inserts the node rows ids for tenant, the first a root and the others its
-// children, and builds their closure rows with BuildFromParents.
+// children, builds their closure rows with BuildFromParents, and returns the links it built from.
 func seedRootWithChildren(t *testing.T, ctx context.Context, gdb *gorm.DB, db testdbs.TargetDb,
-	ct *closuretree.Tree, tenant string, ids []uint) {
+	ct *closuretree.Tree, tenant string, ids []uint) []closuretree.ParentLink {
 	t.Helper()
 	nodes := make([]seed, len(ids))
 	links := make([]closuretree.ParentLink, len(ids))
@@ -690,6 +659,7 @@ func seedRootWithChildren(t *testing.T, ctx context.Context, gdb *gorm.DB, db te
 	if err := ct.BuildFromParents(ctx, tenant, links); err != nil {
 		t.Fatal(err)
 	}
+	return links
 }
 
 // raceOtherTenantAdds calls write writes times on one goroutine while, on one goroutine per tenant
@@ -697,51 +667,63 @@ func seedRootWithChildren(t *testing.T, ctx context.Context, gdb *gorm.DB, db te
 // line for each of them whose calls failed, with the count and the first error; name names write.
 func raceOtherTenantAdds(ctx context.Context, ct *closuretree.Tree, name string, writes int,
 	write func(context.Context) error, adds int, others ...string) []string {
+	writers := []raceWriter{{name: name, calls: writes, write: write}}
+	for _, tenant := range others {
+		var root uint
+		i := 0
+		writers = append(writers, raceWriter{name: "Add on " + tenant, calls: adds, write: func(ctx context.Context) error {
+			var parent *uint // a root, then a child of it
+			if i%2 == 1 {
+				parent = up(root)
+			}
+			i++
+			n := &TestPayload{Name: "n"}
+			err := ct.Add(ctx, n, parent, nil, tenant)
+			if err == nil && parent == nil {
+				root = n.NodeId
+			}
+			return err
+		}})
+	}
+	return raceWriters(ctx, writers...)
+}
+
+// raceWriter is one goroutine of raceWriters: it calls write calls times.
+type raceWriter struct {
+	name  string
+	calls int
+	write func(ctx context.Context) error
+}
+
+// raceWriters runs every writer on its own goroutine, all at the same time. It returns one line for
+// each writer whose calls failed, with the count and the first error.
+func raceWriters(ctx context.Context, writers ...raceWriter) []string {
 	var mu sync.Mutex
 	failed := map[string]int{}
 	first := map[string]error{}
-	note := func(who string, err error) {
-		if err == nil {
-			return
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if failed[who]++; failed[who] == 1 {
-			first[who] = err
-		}
-	}
-	calls := map[string]int{name: writes}
 	var wg sync.WaitGroup
-	wg.Go(func() {
-		for range writes {
-			note(name, write(ctx))
-		}
-	})
-	for _, tenant := range others {
-		who := "Add on " + tenant
-		calls[who] = adds
+	for _, w := range writers {
 		wg.Go(func() {
-			var root uint
-			for i := range adds {
-				var parent *uint // a root, then a child of it
-				if i%2 == 1 {
-					parent = up(root)
+			for range w.calls {
+				err := w.write(ctx)
+				if err == nil {
+					continue
 				}
-				n := &TestPayload{Name: "n"}
-				err := ct.Add(ctx, n, parent, nil, tenant)
-				note(who, err)
-				if err == nil && parent == nil {
-					root = n.NodeId
+				mu.Lock()
+				if failed[w.name]++; failed[w.name] == 1 {
+					first[w.name] = err
 				}
+				mu.Unlock()
 			}
 		})
 	}
 	wg.Wait()
 	var lines []string
-	for who, n := range failed {
-		lines = append(lines, fmt.Sprintf("%s: %d of %d calls failed, the first with: %v", who, n, calls[who], first[who]))
+	for _, w := range writers {
+		if n := failed[w.name]; n > 0 {
+			lines = append(lines, fmt.Sprintf("%s: %d of %d calls failed, the first with: %v", w.name, n, w.calls, first[w.name]))
+		}
 	}
-	sort.Strings(lines)
 	return lines
 }
 
@@ -752,6 +734,182 @@ func addRootAndChild(ctx context.Context, ct *closuretree.Tree, tenant string) (
 		return 0, err
 	}
 	return root.NodeId, ct.Add(ctx, &TestPayload{Name: "c"}, up(root.NodeId), nil, tenant)
+}
+
+// addAndDeleteTenant returns a write that adds a root and a child of it to tenant on ct, then
+// deletes the tenant.
+func addAndDeleteTenant(ct *closuretree.Tree, tenant string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if _, err := addRootAndChild(ctx, ct, tenant); err != nil {
+			return err
+		}
+		return ct.DeleteTenant(ctx, tenant)
+	}
+}
+
+// addAndDeleteRecurse returns a write that adds a root and a child of it to tenant on ct, then
+// deletes the root with DeleteRecurse.
+func addAndDeleteRecurse(ct *closuretree.Tree, tenant string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		root, err := addRootAndChild(ctx, ct, tenant)
+		if err != nil {
+			return err
+		}
+		return ct.DeleteRecurse(ctx, root, tenant)
+	}
+}
+
+// moveSubtree adds three roots p, q and x, each with a child, to tenant on ct, moves x under p, and
+// returns a write that moves x with its child to the other of p and q on each call.
+func moveSubtree(t *testing.T, ctx context.Context, ct *closuretree.Tree, tenant string) func(context.Context) error {
+	t.Helper()
+	var roots [3]uint
+	for i := range roots {
+		root, err := addRootAndChild(ctx, ct, tenant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots[i] = root
+	}
+	p, q, x := roots[0], roots[1], roots[2]
+	if err := ct.Update(ctx, x, nil, up(p), nil, tenant); err != nil {
+		t.Fatal(err)
+	}
+	parents, i := [2]uint{p, q}, 0
+	return func(ctx context.Context) error {
+		i++
+		return ct.Update(ctx, x, nil, up(parents[i%2]), nil, tenant)
+	}
+}
+
+// On a Tree not bound to a transaction, two or three tenants each repeat a write that deletes
+// closure rows, at the same time; no call may fail. At READ COMMITTED InnoDB still locks each
+// closure row such a delete scans, and waits for a row that another transaction holds (no
+// closure-table index leads with the tenant), so on MySQL some of these pairs deadlock: they run on
+// PostgreSQL only (mysqlDeadlocks). The others guard what was measured. Each writer gets its own
+// tenant and its own range of node ids; tenant z holds rows that the deletes scan past.
+func TestOwnDeletingWritesAcrossTenants(t *testing.T) {
+	const (
+		calls  = 30   // calls of each writer
+		seeded = 1000 // node ids per range
+		many   = 600  // nodes of DeleteRecurseMany: two chunks of ids
+	)
+	// A writer's prepare returns its write, one call on tenant; it may first seed the node rows ids
+	// of tenant.
+	type writer struct {
+		name    string
+		prepare func(t *testing.T, ctx context.Context, rt raceTree, tenant string, ids []uint) func(context.Context) error
+	}
+	deleteTenant := writer{"DeleteTenant", func(_ *testing.T, _ context.Context, rt raceTree, tenant string, _ []uint) func(context.Context) error {
+		return addAndDeleteTenant(rt.ct, tenant)
+	}}
+	deleteRecurse := writer{"DeleteRecurse", func(_ *testing.T, _ context.Context, rt raceTree, tenant string, _ []uint) func(context.Context) error {
+		return addAndDeleteRecurse(rt.ct, tenant)
+	}}
+	move := writer{"Update moving a subtree", func(t *testing.T, ctx context.Context, rt raceTree, tenant string, _ []uint) func(context.Context) error {
+		return moveSubtree(t, ctx, rt.ct, tenant)
+	}}
+	rebuild := writer{"BuildFromParents(Rebuild())", func(t *testing.T, ctx context.Context, rt raceTree, tenant string, ids []uint) func(context.Context) error {
+		links := seedRootWithChildren(t, ctx, rt.gdb, rt.db, rt.ct, tenant, ids)
+		return func(ctx context.Context) error {
+			return rt.ct.BuildFromParents(ctx, tenant, links, closuretree.Rebuild())
+		}
+	}}
+	deleteMany := writer{fmt.Sprintf("DeleteRecurseMany of %d ids", many), func(t *testing.T, ctx context.Context, rt raceTree, tenant string, ids []uint) func(context.Context) error {
+		ids = ids[:many]
+		roots := func() ([]TestPayload, []closuretree.ParentLink) {
+			nodes := make([]TestPayload, len(ids))
+			links := make([]closuretree.ParentLink, len(ids))
+			for i, id := range ids {
+				nodes[i] = TestPayload{Node: closuretree.Node{NodeId: id, Tenant: tenant}, Name: "r"}
+				links[i] = closuretree.ParentLink{NodeID: id}
+			}
+			return nodes, links
+		}
+		// insert adds the node rows ids to tenant, each a root, the way an import would.
+		insert := func(ctx context.Context) error {
+			nodes, links := roots()
+			if err := rt.gdb.WithContext(ctx).Create(&nodes).Error; err != nil {
+				return err
+			}
+			return rt.ct.BuildFromParents(ctx, tenant, links)
+		}
+		if err := insert(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if rt.db.DbType() == testdbs.DBTypePostgres { // the adds of other writers must not reuse ids
+			if err := rt.gdb.Exec(`SELECT setval(pg_get_serial_sequence('test_payloads', 'node_id'),
+				(SELECT MAX(node_id) FROM test_payloads))`).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+		return func(ctx context.Context) error {
+			deleted, err := rt.ct.DeleteRecurseMany(ctx, ids, tenant)
+			if err != nil {
+				return err
+			}
+			if deleted != many {
+				return fmt.Errorf("deleted %d nodes, want %d", deleted, many)
+			}
+			return insert(ctx)
+		}
+	}}
+
+	cases := []struct {
+		name    string
+		writers []writer
+		// mysqlDeadlocks marks a pair that deadlocks on MySQL, so it runs on PostgreSQL only. In ten
+		// runs of 30 calls per writer: the rebuild failed in 90 of 300 calls against
+		// DeleteRecurseMany, which never failed; Update failed in 41 and DeleteRecurse in 39 of 300.
+		mysqlDeadlocks bool
+	}{
+		{"three DeleteTenant", []writer{deleteTenant, deleteTenant, deleteTenant}, false},
+		{"DeleteRecurseMany and rebuild", []writer{deleteMany, rebuild}, true},
+		{"rebuild and rebuild", []writer{rebuild, rebuild}, false},
+		{"Update and DeleteRecurse", []writer{move, deleteRecurse}, true},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, c := range cases {
+			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
+				if strings.HasPrefix(db.DbType(), "Sqlite") {
+					t.Skip("SQLite allows one writing transaction per database, so writes never wait on each other's rows")
+				}
+				if c.mysqlDeadlocks && db.DbType() == testdbs.DBTypeMysql {
+					t.Skip("these writes deadlock on MySQL: InnoDB locks the closure rows a delete scans, also at READ COMMITTED")
+				}
+				gdb := connAndClose(t, db) // one database per test name
+				dropTreeTables(gdb, TestPayload{})
+				quiet := gdb.Session(&gorm.Session{Logger: logger.Discard}) // errors are reported by the test
+				ct, err := newTestTree(quiet, TestPayload{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Minute) // fail instead of hanging
+				defer cancel()
+				rt := raceTree{gdb: quiet, db: db, ct: ct}
+				seedRootWithChildren(t, ctx, quiet, db, ct, "z", seq(1, seeded))
+				tenants := []string{"a", "b", "c"}[:len(c.writers)]
+				racers := make([]raceWriter, len(c.writers))
+				for i, w := range c.writers {
+					ids := seq(uint((i+1)*seeded+1), uint((i+2)*seeded))
+					racers[i] = raceWriter{name: w.name + " on " + tenants[i], calls: calls, write: w.prepare(t, ctx, rt, tenants[i], ids)}
+				}
+				for _, f := range raceWriters(ctx, racers...) {
+					t.Error(f)
+				}
+				for _, tenant := range append([]string{"z"}, tenants...) {
+					assertConsistent(t, gdb, ct, tenant)
+				}
+			})
+		}
+	}
+}
+
+// raceTree is the tree a race runs on: its database handle, the database and the Tree.
+type raceTree struct {
+	gdb *gorm.DB
+	db  testdbs.TargetDb
+	ct  *closuretree.Tree
 }
 
 // Two caller transactions write to two new tenants whose names sort next to each other, with other
