@@ -15,6 +15,10 @@ var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; us
 // it is cheap and meant to be created per transaction. ct itself is unchanged and stays safe for
 // concurrent use.
 //
+// Only tx's connection (its transaction) and its context are used. Anything else the handle
+// carries, such as a Model, Table or Where, or the statement of a running gorm hook, is ignored, so
+// the tx a hook receives can be passed as it is.
+//
 // Reads on the copy see the transaction's uncommitted rows. Each write on the copy joins the
 // caller's transaction inside a savepoint that closure-tree takes itself, whatever gorm's
 // DisableNestedTransaction says: a failed write rolls back to its savepoint and returns its error,
@@ -41,7 +45,10 @@ func (ct *Tree) WithTx(tx *gorm.DB) *Tree {
 		panic("closuretree: WithTx called with a nil *gorm.DB")
 	}
 	cp := *ct
-	cp.db = tx
+	// A new statement that keeps only the connection and the context, then a session so that each
+	// tree query clones that clean statement. NewDB alone is not enough: WithContext would clone
+	// the old statement.
+	cp.db = tx.Session(&gorm.Session{NewDB: true, Initialized: true}).Session(&gorm.Session{})
 	return &cp
 }
 

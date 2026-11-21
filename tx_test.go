@@ -277,6 +277,139 @@ func TestWithTxPlainHandle(t *testing.T) {
 	}
 }
 
+// txOrder is a model of the caller's own, with an AfterCreate hook that runs afterCreate.
+type txOrder struct {
+	ID          uint `gorm:"primaryKey"`
+	Name        string
+	afterCreate func(tx *gorm.DB) error
+}
+
+func (o *txOrder) AfterCreate(tx *gorm.DB) error {
+	if o.afterCreate == nil {
+		return nil
+	}
+	return o.afterCreate(tx)
+}
+
+// treeWithOrders returns a tree with a (root) and b (under a) in tenant1, and an empty order table.
+func treeWithOrders(t *testing.T, db testdbs.TargetDb) (*gorm.DB, *closuretree.Tree, *TestPayload, *TestPayload) {
+	t.Helper()
+	gdb := connAndClose(t, db) // one database per test name
+	dropTreeTables(gdb, TestPayload{})
+	if err := gdb.Migrator().DropTable(&txOrder{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.AutoMigrate(&txOrder{}); err != nil {
+		t.Fatal(err)
+	}
+	ct, err := newTestTree(gdb, TestPayload{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	a, b := &TestPayload{Name: "a"}, &TestPayload{Name: "b"}
+	if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
+		t.Fatal(err)
+	}
+	if err := ct.Add(ctx, b, up(a.NodeId), nil, tenant1); err != nil {
+		t.Fatal(err)
+	}
+	return gdb, ct, a, b
+}
+
+// readAndAdd runs a check, a read and a write on tr, which sees a and b (b under a).
+func readAndAdd(ctx context.Context, tr *closuretree.Tree, a, b *TestPayload, add string) error {
+	isDesc, err := tr.IsDescendant(ctx, a.NodeId, b.NodeId, tenant1)
+	if err != nil {
+		return fmt.Errorf("IsDescendant: %w", err)
+	}
+	if !isDesc {
+		return errors.New("IsDescendant: b must be a descendant of a")
+	}
+	var nodes []TestPayload
+	if err := tr.Descendants(ctx, 0, 0, tenant1, &nodes); err != nil {
+		return fmt.Errorf("Descendants: %w", err)
+	}
+	if len(nodes) != 2 {
+		return fmt.Errorf("Descendants: want 2 nodes, got %+v", nodes)
+	}
+	if err := tr.Add(ctx, &TestPayload{Name: add}, up(a.NodeId), nil, tenant1); err != nil {
+		return fmt.Errorf("Add: %w", err)
+	}
+	return nil
+}
+
+// A gorm hook gets a handle that carries the statement of the running create. The Tree bound to it
+// uses only its transaction: the create runs once, the tree calls work, and a tree write in the
+// hook commits or rolls back with the create.
+func TestWithTxInsideHook(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, a, b := treeWithOrders(t, db)
+			ctx := context.Background()
+			commit := &txOrder{Name: "commit", afterCreate: func(tx *gorm.DB) error {
+				return readAndAdd(ctx, ct.WithTx(tx), a, b, "c")
+			}}
+			if err := gdb.Create(commit).Error; err != nil {
+				t.Fatalf("create with tree calls in the hook: %v", err)
+			}
+			rollback := &txOrder{Name: "rollback", afterCreate: func(tx *gorm.DB) error {
+				if err := ct.WithTx(tx).Add(ctx, &TestPayload{Name: "d"}, nil, nil, tenant1); err != nil {
+					return err
+				}
+				return errRollback
+			}}
+			if err := gdb.Create(rollback).Error; !errors.Is(err, errRollback) {
+				t.Fatalf("want the rollback error, got %v", err)
+			}
+			var orders []string
+			if err := gdb.Model(&txOrder{}).Order("id").Pluck("name", &orders).Error; err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff([]string{"commit"}, orders); diff != "" {
+				t.Errorf("orders (-want +got):\n%s", diff)
+			}
+			want := []string{"0>a@1", "0>b@2", "0>c@2", "a>a@0", "a>b@1", "a>c@1", "b>b@0", "c>c@0"}
+			if diff := cmp.Diff(want, namedClosure(t, gdb, ct, tenant1)); diff != "" {
+				t.Errorf("closure rows (-want +got):\n%s", diff)
+			}
+			assertConsistent(t, gdb, ct, tenant1)
+		})
+	}
+}
+
+// A handle that carries a model and a condition: the Tree bound to it ignores both and keeps the
+// transaction.
+func TestWithTxHandleWithStatement(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, a, b := treeWithOrders(t, db)
+			ctx := context.Background()
+			before := countTenant(t, gdb, ct, tenant1)
+			err := gdb.Transaction(func(tx *gorm.DB) error {
+				tr := ct.WithTx(tx.Model(&txOrder{}).Where("name = ?", "none"))
+				if err := readAndAdd(ctx, tr, a, b, "c"); err != nil {
+					return err
+				}
+				var got TestPayload
+				if err := tr.GetNode(ctx, a.NodeId, tenant1, &got); err != nil {
+					return fmt.Errorf("GetNode: %w", err)
+				}
+				if got.Name != "a" {
+					return fmt.Errorf("GetNode: want a, got %+v", got)
+				}
+				return errRollback
+			})
+			if !errors.Is(err, errRollback) {
+				t.Fatalf("want the rollback error, got %v", err)
+			}
+			if got := countTenant(t, gdb, ct, tenant1); got != before {
+				t.Errorf("rows after rollback: want %+v, got %+v", before, got)
+			}
+		})
+	}
+}
+
 // WithTx(nil) panics at the call with a message that names WithTx. The check needs no database:
 // it comes before anything else, so a zero Tree is enough.
 func TestWithTxNilPanics(t *testing.T) {
