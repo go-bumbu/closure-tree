@@ -507,7 +507,7 @@ repeated one such write at the same time (ten runs of 30 calls per write):
 | `DeleteTenant` (after adding nodes), on three tenants | no call failed | no call failed |
 | `BuildFromParents(Rebuild())` and `BuildFromParents(Rebuild())` | no call failed | no call failed |
 | `DeleteRecurseMany` of 600 ids and `BuildFromParents(Rebuild())` | the rebuild deadlocked in 90 of 300 calls | no call failed |
-| `Update` moving a subtree and `DeleteRecurse` | `Update` deadlocked in 41, `DeleteRecurse` in 39 of 300 calls | no call failed |
+| `Update` moving a subtree and `DeleteRecurse` | the pair lost calls to deadlocks | no call failed |
 
 InnoDB locks the rows a delete scans at every isolation level, so the library makes no promise that
 writes of different tenants do not deadlock on MySQL. A deadlock (error 1213) can be retried: the
@@ -605,7 +605,7 @@ model that embeds `Leaf` keeps the collation of your table; it is nullable, so f
 * `ClosureTableName() string` — Return the table name of the closure tree relationship
 
 **Write operations**
-On MySQL, writes of different tenants can deadlock, on a tree bound to a transaction or not: retry them after error 1213 (see "Concurrent writes on MySQL").
+On MySQL, writes of different tenants can deadlock, on a tree bound to a transaction or not. After error 1213 repeat a call on a tree not bound to a transaction; for a write through `WithTx` the server has rolled back your whole transaction: roll it back and retry it (see "Concurrent writes on MySQL").
 * `Add(ctx, item, parentID, afterNodeID, tenant, opts ...AddOption)` — Add a new node; it is placed first among its siblings unless `afterNodeID` names a sibling or the `PlaceLast()` option is given
 * `GetOrAdd(ctx, item, parentID, tenant, matchFields, opts ...AddOption) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths; takes the same placement options as `Add`
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect
