@@ -359,7 +359,8 @@ func TestWithTxInsideHook(t *testing.T) {
 				}
 				return errRollback
 			}}
-			if err := gdb.Create(rollback).Error; !errors.Is(err, errRollback) {
+			quiet := gdb.Session(&gorm.Session{Logger: logger.Discard}) // the rollback error is checked below
+			if err := quiet.Create(rollback).Error; !errors.Is(err, errRollback) {
 				t.Fatalf("want the rollback error, got %v", err)
 			}
 			var orders []string

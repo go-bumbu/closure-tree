@@ -15,9 +15,10 @@ var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; us
 // it is cheap and meant to be created per transaction. ct itself is unchanged and stays safe for
 // concurrent use.
 //
-// Only tx's connection (its transaction) and its context are used. Anything else the handle
-// carries, such as a Model, Table or Where, or the statement of a running gorm hook, is ignored, so
-// the tx a hook receives can be passed as it is.
+// Only the statement tx carries is dropped: its Model, Table, Where and Set values, for example the
+// statement of a running gorm hook, so the tx a hook receives can be passed as it is. The handle's
+// connection (its transaction), its context and its session settings (such as Logger, DryRun or
+// PrepareStmt) are kept, and so is an error already set on the handle.
 //
 // Reads on the copy see the transaction's uncommitted rows. Each write on the copy joins the
 // caller's transaction inside a savepoint that closure-tree takes itself, whatever gorm's
@@ -38,7 +39,7 @@ var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; us
 // one fixed order everywhere, for example with LockTenant up front. Call Migrate on ct, not on the
 // copy: it runs DDL, and MySQL commits the transaction implicitly on DDL.
 //
-// If tx is not a transaction, the copy behaves like a Tree built on tx: each write opens its own.
+// If tx is not a transaction, each write on the copy opens its own transaction, as on ct.
 // WithTx panics if tx is nil.
 func (ct *Tree) WithTx(tx *gorm.DB) *Tree {
 	if tx == nil {
