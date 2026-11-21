@@ -244,6 +244,20 @@ type otherTableOnly struct {
 	Related []*leafItem `gorm:"many2many:other_table_only_items;"`
 }
 
+// badModelTable's own table name is not a valid table name.
+type badModelTable struct {
+	ID    uint          `gorm:"primaryKey"`
+	Nodes []*filterNode `gorm:"many2many:bad_model_table_nodes;"`
+}
+
+func (badModelTable) TableName() string { return "bad-model-table" }
+
+// badJoinTable's join table name is not a valid table name.
+type badJoinTable struct {
+	ID    uint          `gorm:"primaryKey"`
+	Nodes []*filterNode `gorm:"many2many:bad-join-table;"`
+}
+
 // checkUnreadableModels checks that GetLeaves rejects, with ctx cancelled and so before any query,
 // the targets and models it cannot read correctly, with an error that says why.
 func checkUnreadableModels(t *testing.T, ct *closuretree.Tree, ctx context.Context) {
@@ -260,6 +274,8 @@ func checkUnreadableModels(t *testing.T, ct *closuretree.Tree, ctx context.Conte
 		"a relation with two join columns on its side":   {ct.GetLeaves(ctx, &[]twoKeys{}, 0, 0, tenantF), "join columns"},
 		"a primary key of two columns":                   {ct.GetLeaves(ctx, &[]twoKeysOneRef{}, 0, 0, tenantF), "primary key"},
 		"an embedded Leaf without its tenant column":     {ct.GetLeaves(ctx, &[]hiddenLeaf{}, 0, 0, tenantF), "tenant column"},
+		"an invalid table name of the model":             {ct.GetLeaves(ctx, &[]badModelTable{}, 0, 0, tenantF), `invalid table name "bad-model-table"`},
+		"an invalid join table name":                     {ct.GetLeaves(ctx, &[]badJoinTable{}, 0, 0, tenantF), `invalid table name "bad-join-table"`},
 	}
 	for what, c := range cases {
 		if c.err == nil || errors.Is(c.err, context.Canceled) || !strings.Contains(c.err.Error(), c.want) {
@@ -344,6 +360,47 @@ func TestGetLeavesChecksTheTenantOfAPointerLeaf(t *testing.T) {
 				attach(t, gdb, leaf, "Nodes", id["a1"])
 			}
 			var leaves []pointerLeaf
+			if err := ct.GetLeaves(context.Background(), &leaves, id["a"], 0, tenantF); err != nil || len(leaves) != 1 || leaves[0].Name != "mine" {
+				t.Errorf("want only the leaf of the tenant, got %+v, %v", leaves, err)
+			}
+		})
+	}
+}
+
+// LeafBase embeds Leaf. It is exported because gorm skips an unexported embedded struct.
+type LeafBase struct {
+	closuretree.Leaf
+}
+
+// nestedLeaf embeds Leaf through LeafBase; its tenant column is checked as well.
+type nestedLeaf struct {
+	LeafBase
+	Name  string
+	Nodes []*filterNode `gorm:"many2many:nested_leaf_nodes;"`
+}
+
+// Two leaves embedding Leaf through another struct are attached to the same node of tenantF; one
+// of them carries another tenant.
+func TestGetLeavesChecksTheTenantOfANestedLeaf(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, ct, id := filterTree(t, db)
+			if err := gdb.Migrator().DropTable("nested_leaf_nodes", &nestedLeaf{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := gdb.AutoMigrate(&nestedLeaf{}); err != nil {
+				t.Fatal(err)
+			}
+			for _, leaf := range []*nestedLeaf{
+				{LeafBase: LeafBase{closuretree.Leaf{Tenant: tenantF}}, Name: "mine"},
+				{LeafBase: LeafBase{closuretree.Leaf{Tenant: "other"}}, Name: "foreign"},
+			} {
+				if err := gdb.Create(leaf).Error; err != nil {
+					t.Fatal(err)
+				}
+				attach(t, gdb, leaf, "Nodes", id["a1"])
+			}
+			var leaves []nestedLeaf
 			if err := ct.GetLeaves(context.Background(), &leaves, id["a"], 0, tenantF); err != nil || len(leaves) != 1 || leaves[0].Name != "mine" {
 				t.Errorf("want only the leaf of the tenant, got %+v, %v", leaves, err)
 			}

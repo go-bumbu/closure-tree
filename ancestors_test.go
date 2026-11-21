@@ -140,6 +140,9 @@ func TestAncestorsOfUnknownNodes(t *testing.T) {
 			if err := ct.Ancestors(ctx, id["a"], "", &items); !errors.Is(err, closuretree.ErrEmptyTenant) {
 				t.Errorf("empty tenant: %v", err)
 			}
+			if _, err := ct.AncestorIds(ctx, id["a"], ""); !errors.Is(err, closuretree.ErrEmptyTenant) {
+				t.Errorf("AncestorIds with an empty tenant: %v", err)
+			}
 			if ids, err := ct.AncestorIds(ctx, id["a"], tenantF); err != nil || ids == nil || len(ids) != 0 {
 				t.Errorf("a root node: want an empty, non-nil slice, got %v, %v", ids, err)
 			}
@@ -147,6 +150,9 @@ func TestAncestorsOfUnknownNodes(t *testing.T) {
 			cancel()
 			if err := ct.Ancestors(cancelled, id["x21"], tenantF, &items, closuretree.Columns("nope")); !errors.Is(err, closuretree.ErrUnknownColumn) {
 				t.Errorf("unknown column: %v", err)
+			}
+			if _, err := ct.AncestorIds(cancelled, id["x21"], tenantF, closuretree.Columns("nope")); !errors.Is(err, closuretree.ErrUnknownColumn) {
+				t.Errorf("AncestorIds with an unknown column: %v", err)
 			}
 		})
 	}
