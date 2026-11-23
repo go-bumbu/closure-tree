@@ -2,9 +2,12 @@ package closuretree
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/go-bumbu/testdbs"
+	"github.com/go-sql-driver/mysql"
 )
 
 // TestDialectFromName pins the mapping from GORM dialector names to the internal dialect enum,
@@ -67,6 +70,52 @@ func TestTxOptions(t *testing.T) {
 	}
 	if got := dialectSQLite.txOptions(); got != nil {
 		t.Errorf("sqlite: want no options, got %+v", got)
+	}
+}
+
+// TestIsMySQLDeadlock pins which errors the MySQL retry repeats: a deadlock (error 1213), also
+// wrapped, and no other error, a lock wait timeout (error 1205) in particular.
+func TestIsMySQLDeadlock(t *testing.T) {
+	deadlock := &mysql.MySQLError{Number: 1213, SQLState: [5]byte{'4', '0', '0', '0', '1'},
+		Message: "Deadlock found when trying to get lock; try restarting transaction"}
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"driverError", deadlock, true},
+		{"withoutSQLState", &mysql.MySQLError{Number: 1213, Message: "Deadlock found"}, true},
+		{"wrapped", fmt.Errorf("deleteRecurseMany: failed to delete nodes: %w", deadlock), true},
+		{"joined", errors.Join(errors.New("first"), deadlock), true},
+		{"lockWaitTimeout", &mysql.MySQLError{Number: 1205, SQLState: [5]byte{'H', 'Y', '0', '0', '0'},
+			Message: "Lock wait timeout exceeded; try restarting transaction"}, false},
+		{"longerNumber", errors.New("Error 12130: some other error"), false},
+		{"other", errors.New("deadlock"), false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isMySQLDeadlock(tt.err); got != tt.want {
+				t.Errorf("isMySQLDeadlock(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRetryPolicyOfDialect pins which transactions writeTx repeats: on MySQL up to 5 attempts in
+// all, after a deadlock only, with the jittered pause; on PostgreSQL and SQLite one attempt.
+func TestRetryPolicyOfDialect(t *testing.T) {
+	p := dialectMySQL.retryPolicy()
+	if p.attempts != 5 || p.retryable == nil || p.pause == nil {
+		t.Fatalf("mysql: want 5 attempts with a retryable test and a pause, got %+v", p)
+	}
+	if !p.retryable(&mysql.MySQLError{Number: 1213}) || p.retryable(&mysql.MySQLError{Number: 1205}) {
+		t.Error("mysql: want a deadlock retried and a lock wait timeout not")
+	}
+	for _, d := range []dialect{dialectPostgres, dialectSQLite} {
+		if got := d.retryPolicy(); got.attempts > 1 {
+			t.Errorf("dialect %d: want one attempt, got %d", d, got.attempts)
+		}
 	}
 }
 

@@ -3,10 +3,12 @@ package closuretree
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/go-bumbu/testdbs"
+	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -212,5 +214,76 @@ func TestDeleteRecurseManyRetriedAttemptCountsOnce(t *testing.T) {
 				t.Errorf("want no node left, got %d", left)
 			}
 		})
+	}
+}
+
+// failNodeCreates fails every create of a row of ct's node table, after it ran, with err, and
+// returns a counter of those creates.
+func failNodeCreates(t *testing.T, ct *Tree, err error) *int {
+	t.Helper()
+	const name = "test:fail_node_creates"
+	seen := new(int)
+	cb := ct.db.Callback().Create()
+	if regErr := cb.After("gorm:create").Register(name, func(db *gorm.DB) {
+		if db.Error == nil && db.Statement.Table == ct.nodesTbl {
+			*seen++
+			_ = db.AddError(err)
+		}
+	}); regErr != nil {
+		t.Fatal(regErr)
+	}
+	t.Cleanup(func() {
+		if err := cb.Remove(name); err != nil {
+			t.Error(err)
+		}
+	})
+	return seen
+}
+
+// Under the MySQL policy a write on the library's own transaction that deadlocks on every attempt
+// makes 5 attempts and returns the last deadlock, still reachable as the driver's error 1213; a lock
+// wait timeout (error 1205) is returned after one attempt. The errors are injected, so this runs on
+// every database; the pause is skipped.
+func TestMySQLPolicyReturnsTheDeadlockAfterTheLastAttempt(t *testing.T) {
+	deadlock := &mysql.MySQLError{Number: 1213, SQLState: [5]byte{'4', '0', '0', '0', '1'},
+		Message: "Deadlock found when trying to get lock; try restarting transaction"}
+	timeout := &mysql.MySQLError{Number: 1205, SQLState: [5]byte{'H', 'Y', '0', '0', '0'},
+		Message: "Lock wait timeout exceeded; try restarting transaction"}
+	tests := []struct {
+		name     string
+		err      *mysql.MySQLError
+		attempts int
+	}{
+		{"deadlock", deadlock, 5},
+		{"lockWaitTimeout", timeout, 1},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, tt := range tests {
+			t.Run(db.DbType()+"/"+tt.name, func(t *testing.T) {
+				ct := newDBInternalTree(t, db, txSample{})
+				ct.retry = dialectMySQL.retryPolicy()
+				ct.retry.pause = noPause
+				creates := failNodeCreates(t, ct, tt.err)
+
+				err := ct.Add(context.Background(), &txSample{Name: "a"}, nil, nil, "t1")
+				if *creates != tt.attempts {
+					t.Errorf("want %d attempts, got %d", tt.attempts, *creates)
+				}
+				var got *mysql.MySQLError
+				if !errors.As(err, &got) || got.Number != tt.err.Number {
+					t.Fatalf("want the driver's error %d, got %v", tt.err.Number, err)
+				}
+				if tt.attempts > 1 && !strings.Contains(err.Error(), fmt.Sprintf("each of %d attempts", tt.attempts)) {
+					t.Errorf("want the error to give the number of attempts, got %v", err)
+				}
+				var left int64
+				if err := ct.db.Table(ct.nodesTbl).Where("tenant = ?", "t1").Count(&left).Error; err != nil {
+					t.Fatal(err)
+				}
+				if left != 0 {
+					t.Errorf("want no node stored, got %d", left)
+				}
+			})
+		}
 	}
 }

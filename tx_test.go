@@ -556,20 +556,26 @@ func waitForPostgresLockWaiter(ctx context.Context, gdb *gorm.DB, timeout time.D
 // another holds the tenant's row is at the lock: B's attempt blocks on the upsert of the lock row
 // or on its SELECT ... FOR UPDATE (lockTenantHook). A prepared statement shows command Execute.
 func waitForMySQLLockStatement(ctx context.Context, gdb *gorm.DB, nodeTbl string, timeout time.Duration) error {
+	return waitForMySQLStatement(ctx, gdb, "closure_tree_lock_"+nodeTbl, timeout)
+}
+
+// waitForMySQLStatement returns once another session on gdb's MySQL database runs a statement whose
+// text contains part, or an error when none does within timeout. A statement that stays in the
+// processlist is waiting, usually on a row lock (see waitForMySQLLockStatement).
+func waitForMySQLStatement(ctx context.Context, gdb *gorm.DB, part string, timeout time.Duration) error {
 	const query = "SELECT COUNT(*) FROM information_schema.processlist WHERE db = DATABASE() " +
 		"AND id <> CONNECTION_ID() AND command <> 'Sleep' AND LOCATE(?, info) > 0"
-	lockTbl := "closure_tree_lock_" + nodeTbl
 	deadline := time.Now().Add(timeout)
 	for {
 		var n int64
-		if err := gdb.WithContext(ctx).Raw(query, lockTbl).Scan(&n).Error; err != nil {
+		if err := gdb.WithContext(ctx).Raw(query, part).Scan(&n).Error; err != nil {
 			return err
 		}
 		if n > 0 {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("no session ran a statement on %s within %v", lockTbl, timeout)
+			return fmt.Errorf("no session ran a statement containing %q within %v", part, timeout)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -844,9 +850,11 @@ func moveSubtree(t *testing.T, ctx context.Context, ct *closuretree.Tree, tenant
 
 // On a Tree not bound to a transaction, two or three tenants each repeat a write that deletes
 // closure rows, at the same time; no call may fail. At READ COMMITTED InnoDB still locks each
-// closure row such a delete scans, and waits for a row that another transaction holds (some scans
-// still pass other tenants' rows), so on MySQL some of these pairs deadlock: they run on
-// PostgreSQL only (mysqlDeadlocks). The others guard what was measured. Each writer gets its own
+// closure row such a delete scans, and some scans still pass other tenants' rows (a tenant with a
+// large share of the table, tables whose statistics are stale), so on MySQL these writes can
+// deadlock; the library then repeats its transaction (dialect.retryPolicy). The pairs below are
+// the two that deadlocked here before the retry and those that deadlocked most in the probe of
+// 2026-11-22. The tables are just loaded, where deadlocks are most likely. Each writer gets its own
 // tenant and its own range of node ids; tenant z holds rows that the deletes scan past.
 func TestOwnDeletingWritesAcrossTenants(t *testing.T) {
 	const (
@@ -918,26 +926,21 @@ func TestOwnDeletingWritesAcrossTenants(t *testing.T) {
 	cases := []struct {
 		name    string
 		writers []writer
-		// mysqlDeadlocks marks a pair that deadlocks on MySQL, so it runs on PostgreSQL only. In ten
-		// runs of 30 calls per writer, the rebuild lost calls to deadlocks against
-		// DeleteRecurseMany, which never failed, and the pair of Update and DeleteRecurse lost calls
-		// to deadlocks. raceWriters counts every failed call, not deadlocks alone, so no count is
-		// given.
-		mysqlDeadlocks bool
 	}{
-		{"three DeleteTenant", []writer{deleteTenant, deleteTenant, deleteTenant}, false},
-		{"DeleteRecurseMany and rebuild", []writer{deleteMany, rebuild}, true},
-		{"rebuild and rebuild", []writer{rebuild, rebuild}, false},
-		{"Update and DeleteRecurse", []writer{move, deleteRecurse}, true},
+		{"three DeleteTenant", []writer{deleteTenant, deleteTenant, deleteTenant}},
+		{"DeleteRecurseMany and rebuild", []writer{deleteMany, rebuild}},
+		{"rebuild and rebuild", []writer{rebuild, rebuild}},
+		{"Update and DeleteRecurse", []writer{move, deleteRecurse}},
+		{"DeleteRecurse and DeleteRecurse", []writer{deleteRecurse, deleteRecurse}},
+		{"DeleteRecurse and DeleteRecurseMany", []writer{deleteRecurse, deleteMany}},
+		{"Update and DeleteRecurseMany", []writer{move, deleteMany}},
+		{"Update and rebuild", []writer{move, rebuild}},
 	}
 	for _, db := range testdbs.DBs() {
 		for _, c := range cases {
 			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
 				if strings.HasPrefix(db.DbType(), "Sqlite") {
 					t.Skip("SQLite allows one writing transaction per database, so writes never wait on each other's rows")
-				}
-				if c.mysqlDeadlocks && db.DbType() == testdbs.DBTypeMysql {
-					t.Skip("these writes deadlock on MySQL: InnoDB locks the closure rows a delete scans, also at READ COMMITTED")
 				}
 				gdb := connAndClose(t, db) // one database per test name
 				dropTreeTables(gdb, TestPayload{})
@@ -1189,7 +1192,9 @@ func TestWithTxTimeoutDuringStatementLosesTransaction(t *testing.T) {
 // that write's savepoint fails too: the error reports the deadlock first and matches
 // ErrSavepointRollback. The other add gets its lock once the server's rollback has released it,
 // and its transaction commits. A statement on the failed transaction's handle is then committed at
-// once, and the handle's rollback does not undo it.
+// once, and the handle's rollback does not undo it. The library does not repeat a write inside a
+// caller's transaction, also not on MySQL: a repeated add would succeed on the rolled-back handle,
+// and no add would fail.
 func TestWithTxDeadlockMatchesSavepointRollback(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -1273,6 +1278,149 @@ func TestWithTxDeadlockMatchesSavepointRollback(t *testing.T) {
 			assertStatementsAfterDeadlockCommit(t, gdb, ct, failedTx)
 		})
 	}
+}
+
+// On MySQL a write on a transaction the library opened itself that loses a deadlock runs again and
+// succeeds: DeleteRecurseMany of r1, r2 and r3 takes tenant a's lock and waits for r1, which a
+// hand-made transaction holds and which then asks for a's lock (loseDeadlock). Once that
+// transaction rolls back, the second attempt deletes the four nodes. The same holds on a Tree bound
+// with WithTx to a handle that is not in a transaction: it opens its own transactions.
+func TestOwnTransactionRetriedAfterDeadlock(t *testing.T) {
+	variants := []struct {
+		name string
+		tree func(ct *closuretree.Tree, gdb *gorm.DB) *closuretree.Tree
+	}{
+		{"own", func(ct *closuretree.Tree, _ *gorm.DB) *closuretree.Tree { return ct }},
+		{"WithTxOnPlainHandle", func(ct *closuretree.Tree, gdb *gorm.DB) *closuretree.Tree { return ct.WithTx(gdb) }},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, v := range variants {
+			t.Run(db.DbType()+"/"+v.name, func(t *testing.T) {
+				if db.DbType() != testdbs.DBTypeMysql {
+					t.Skip("MySQL only: the library repeats its own transactions after a deadlock on MySQL only")
+				}
+				gdb := connAndClose(t, db) // one database per test name
+				dropTreeTables(gdb, TestPayload{})
+				quiet := gdb.Session(&gorm.Session{Logger: logger.Discard}) // errors are reported by the test
+				ct, err := newTestTree(quiet, TestPayload{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second) // fail instead of hanging
+				defer cancel()
+				var roots []uint
+				for _, name := range []string{"r1", "r2", "r3"} {
+					root := &TestPayload{Name: name}
+					if err := ct.Add(ctx, root, nil, nil, "a"); err != nil {
+						t.Fatal(err)
+					}
+					roots = append(roots, root.NodeId)
+				}
+				if err := ct.Add(ctx, &TestPayload{Name: "child"}, up(roots[0]), nil, "a"); err != nil {
+					t.Fatal(err)
+				}
+				attempts := recordStatements(t, quiet, "nodes_to_delete")
+
+				tree := v.tree(ct, quiet)
+				var deleted int64
+				loseDeadlock(t, ctx, quiet, ct, "a", roots[0], "nodes_to_delete", func() {
+					deleted, err = tree.DeleteRecurseMany(ctx, roots, "a")
+				})
+				if err != nil || deleted != 4 {
+					t.Fatalf("want 4 nodes deleted without an error, got %d and %v", deleted, err)
+				}
+				if len(*attempts) != 2 || !strings.Contains(fmt.Sprint((*attempts)[0]), "Error 1213") || (*attempts)[1] != nil {
+					t.Errorf("want the node delete to deadlock on the first attempt and succeed on the second, got %v", *attempts)
+				}
+				if got := countTenant(t, gdb, ct, "a").Nodes; got != 0 {
+					t.Errorf("want no node left in tenant a, got %d", got)
+				}
+				assertConsistent(t, gdb, ct, "a")
+			})
+		}
+	}
+}
+
+// loseDeadlock makes write, a write on ct for tenant that deletes the node row node, lose a
+// deadlock on MySQL, and returns once write has returned. A hand-made transaction H inserts
+// ballast rows into a table of its own, locks node, starts write on its own goroutine, waits until
+// write runs a statement containing waitFor (blocked on node; write's transaction holds the
+// tenant's lock), and asks for the tenant's lock. InnoDB rolls back the transaction that changed
+// fewer rows, so with the ballast write's transaction is the victim and H gets the lock. Then H
+// rolls back.
+func loseDeadlock(t *testing.T, ctx context.Context, gdb *gorm.DB, ct *closuretree.Tree, tenant string,
+	node uint, waitFor string, write func()) {
+	t.Helper()
+	type ballastRow struct {
+		ID uint
+		V  int
+	}
+	const ballastTbl, ballast = "deadlock_ballast", 2000
+	if err := gdb.Migrator().DropTable(ballastTbl); err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Table(ballastTbl).Migrator().CreateTable(&ballastRow{}); err != nil {
+		t.Fatal(err)
+	}
+	h := gdb.WithContext(ctx).Begin()
+	if h.Error != nil {
+		t.Fatal(h.Error)
+	}
+	defer h.Rollback()
+	if err := h.Table(ballastTbl).Create(make([]ballastRow, ballast)).Error; err != nil {
+		t.Fatalf("H: insert the ballast: %v", err)
+	}
+	var locked uint
+	if err := h.Raw(fmt.Sprintf("SELECT node_id FROM %s WHERE node_id = ? FOR UPDATE", ct.NodeTableName()),
+		node).Scan(&locked).Error; err != nil {
+		t.Fatalf("H: lock node %d: %v", node, err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		write()
+	}()
+	defer func() {
+		h.Rollback() // releases write if the test stops early; does nothing after H's rollback below
+		<-done
+	}()
+	if err := waitForMySQLStatement(ctx, gdb, waitFor, 10*time.Second); err != nil {
+		t.Fatalf("the write does not wait for node %d: %v", node, err)
+	}
+	var got string
+	if err := h.Raw(fmt.Sprintf("SELECT tenant FROM closure_tree_lock_%s WHERE tenant = ? FOR UPDATE", ct.NodeTableName()),
+		tenant).Scan(&got).Error; err != nil {
+		t.Fatalf("H: lock tenant %s: want the write's transaction rolled back as the deadlock's victim, got %v", tenant, err)
+	}
+	if err := h.Rollback().Error; err != nil {
+		t.Fatalf("H: roll back: %v", err)
+	}
+}
+
+// recordStatements records, for every raw statement run through gdb's callbacks whose text
+// contains part, the error it ended with (nil on success), until the end of the test. Statements
+// run on concurrent goroutines are recorded in the order they end.
+func recordStatements(t *testing.T, gdb *gorm.DB, part string) *[]error {
+	t.Helper()
+	const name = "test:record_statements"
+	var mu sync.Mutex
+	got := new([]error)
+	cb := gdb.Callback().Raw()
+	if err := cb.After("gorm:raw").Register(name, func(db *gorm.DB) {
+		if strings.Contains(db.Statement.SQL.String(), part) {
+			mu.Lock()
+			*got = append(*got, db.Error)
+			mu.Unlock()
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := cb.Remove(name); err != nil {
+			t.Error(err)
+		}
+	})
+	return got
 }
 
 // assertStatementsAfterDeadlockCommit checks the handle of a transaction that MySQL rolled back

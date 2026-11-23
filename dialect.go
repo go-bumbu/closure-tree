@@ -198,8 +198,28 @@ func (d dialect) txOptions() []*sql.TxOptions {
 	return []*sql.TxOptions{{Isolation: sql.LevelReadCommitted}}
 }
 
-// retryPolicy returns the policy by which writeTx repeats a transaction it opened itself. It is the
-// zero policy, one attempt, on every database.
+// mysqlDeadlockAttempts is how many times in all writeTx runs a transaction it opened itself on
+// MySQL when every attempt but the last ends in a deadlock.
+const mysqlDeadlockAttempts = 5
+
+// retryPolicy returns the policy by which writeTx repeats a transaction it opened itself. On MySQL
+// it makes up to mysqlDeadlockAttempts attempts, the next one only after a deadlock (error 1213):
+// InnoDB has then rolled back the whole transaction, so the write can run again from the start. A
+// lock wait timeout (error 1205) is not repeated: InnoDB rolls back only the statement that timed
+// out, and it is not a deadlock. PostgreSQL and SQLite make one attempt.
 func (d dialect) retryPolicy() retryPolicy {
-	return retryPolicy{}
+	if d != dialectMySQL {
+		return retryPolicy{}
+	}
+	return retryPolicy{attempts: mysqlDeadlockAttempts, retryable: isMySQLDeadlock, pause: retryPause}
+}
+
+// mysqlDeadlockText matches MySQL's deadlock error, number 1213, in the text of the driver's error
+// ("Error 1213 (40001): Deadlock found ..."), which stays in the text of any error that wraps it.
+var mysqlDeadlockText = regexp.MustCompile(`Error 1213\b`)
+
+// isMySQLDeadlock reports whether err is, or wraps, MySQL's deadlock error. It reads the error's
+// text, so the library needs no import of the MySQL driver.
+func isMySQLDeadlock(err error) bool {
+	return err != nil && mysqlDeadlockText.MatchString(err.Error())
 }

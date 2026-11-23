@@ -181,15 +181,6 @@ func TestRetryPause(t *testing.T) {
 	}
 }
 
-// The retry is switched off on every database.
-func TestDialectRetryPolicyIsOff(t *testing.T) {
-	for _, d := range []dialect{dialectPostgres, dialectMySQL, dialectSQLite} {
-		if p := d.retryPolicy(); p.attempts > 1 {
-			t.Errorf("dialect %d: want one attempt, got %d", d, p.attempts)
-		}
-	}
-}
-
 // writeTx repeats only a transaction it opens itself: on a Tree whose handle is not in a
 // transaction, also one made with WithTx, and never inside a caller's transaction.
 func TestWriteTxRetriesOnlyItsOwnTransaction(t *testing.T) {

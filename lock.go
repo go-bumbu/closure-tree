@@ -23,8 +23,9 @@ var savepointRollbackTimeout = 30 * time.Second
 // Renormalize, BuildFromParents) and LockTenant go through here. The dialect-specific lock
 // acquisition lives in dialect.lockTenant; see the concurrency note on Tree.
 // The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL and MySQL)
-// and is repeated by the Tree's retry policy (ct.retry), so fn must start from scratch on every
-// call: it may run more than once, each time in a new transaction.
+// and is repeated by the Tree's retry policy (ct.retry: on MySQL after a deadlock, see
+// dialect.retryPolicy), so fn must start from scratch on every call: it may run more than once,
+// each time in a new transaction.
 //
 // When the Tree is bound to a caller's transaction (WithTx), writeTx opens no transaction of its
 // own: it runs the lock and fn inside a savepoint, see savepointTx, and never repeats them.
