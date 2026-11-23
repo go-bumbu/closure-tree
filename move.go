@@ -268,6 +268,9 @@ func (ct *Tree) insertNewPathsInTx(tx *gorm.DB, id, newPID uint, tenant string) 
 	if newPID == 0 {
 		insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl)
 		insExec := tx.Exec(insertSql, id, tenant)
+		// Defensive: STEP 1 deleted external rows of the node, so it has closure rows, and its self
+		// row is not deleted; no row here means the closure rows are inconsistent. Without this
+		// guard a corrupt tree would be moved silently.
 		if insExec.Error == nil && insExec.RowsAffected == 0 {
 			return ErrNodeNotFound
 		}
@@ -278,6 +281,10 @@ func (ct *Tree) insertNewPathsInTx(tx *gorm.DB, id, newPID uint, tenant string) 
 	}
 	insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
 	insExec := tx.Exec(insertSql, id, newPID, tenant, tenant)
+	// Defensive: requireParent (in moveInTx) already returned ErrParentNotFound for a missing or
+	// unlinked parent, so the parent has ancestor rows, and no row here means the closure rows are
+	// inconsistent (the moved node has no self row). Without this guard a corrupt tree would be
+	// moved silently.
 	if insExec.Error == nil && insExec.RowsAffected == 0 {
 		return ErrParentNotFound
 	}
