@@ -10,7 +10,7 @@ test: ## run fast go tests
 	@go test ./...
 
 test-full: ## run go full tests (uses test containers)
-	@go test ./... -alldbs
+	@go test ./... -alldbs -timeout 20m
 
 test-race: ## run go tests with the race detector (SQLite only, skips the large-tree tests)
 	@go test ./... -race -short -count 2
