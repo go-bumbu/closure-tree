@@ -119,9 +119,12 @@ func (ct *Tree) GetOrAdd(ctx context.Context, item any, parentID uint, tenant st
 		return false, err
 	}
 
-	reflectItem, t, itemIsPointer := stripNodeCopy(item)
-
+	var reflectItem any
+	var t reflect.Type
+	var itemIsPointer bool
 	err = ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
+		// A fresh copy per attempt, as in Add.
+		reflectItem, t, itemIsPointer = stripNodeCopy(item)
 		found, ferr := ct.findChildInTx(tx, ct.plainPlan(), parentID, tenant, whereSQL, whereArgs, reflectItem)
 		if ferr != nil {
 			return ferr

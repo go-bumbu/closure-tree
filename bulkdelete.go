@@ -43,6 +43,8 @@ func (ct *Tree) DeleteRecurseMany(ctx context.Context, ids []uint, tenant string
 	}
 
 	err = ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
+		// Counted per attempt: a repeated attempt deletes the rows again.
+		deleted = 0
 		for start := 0; start < len(unique); start += idChunkSize {
 			chunk := unique[start:min(start+idChunkSize, len(unique))]
 

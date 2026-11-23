@@ -344,9 +344,13 @@ func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *
 	if cfg.last && aid != 0 {
 		return ErrConflictingPlacement
 	}
-	reflectItem, t, itemIsPointer := stripNodeCopy(item)
-
+	var reflectItem any
+	var t reflect.Type
+	var itemIsPointer bool
 	err = ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
+		// A fresh copy per attempt, so that a repeated attempt does not see what gorm or the
+		// model's hooks wrote into the copy of a failed one.
+		reflectItem, t, itemIsPointer = stripNodeCopy(item)
 		return ct.addInTx(tx, reflectItem, t, pid, aid, cfg.last, tenant)
 	})
 	if err != nil {
