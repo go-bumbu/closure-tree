@@ -49,9 +49,9 @@ Config: `.golangci.yaml` — standard linters + `nolintlint`, `gocyclo` (≥20),
 
 ## Coverage
 
-Threshold: **70%** for `./internal/...` and `./libs/...`
+Threshold: **80%** per package, for every package of `./...` (`COVERAGE_THRESHOLD` in the Makefile)
 
-If coverage drops below 70%: write the missing tests. Do not lower the threshold.
+If coverage drops below 80%: write the missing tests. Do not lower the threshold.
 
 ## Step-by-step
 
