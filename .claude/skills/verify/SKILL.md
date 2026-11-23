@@ -7,7 +7,7 @@ description: Use when the user runs /verify or asks to run make verify. Runs the
 
 Run `make verify` and fix all issues until it passes clean.
 
-`make verify` runs in order: `test` → `ui-test` → `license-check` → `lint` → `benchmark` → `coverage`
+`make verify` runs in order: `lint` → `test-full` → `test-race` → `license-check` → `benchmark` → `coverage`
 
 ## How to run
 
