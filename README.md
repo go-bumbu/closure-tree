@@ -557,6 +557,9 @@ err = tree.BuildFromParents(ctx, "user1", links)
     names one node of each cycle.
   * `ErrClosureExists`: the tenant already has closure rows. With the `Rebuild()` option they are
     deleted first, and the tree is built again.
+* Until it has run, a node row is not part of the tree: `Add`, `GetOrAdd` and a move with `Update`
+  under it return `ErrParentNotFound`, with a message that names `BuildFromParents`, and write
+  nothing.
 * It runs under the tenant lock. Through `WithTx` it runs inside your transaction, so a migration
   can build the tree and drop its old parent column atomically, except on MySQL, where DDL commits
   the transaction implicitly: drop the column there after the commit.

@@ -251,6 +251,13 @@ func (ct *Tree) moveInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
 	if delExec.RowsAffected == 0 {
 		return ErrNodeNotFound
 	}
+	// Checked after STEP 1 so that a missing node is ErrNodeNotFound whatever the target; an error
+	// rolls STEP 1 back with the rest of the write.
+	if newPID != 0 {
+		if err := ct.requireParent(tx, newPID, tenant); err != nil {
+			return err
+		}
+	}
 
 	// STEP 2: Insert new connections from destination's ancestors to the subtree.
 	return ct.insertNewPathsInTx(tx, id, newPID, tenant)

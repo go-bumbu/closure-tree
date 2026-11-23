@@ -269,6 +269,10 @@ func derefUint(p *uint) uint {
 // root, &id adds under that node; a nil afterNodeID (or &0) places first among the siblings, &id
 // places after that sibling. The PlaceLast option places the node last instead of first; combined
 // with a non-zero afterNodeID it returns ErrConflictingPlacement.
+//
+// A parent that is not a node of tenant returns ErrParentNotFound. So does a node row that has no
+// closure rows yet, as before BuildFromParents, with a message that names BuildFromParents; GetOrAdd
+// and a move with Update reject such a parent the same way.
 func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *uint, tenant string, opts ...AddOption) error {
 	if err := checkItem(item); err != nil {
 		return err
@@ -341,15 +345,8 @@ func copyNodeBack(dst, src any, t reflect.Type) {
 func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, afterNodeID uint, last bool, tenant string) error {
 	// Check if the parent node exists and the tenant is the same (inside tx to avoid TOCTOU)
 	if parentID != 0 {
-		var parent Node
-		err := tx.Table(ct.nodesTbl).
-			Where("node_id = ? AND tenant = ?", parentID, tenant).
-			First(&parent).Error
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrParentNotFound
-			}
-			return fmt.Errorf("unable to check parent node: %w", err)
+		if err := ct.requireParent(tx, parentID, tenant); err != nil {
+			return err
 		}
 	}
 
@@ -418,6 +415,32 @@ func (ct *Tree) addInTx(tx *gorm.DB, reflectItem any, t reflect.Type, parentID, 
 	}
 	return nil
 }
+
+// requireParent returns ErrParentNotFound unless parentID, not 0, is a node of tenant that is part of
+// the tree: a node row with its closure row at depth 1 (the parent's parent, or the virtual root 0
+// for a root), which every node added, moved or built has. A node row without one, as before
+// BuildFromParents, returns a wrapped ErrParentNotFound that names BuildFromParents: a node under
+// it would get no virtual root row. One statement, on the primary key of the
+// node table and the (descendant_id, tenant, depth) index of the closure table. Must be called
+// inside a transaction.
+func (ct *Tree) requireParent(tx *gorm.DB, parentID uint, tenant string) error {
+	var row struct{ Linked *uint }
+	res := tx.Raw(fmt.Sprintf(requireParentQuery, ct.nodesTbl, ct.relationsTbl), tenant, parentID, tenant).Scan(&row)
+	if res.Error != nil {
+		return fmt.Errorf("unable to check parent node: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrParentNotFound
+	}
+	if row.Linked == nil {
+		return fmt.Errorf("%w: node %d has no closure rows; build them with BuildFromParents", ErrParentNotFound, parentID)
+	}
+	return nil
+}
+
+const requireParentQuery = `SELECT r.ancestor_id AS linked FROM %s n
+	LEFT JOIN %s r ON r.descendant_id = n.node_id AND r.tenant = ? AND r.depth = 1
+	WHERE n.node_id = ? AND n.tenant = ? LIMIT 1`
 
 // Virtual root: ancestor_id 0 is a synthetic node that is never stored in the nodes table.
 // Every node — not just roots — gets one closure row with ancestor_id=0 whose depth equals the

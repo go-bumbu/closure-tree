@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1722,6 +1723,74 @@ func TestDeleteRecurseVirtualRootUnbuilt(t *testing.T) {
 			}
 			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 0 || got.Closure != 0 || got.Meta != 0 {
 				t.Errorf("after DeleteTenant: %+v", got)
+			}
+		})
+	}
+}
+
+// A node row without closure rows, as before BuildFromParents, or with only its self row, is not
+// a parent: Add, GetOrAdd and a move under it return ErrParentNotFound naming BuildFromParents,
+// and write nothing.
+func TestWriteUnderUnbuiltParent(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			const unbuilt = "unbuilt"
+			const noRows, selfOnly = 100001, 100002
+			seedNodes(t, gdb, db, unbuilt, []seed{{noRows, "no rows"}, {selfOnly, "self row only"}})
+			if err := gdb.Exec("INSERT INTO "+ct.ClosureTableName()+
+				" (ancestor_id, descendant_id, tenant, depth) VALUES (?, ?, ?, 0)", selfOnly, selfOnly, unbuilt).Error; err != nil {
+				t.Fatal(err)
+			}
+			b := &TestPayload{Name: "built"}
+			if err := ct.Add(ctx, b, nil, nil, unbuilt); err != nil {
+				t.Fatal(err)
+			}
+			before := namedClosure(t, gdb, ct, unbuilt)
+			counts := countTenant(t, gdb, ct, unbuilt)
+
+			for _, parent := range []uint{noRows, selfOnly} {
+				writes := map[string]func() error{
+					"Add": func() error {
+						return ct.Add(ctx, &TestPayload{Name: "c"}, up(parent), nil, unbuilt)
+					},
+					"Add PlaceLast": func() error {
+						return ct.Add(ctx, &TestPayload{Name: "c"}, up(parent), nil, unbuilt, closuretree.PlaceLast())
+					},
+					"GetOrAdd": func() error {
+						_, err := ct.GetOrAdd(ctx, &TestPayload{Name: "c"}, parent, unbuilt, []string{"Name"})
+						return err
+					},
+					"move": func() error {
+						return ct.Update(ctx, b.NodeId, nil, up(parent), nil, unbuilt)
+					},
+					"move and reorder": func() error {
+						return ct.Update(ctx, b.NodeId, nil, up(parent), up(0), unbuilt)
+					},
+				}
+				for name, write := range writes {
+					err := write()
+					if !errors.Is(err, closuretree.ErrParentNotFound) || !strings.Contains(fmt.Sprint(err), "BuildFromParents") {
+						t.Errorf("%s under %d: want ErrParentNotFound naming BuildFromParents, got %v", name, parent, err)
+					}
+				}
+			}
+			if diff := cmp.Diff(before, namedClosure(t, gdb, ct, unbuilt)); diff != "" {
+				t.Errorf("closure rows changed (-before +after):\n%s", diff)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got != counts {
+				t.Errorf("rows changed: before %+v, after %+v", counts, got)
+			}
+			// a parent that does not exist keeps the plain error
+			if err := ct.Add(ctx, &TestPayload{Name: "c"}, up(99999), nil, unbuilt); !errors.Is(err, closuretree.ErrParentNotFound) ||
+				strings.Contains(err.Error(), "BuildFromParents") {
+				t.Errorf("Add under a missing parent: want the plain ErrParentNotFound, got %v", err)
 			}
 		})
 	}
