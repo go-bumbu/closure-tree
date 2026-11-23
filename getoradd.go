@@ -42,10 +42,11 @@ import (
 // a match field, but an item with a gorm.Valuer field can still be added. A field with a column
 // default (a default: tag, or autoIncrement) whose value is the zero value, also a nil pointer,
 // returns an error before any query too, because gorm stores the default instead of the zero value;
-// any other value, also a pointer to the zero value, is matched as it is. gorm expands a list into
-// several values on insert as well, so an item whose list field holds more than one element cannot
-// be added; give such a field a serializer. A field with a gorm serializer is matched by its
-// serialized value.
+// any other value, also a pointer to the zero value, is matched as it is. Update does store the
+// zero value in such a column, and a node holding it cannot be found by that value with FindChild
+// or GetOrAdd: the match returns the same error. gorm expands a list into several values on insert
+// as well, so an item whose list field holds more than one element cannot be added; give such a
+// field a serializer. A field with a gorm serializer is matched by its serialized value.
 //
 // out must be a non-nil pointer to a struct that embeds Node. On a match, out is populated the same
 // way GetNode does (including NodeId and the read-only ParentId) and found is true. When nothing
@@ -91,7 +92,7 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // an unknown or Node-owned field, or a Go field name that fields of several columns share, returns
 // ErrUnknownMatchField before anything is added. A match field whose value is a list or a
 // gorm.Valuer, or the zero value of a field with a column default, returns an error before any
-// query, as in FindChild.
+// query, as in FindChild, also when Update has stored that zero value in a node.
 //
 // When item is a pointer, its embedded Node — including NodeId — is populated on BOTH paths, so the
 // returned node id can be chained as the parentID of the next level down.
