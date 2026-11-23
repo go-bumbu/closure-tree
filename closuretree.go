@@ -233,9 +233,13 @@ func checkNodeColumns(s *schema.Schema) error {
 // AutoMigrate. It is separate from
 // New so that construction needs no DDL privilege and so migration can be run explicitly (e.g. once
 // at startup, guarded against concurrent runners). AutoMigrate is additive: it will not drop or
-// alter an existing index, so see the note on closureTree when upgrading a pre-0.10 schema. It
-// creates the indexes a table lacks, so on a tree created before the closure table had its index
-// on the tenant column, the next Migrate adds it. The index is named idx_<closure table>_tenant,
+// alter an existing index. So a closure table created by v0.9.x keeps that version's indexes
+// idx_anc_ten_dep, idx_desc_ten_dep and idx_closure_uniq and its check chk_depth next to the
+// per-table ones Migrate creates (idx_<closure table>_anc_ten_dep and so on), which duplicate
+// them. An index idx_<closure table>_tenant left from v0.8 or earlier is the tenant index
+// described below, not a leftover: keep it. AutoMigrate creates the indexes a table lacks, so on
+// a tree created before the closure table had its index on the tenant column, the next Migrate
+// adds it. The index is named idx_<closure table>_tenant,
 // shortened by gorm's naming strategy when that is too long; Migrate builds it unless an index of
 // exactly that name exists. Building it on a large closure table takes time. MySQL builds it in
 // place and lets writes continue, except at its start and end, where it needs a short exclusive
@@ -289,7 +293,6 @@ func (ct *Tree) ClosureTableName() string {
 }
 
 // represents the table that store the relationships
-// Note: if upgrading from a previous version, manually run: DROP INDEX idx_desc_ten
 type closureTree struct {
 	// Index names use GORM's empty-name composite form so each is scoped per closure table
 	// (idx_<reltable>_<id>). A hardcoded name would collide when two trees are migrated into one
