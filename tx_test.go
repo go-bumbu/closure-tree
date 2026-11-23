@@ -225,8 +225,9 @@ func TestWithTxSingleConnection(t *testing.T) {
 	}
 }
 
-// MySQL refuses savepoint statements in the prepared statement protocol, so the savepoints must
-// bypass gorm's prepared-statement connection.
+// MySQL (accepted, untested) refuses savepoint statements in the prepared statement protocol, so the
+// savepoints bypass gorm's prepared-statement connection; MariaDB accepts them. The tree's writes
+// work on a prepared-statement connection.
 func TestWithTxPreparedStatements(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -501,8 +502,8 @@ func TestLockTenantFirstSerializesConflictingMoves(t *testing.T) {
 					if err := waitForPostgresLockWaiter(ctx, gdb, 10*time.Second); err != nil {
 						return fmt.Errorf("B did not wait on the lock: %w", err)
 					}
-				case testdbs.DBTypeMysql:
-					if err := waitForMySQLLockStatement(ctx, gdb, ct.NodeTableName(), 10*time.Second); err != nil {
+				case testdbs.DBTypeMariadb:
+					if err := waitForMariaDBLockStatement(ctx, gdb, ct.NodeTableName(), 10*time.Second); err != nil {
 						return fmt.Errorf("B did not wait on the lock: %w", err)
 					}
 				default:
@@ -548,21 +549,21 @@ func waitForPostgresLockWaiter(ctx context.Context, gdb *gorm.DB, timeout time.D
 	}
 }
 
-// waitForMySQLLockStatement returns once another session on gdb's MySQL database runs a statement on
+// waitForMariaDBLockStatement returns once another session on gdb's MariaDB database runs a statement on
 // the lock table of the tree whose node table is nodeTbl, or an error when none does within
-// timeout. MySQL shows lock waits (INNODB_TRX, performance_schema.data_lock_waits) only to a user
+// timeout. MariaDB shows lock waits (INNODB_TRX, performance_schema.data_lock_waits) only to a user
 // with privileges the test user lacks, and the processlist has no state for a row-lock wait, but
 // each user sees its own sessions there. A session that runs a statement on the lock table while
 // another holds the tenant's row is at the lock: B's attempt blocks on the upsert of the lock row
 // or on its SELECT ... FOR UPDATE (lockTenantHook). A prepared statement shows command Execute.
-func waitForMySQLLockStatement(ctx context.Context, gdb *gorm.DB, nodeTbl string, timeout time.Duration) error {
-	return waitForMySQLStatement(ctx, gdb, "closure_tree_lock_"+nodeTbl, timeout)
+func waitForMariaDBLockStatement(ctx context.Context, gdb *gorm.DB, nodeTbl string, timeout time.Duration) error {
+	return waitForMariaDBStatement(ctx, gdb, "closure_tree_lock_"+nodeTbl, timeout)
 }
 
-// waitForMySQLStatement returns once another session on gdb's MySQL database runs a statement whose
+// waitForMariaDBStatement returns once another session on gdb's MariaDB database runs a statement whose
 // text contains part, or an error when none does within timeout. A statement that stays in the
-// processlist is waiting, usually on a row lock (see waitForMySQLLockStatement).
-func waitForMySQLStatement(ctx context.Context, gdb *gorm.DB, part string, timeout time.Duration) error {
+// processlist is waiting, usually on a row lock (see waitForMariaDBLockStatement).
+func waitForMariaDBStatement(ctx context.Context, gdb *gorm.DB, part string, timeout time.Duration) error {
 	const query = "SELECT COUNT(*) FROM information_schema.processlist WHERE db = DATABASE() " +
 		"AND id <> CONNECTION_ID() AND command <> 'Sleep' AND LOCATE(?, info) > 0"
 	deadline := time.Now().Add(timeout)
@@ -628,7 +629,7 @@ func TestPostgresOwnTransactionsUnderRepeatableReadDefault(t *testing.T) {
 }
 
 // On a Tree not bound to a transaction, writes that delete closure rows must not deadlock with
-// other tenants' adds. Before the closure table had an index on the tenant, on MySQL at REPEATABLE
+// other tenants' adds. Before the closure table had an index on the tenant, on MariaDB at REPEATABLE
 // READ their deletes locked closure rows of other tenants, and concurrent adds failed with error
 // 1213, until the library's own transactions ran at READ COMMITTED there too. One goroutine repeats
 // the write on tenant a while two others repeat Add on tenants b and c; no call may fail.
@@ -851,7 +852,7 @@ func moveSubtree(t *testing.T, ctx context.Context, ct *closuretree.Tree, tenant
 // On a Tree not bound to a transaction, two or three tenants each repeat a write that deletes
 // closure rows, at the same time; no call may fail. At READ COMMITTED InnoDB still locks each
 // closure row such a delete scans, and some scans still pass other tenants' rows (a tenant with a
-// large share of the table, tables whose statistics are stale), so on MySQL these writes can
+// large share of the table, tables whose statistics are stale), so on MariaDB these writes can
 // deadlock; the library then repeats its transaction (dialect.retryPolicy). The pairs below are
 // the two that deadlocked here before the retry and those that deadlocked most in the probe of
 // 2026-11-22. The tables are just loaded, where deadlocks are most likely. Each writer gets its own
@@ -979,7 +980,7 @@ type raceTree struct {
 
 // Two caller transactions write to two new tenants whose names sort next to each other, with other
 // tenants' rows around them: A adds a root, B's first add starts while A is open, then A adds a
-// child of its root. Both must commit without a deadlock and keep their rows (on MySQL an UPDATE of
+// child of its root. Both must commit without a deadlock and keep their rows (on MariaDB an UPDATE of
 // the sort-order meta table that matched no row used to leave gap locks that deadlocked here). The
 // order of the statements is fixed: A's second add starts only once B's add has finished or is
 // waiting on a lock, and B commits only after A.
@@ -1094,13 +1095,13 @@ func startTxWrite(ctx context.Context, db testdbs.TargetDb, gdb *gorm.DB, writte
 
 // waitWrittenOrBlocked returns once the write that startTxWrite runs in session id has finished
 // (its error, read from written, is put back) or is waiting on a lock. PostgreSQL reports the lock
-// wait; MySQL shows it only with the PROCESS privilege, so there the write counts as waiting once
+// wait; MariaDB shows it only with the PROCESS privilege, so there the write counts as waiting once
 // one of its statements has run for 150ms, far longer than any of them takes unblocked.
 func waitWrittenOrBlocked(t *testing.T, ctx context.Context, gdb *gorm.DB, db testdbs.TargetDb, id int64, written chan error) {
 	t.Helper()
 	running := "SELECT COUNT(*) FROM pg_stat_activity WHERE pid = ? AND wait_event_type = 'Lock'"
 	polls := 1
-	if db.DbType() == testdbs.DBTypeMysql {
+	if db.DbType() == testdbs.DBTypeMariadb {
 		running = "SELECT COUNT(*) FROM information_schema.processlist WHERE id = ? AND command <> 'Sleep' AND info IS NOT NULL"
 		polls = 15
 	}
@@ -1188,18 +1189,18 @@ func TestWithTxTimeoutDuringStatementLosesTransaction(t *testing.T) {
 }
 
 // A holds tenant1's lock and B tenant2's; then, concurrently, A adds to tenant2 and B to tenant1.
-// MySQL detects the deadlock and rolls back one whole transaction (error 1213), so the rollback to
+// MariaDB detects the deadlock and rolls back one whole transaction (error 1213), so the rollback to
 // that write's savepoint fails too: the error reports the deadlock first and matches
 // ErrSavepointRollback. The other add gets its lock once the server's rollback has released it,
 // and its transaction commits. A statement on the failed transaction's handle is then committed at
 // once, and the handle's rollback does not undo it. The library does not repeat a write inside a
-// caller's transaction, also not on MySQL: a repeated add would succeed on the rolled-back handle,
+// caller's transaction, also not on MariaDB: a repeated add would succeed on the rolled-back handle,
 // and no add would fail.
 func TestWithTxDeadlockMatchesSavepointRollback(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			if db.DbType() != testdbs.DBTypeMysql {
-				t.Skip("MySQL only: the server rolls back the whole transaction on a deadlock")
+			if db.DbType() != testdbs.DBTypeMariadb {
+				t.Skip("MariaDB only: the server rolls back the whole transaction on a deadlock")
 			}
 			gdb := connAndClose(t, db) // one database per test name
 			dropTreeTables(gdb, TestPayload{})
@@ -1280,7 +1281,7 @@ func TestWithTxDeadlockMatchesSavepointRollback(t *testing.T) {
 	}
 }
 
-// On MySQL a write on a transaction the library opened itself that loses a deadlock runs again and
+// On MariaDB a write on a transaction the library opened itself that loses a deadlock runs again and
 // succeeds: DeleteRecurseMany of r1, r2 and r3 takes tenant a's lock and waits for r1, which a
 // hand-made transaction holds and which then asks for a's lock (loseDeadlock). Once that
 // transaction rolls back, the second attempt deletes the four nodes. The same holds on a Tree bound
@@ -1296,8 +1297,8 @@ func TestOwnTransactionRetriedAfterDeadlock(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		for _, v := range variants {
 			t.Run(db.DbType()+"/"+v.name, func(t *testing.T) {
-				if db.DbType() != testdbs.DBTypeMysql {
-					t.Skip("MySQL only: the library repeats its own transactions after a deadlock on MySQL only")
+				if db.DbType() != testdbs.DBTypeMariadb {
+					t.Skip("MariaDB only: the library repeats its own transactions after a deadlock on MariaDB only")
 				}
 				gdb := connAndClose(t, db) // one database per test name
 				dropTreeTables(gdb, TestPayload{})
@@ -1342,7 +1343,7 @@ func TestOwnTransactionRetriedAfterDeadlock(t *testing.T) {
 }
 
 // loseDeadlock makes write, a write on ct for tenant that deletes the node row node, lose a
-// deadlock on MySQL, and returns once write has returned. A hand-made transaction H inserts
+// deadlock on MariaDB, and returns once write has returned. A hand-made transaction H inserts
 // ballast rows into a table of its own, locks node, starts write on its own goroutine, waits until
 // write runs a statement containing waitFor (blocked on node; write's transaction holds the
 // tenant's lock), and asks for the tenant's lock. InnoDB rolls back the transaction that changed
@@ -1384,7 +1385,7 @@ func loseDeadlock(t *testing.T, ctx context.Context, gdb *gorm.DB, ct *closuretr
 		h.Rollback() // releases write if the test stops early; does nothing after H's rollback below
 		<-done
 	}()
-	if err := waitForMySQLStatement(ctx, gdb, waitFor, 10*time.Second); err != nil {
+	if err := waitForMariaDBStatement(ctx, gdb, waitFor, 10*time.Second); err != nil {
 		t.Fatalf("the write does not wait for node %d: %v", node, err)
 	}
 	var got string
@@ -1423,7 +1424,7 @@ func recordStatements(t *testing.T, gdb *gorm.DB, part string) *[]error {
 	return got
 }
 
-// assertStatementsAfterDeadlockCommit checks the handle of a transaction that MySQL rolled back
+// assertStatementsAfterDeadlockCommit checks the handle of a transaction that MariaDB rolled back
 // on a deadlock: it is no longer in a transaction, so a later statement on it is committed by
 // itself, at once, and the final rollback undoes nothing. A caller that kept using the handle
 // would commit its following statements one by one.

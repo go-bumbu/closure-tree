@@ -10,11 +10,11 @@ import (
 
 // Foo and Bar are two distinct node models with different table names. Migrating both into the
 // same database guards against schema-global identifier collisions between trees: the node-table
-// and closure-table index names, and (on MySQL) the closure depth check constraint, must all be
+// and closure-table index names, and (on MariaDB) the closure depth check constraint, must all be
 // scoped per node table. Before the fix, the second Migrate failed with "index idx_node_tenant
 // already exists"; scoping only the node index moved the failure to "index idx_desc_ten_dep
-// already exists", and on MySQL a shared "chk_depth" check name would collide next. Runs across
-// every configured dialect (sqlite via `make test`; +mysql +postgres via `make test-full`).
+// already exists", and on MariaDB a shared "chk_depth" check name would collide next. Runs across
+// every configured dialect (sqlite via `make test`; +mariadb +postgres via `make test-full`).
 type Foo struct {
 	closuretree.Node
 	Name     string
@@ -46,7 +46,7 @@ func TestTwoModelsCoexistInOneDB(t *testing.T) {
 				t.Fatalf("migrate foos: %v", err)
 			}
 			// The crux: a second node model in the SAME db must not collide on any
-			// schema-global identifier (index names, and the depth check on MySQL).
+			// schema-global identifier (index names, and the depth check on MariaDB).
 			barTree, err := newTestTree(gdb, Bar{})
 			if err != nil {
 				t.Fatalf("migrate bars into same db: %v", err)

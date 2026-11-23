@@ -486,23 +486,21 @@ func TestSubtreeIDsInsideATransaction(t *testing.T) {
 	}
 }
 
-// MySQL rejects a subquery that reads the node table inside an UPDATE or DELETE on the node table
-// (error 1093). Wrapped in a derived table it works on every database.
+// A filtered subquery reads the node table; inside an UPDATE or DELETE on the node table MariaDB,
+// PostgreSQL and SQLite accept it directly (MySQL, untested, rejects it with error 1093), and wrapped
+// in a derived table, the form the docs give for portability.
 func TestSubtreeIDsInAWriteOnTheNodeTable(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb, ct, id := filterTree(t, db)
-			silent := gdb.Session(&gorm.Session{Logger: logger.Discard})
 			nodes := ct.NodeTableName()
 			filtered, err := ct.SubtreeIDs(tenantF, []uint{id["a"]}, closuretree.Filter(closuretree.IsNull("archived_at")))
 			if err != nil {
 				t.Fatal(err)
 			}
-			direct := silent.Table(nodes).Where("node_id IN (?)", filtered).Update("kind", "direct").Error
-			if isMySQL := db.DbType() == testdbs.DBTypeMysql; isMySQL != (direct != nil) {
-				t.Errorf("a filtered subquery used directly: mysql=%v, error %v", isMySQL, direct)
-			} else if isMySQL && !strings.Contains(direct.Error(), "1093") {
-				t.Errorf("want MySQL error 1093, got %v", direct)
+			direct := gdb.Table(nodes).Where("node_id IN (?)", filtered).Update("kind", "direct")
+			if direct.Error != nil || direct.RowsAffected != 2 { // a and a1
+				t.Errorf("a filtered subquery used directly: %d rows, %v", direct.RowsAffected, direct.Error)
 			}
 			res := gdb.Table(nodes).Where("node_id IN (SELECT descendant_id FROM (?) AS sub)", filtered).Update("kind", "wrapped")
 			if res.Error != nil || res.RowsAffected != 2 { // a and a1
@@ -712,12 +710,12 @@ func checkFilteredPairsOfTwoTenants(t *testing.T, c pairChecker) {
 	}
 }
 
-// MySQL rejects a LIMIT inside an IN subquery (error 1235); paging belongs in the outer query.
+// MariaDB rejects a LIMIT inside an IN subquery (error 1235); paging belongs in the outer query.
 func TestSubtreeIDsLimitInsideIn(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			if db.DbType() != testdbs.DBTypeMysql {
-				t.Skip("MySQL only")
+			if db.DbType() != testdbs.DBTypeMariadb {
+				t.Skip("MariaDB only")
 			}
 			gdb, ct, id := filterTree(t, db)
 			sub, err := ct.SubtreeIDs(tenantF, []uint{id["a"]})
@@ -728,7 +726,7 @@ func TestSubtreeIDsLimitInsideIn(t *testing.T) {
 			err = gdb.Session(&gorm.Session{Logger: logger.Discard}).Table(ct.NodeTableName()).
 				Where("node_id IN (SELECT descendant_id FROM (?) AS s LIMIT 2)", sub).Pluck("name", &names).Error
 			if err == nil || !strings.Contains(err.Error(), "1235") {
-				t.Errorf("want MySQL error 1235, got %v", err)
+				t.Errorf("want MariaDB error 1235, got %v", err)
 			}
 		})
 	}

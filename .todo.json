@@ -16,7 +16,7 @@
       "ref": "CLOSURETRE-001",
       "name": "Backlog R1-R12",
       "goal": "Library features of the R1-R12 backlog, implemented on branch work/quiet-harbor",
-      "status": "open"
+      "status": "done"
     }
   ],
   "categories": [

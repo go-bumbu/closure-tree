@@ -14,8 +14,8 @@ func TestAlterTenantCollationSQL(t *testing.T) {
 		columnType string
 		want       string // "" when the type is rejected
 	}{
-		{"varchar(191)", "ALTER TABLE `nodes` MODIFY COLUMN tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL"},
-		{"varchar(1024)", "ALTER TABLE `nodes` MODIFY COLUMN tenant varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL"},
+		{"varchar(191)", "ALTER TABLE `nodes` MODIFY COLUMN tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin NOT NULL"},
+		{"varchar(1024)", "ALTER TABLE `nodes` MODIFY COLUMN tenant varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin NOT NULL"},
 		{"longtext", ""},
 		{"char(10)", ""},
 		{"varchar()", ""},
@@ -25,7 +25,7 @@ func TestAlterTenantCollationSQL(t *testing.T) {
 		{"", ""},
 	}
 	for _, tt := range tests {
-		got, err := alterTenantCollationSQL("`nodes`", tt.columnType)
+		got, err := alterTenantCollationSQL("`nodes`", tt.columnType, tenantCollationMariaDB)
 		if tt.want == "" {
 			if err == nil {
 				t.Errorf("type %q: want an error, got %q", tt.columnType, got)
@@ -64,23 +64,40 @@ func TestSameTenantCollation(t *testing.T) {
 }
 
 // TestInexactTenantColumns pins which tenant columns Migrate alters on a tree without rows: those
-// whose collation is not utf8mb4_0900_bin.
+// whose collation is not the exact one, utf8mb4_nopad_bin on MariaDB. utf8mb4_0900_bin, an alias of
+// it that information_schema reports by its own name, is altered too.
 func TestInexactTenantColumns(t *testing.T) {
-	exact := tenantColumn{Table: "a", Type: "varchar(191)", Collation: "utf8mb4_0900_bin"}
-	ci := tenantColumn{Table: "b", Type: "varchar(191)", Collation: "utf8mb4_0900_ai_ci"}
+	exact := tenantColumn{Table: "a", Type: "varchar(191)", Collation: "utf8mb4_nopad_bin"}
+	ci := tenantColumn{Table: "b", Type: "varchar(191)", Collation: "utf8mb4_uca1400_ai_ci"}
 	bin := tenantColumn{Table: "c", Type: "varchar(191)", Collation: "utf8mb4_bin"}
+	alias := tenantColumn{Table: "d", Type: "varchar(191)", Collation: "utf8mb4_0900_bin"}
 	tests := []struct {
 		name string
 		cols []tenantColumn
 		want []tenantColumn
 	}{
 		{"all exact", []tenantColumn{exact, exact}, nil},
-		{"mixed", []tenantColumn{exact, ci, bin}, []tenantColumn{ci, bin}},
+		{"mixed", []tenantColumn{exact, ci, bin, alias}, []tenantColumn{ci, bin, alias}},
 		{"none exact", []tenantColumn{ci}, []tenantColumn{ci}},
 	}
 	for _, tt := range tests {
-		if diff := cmp.Diff(tt.want, inexactTenantColumns(tt.cols)); diff != "" {
+		if diff := cmp.Diff(tt.want, inexactTenantColumns(tt.cols, tenantCollationMariaDB)); diff != "" {
 			t.Errorf("%s (-want +got):\n%s", tt.name, diff)
+		}
+	}
+}
+
+// TestTenantCollationOf pins the exact tenant collation per server: utf8mb4_nopad_bin on MariaDB,
+// utf8mb4_0900_bin on MySQL (accepted, untested).
+func TestTenantCollationOf(t *testing.T) {
+	tests := []struct{ version, want string }{
+		{"11.8.9-MariaDB-ubu2404", "utf8mb4_nopad_bin"},
+		{"8.0.45-0ubuntu0.22.04.1", "utf8mb4_0900_bin"},
+		{"9.1.0", "utf8mb4_0900_bin"},
+	}
+	for _, tt := range tests {
+		if got := tenantCollationOf(tt.version); got != tt.want {
+			t.Errorf("tenantCollationOf(%q) = %s, want %s", tt.version, got, tt.want)
 		}
 	}
 }

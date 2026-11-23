@@ -12,10 +12,14 @@ Features:
 ## DBs
 while all the Gorm supported databases should work, since closure-tree relies  heavily on Raw queries, 
 it might not be the case; currently it's tested with:
-* mysql (8.0.17 or later; with binary logging on, `binlog_format` must be `ROW`, the default, or `MIXED`)
+* mariadb (11.8 or later; with binary logging on, `binlog_format` must be `MIXED`, the default, or `ROW`)
 * postgres
 * sqlite ("gorm.io/driver/sqlite")
 * sqlite without CGO ("github.com/glebarez/sqlite")
+
+MySQL shares gorm's driver (`gorm.io/driver/mysql`) with MariaDB and is still accepted (8.0.17 or
+later), but it is no longer tested: the library treats it as MariaDB, except that it gives the
+tenant columns the collation `utf8mb4_0900_bin` and its tree reads do not lift the recursion limit.
  
 
 ## Usage
@@ -50,7 +54,7 @@ tables and should be called once at application start up.
 next `Migrate` adds an index on the tenant column of the closure table, named
 `idx_closure_tree_rel_<node table>_tenant` (gorm's naming strategy shortens a name that is too
 long); it builds it unless an index of exactly that name exists. On a large closure table the build
-takes time. MySQL builds it in place and lets writes continue, except at its start and end, where
+takes time. MariaDB builds it in place and lets writes continue, except at its start and end, where
 it needs a short exclusive metadata lock: it waits for that lock until the open transactions that
 used the closure table end, and while it waits, every new statement on the closure table, reads
 too, queues behind it. So run `Migrate` when no long transaction uses the tree. PostgreSQL blocks
@@ -181,7 +185,7 @@ pointer field and a `driver.Valuer` field whose `Value` is nil (such as an inval
 `sql.NullString`) match NULL. A byte-slice field that is not a `driver.Valuer` and that `Add`
 stores as NULL matches NULL too: a nil one, also behind a pointer, and an empty one of a named type
 such as `json.RawMessage` that is not behind a pointer, which gorm writes as NULL; an empty
-`[]byte` matches empty bytes. On MySQL, a pointer to a nil `json.RawMessage` matches what the driver
+`[]byte` matches empty bytes. On MariaDB, a pointer to a nil `json.RawMessage` matches what the driver
 stores for it: empty bytes with the driver's `interpolateParams=true`, NULL without. A node added
 with one setting is therefore not found with the other, and `GetOrAdd` adds a duplicate sibling. Do
 not switch the setting on a tree with data; or, when switching it off, update the empty values of
@@ -257,7 +261,7 @@ err = visible.Descendants(ctx, 0, 1, "user1", &all, ct.Unfiltered()) // hidden t
   expression, a `gorm.Valuer` or a `sql.NamedArg` is rejected with an error before any query
   runs; the check is by type, so a nil pointer of a `gorm.Valuer` type is rejected too. A tree
   read binds the values of `In` up to three times, so a very long list reaches the database's
-  limit of bound values sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per statement).
+  limit of bound values sooner there (SQLite 32766, PostgreSQL and MariaDB 65535 per statement).
 * A column is named by its column name or its Go field name; a column name wins. A column can be
   named when the field gorm maps it to has a column name and is not both read-only and excluded
   from migration; the computed parent cannot be named. A Go field name that fields of several
@@ -365,7 +369,7 @@ err = db.Table("(?) AS cp", pairs).
 Your own rows per subtree are counted the same way, by joining your join table on
 `descendant_id`. Index the node column of the join table. A many2many join table created by gorm
 has only its composite primary key, led by the owner's column, so on SQLite and PostgreSQL the node
-column has no index (MySQL adds one for the foreign key). Without it a count per subtree scans the
+column has no index (MariaDB adds one for the foreign key). Without it a count per subtree scans the
 join table once per closure row.
 
 ```GO
@@ -395,7 +399,7 @@ err = db.Table("(?) AS cp", pairs).
   the nodes in between, and `PerNode` does not apply. The virtual root always matches.
 * Ancestor 0 in `SubtreeIDs` stands for every node of the tenant. An empty slice is
   `ErrNoAncestors` in `SubtreeIDs`, and a nil subquery is in `SubtreeIDsOf`.
-* `SubtreeIDs` binds one value per ancestor (SQLite 32766, PostgreSQL and MySQL 65535 per
+* `SubtreeIDs` binds one value per ancestor (SQLite 32766, PostgreSQL and MariaDB 65535 per
   statement). On PostgreSQL gorm also rewrites the placeholders of an embedded subquery one by one,
   which gets slow beyond a few thousand values: about 0.1 s for 10,000 and 1 s for 30,000 per
   statement. For a large or computed set of ancestors use `SubtreeIDsOf`, which takes them as a
@@ -408,10 +412,11 @@ err = db.Table("(?) AS cp", pairs).
   `IncludeVirtualRoot()`, and it reads your tenant's closure rows through the closure table's index
   on the tenant; for a tenant that holds most of the closure table the databases read the whole
   table instead. `ForAncestors` limits the read to the closure rows of those ancestors.
-* MySQL, error 1093: with a filter the subquery reads the node table, and MySQL rejects it inside an
-  `UPDATE` or `DELETE` on the node table. Wrap it in a derived table:
+* With a filter the subquery reads the node table. MariaDB, PostgreSQL and SQLite accept it inside an
+  `UPDATE` or `DELETE` on the node table; MySQL (accepted, untested) rejects it with error 1093. To
+  keep such a statement portable, wrap it in a derived table:
   `db.Table("tags").Where("node_id IN (SELECT descendant_id FROM (?) AS sub)", sub).Update("name", "renamed")`.
-* MySQL, error 1235: a `LIMIT` is not allowed inside an `IN` subquery. Page in the outer query.
+* MariaDB, error 1235: a `LIMIT` is not allowed inside an `IN` subquery. Page in the outer query.
 
 ### Sort order
 
@@ -483,7 +488,7 @@ err := db.Transaction(func(tx *gorm.DB) error {
   blocks: forever, or until a lock or busy timeout fails it.
 * A failed tree write rolls back only the tree's own work (to a savepoint the tree takes) and leaves
   your transaction usable; you decide whether to commit or roll back. Roll your transaction back
-  instead after a MySQL deadlock (below); when `errors.Is(err, ct.ErrSavepointRollback)` is
+  instead after a MariaDB deadlock (below); when `errors.Is(err, ct.ErrSavepointRollback)` is
   true: the tree could not roll back to its savepoint, for example because the context ended during
   a statement and the driver dropped the connection, which loses your transaction's earlier work
   too, or because the rollback, which runs even after your context has ended, took more than 30
@@ -493,31 +498,40 @@ err := db.Transaction(func(tx *gorm.DB) error {
   first reads of `DeleteTenant` and `RenormalizeAll`), are outside the savepoint: their failure
   affects your transaction like a failed statement of your own, and never returns
   `ErrSavepointRollback`.
-* MySQL: a deadlock error (error 1213) means the server has already rolled back your whole
+* MariaDB: a deadlock error (error 1213) means the server has already rolled back your whole
   transaction, so none of it is written. The tree does not repeat a write inside your transaction,
-  as it does in its own: roll back and redo the whole transaction. Never keep using the handle: it
-  is no longer in a transaction, so each following statement is committed at once, by itself, and
-  your final rollback undoes none of them. The tree's error contains the driver's error, so you can
+  as it does in its own: roll back and redo the whole transaction. Never keep using the handle: the
+  statements that follow on it are not part of the transaction you began: it is no longer in a
+  transaction, so each is committed at once, by itself, and your final rollback undoes none of
+  them. The tree's error contains the driver's error, so you can
   test for it with `errors.As` (for `github.com/go-sql-driver/mysql`, a `*mysql.MySQLError` with
   `Number` 1213). Inside a tree write the deadlock error also matches `ErrSavepointRollback`,
   because the savepoint went with the transaction: test for the deadlock first.
-* MySQL: tree writes of different tenants can deadlock at any isolation level, and any tree write
-  of your transaction, an `Add` too, can be the one that loses (see "Concurrent writes on MySQL"
+* MariaDB: tree writes of different tenants can deadlock at any isolation level, and any tree write
+  of your transaction, an `Add` too, can be the one that loses (see "Concurrent writes on MariaDB"
   below). At the default isolation level (REPEATABLE READ) your transaction keeps the locks of the
   closure rows its tree writes scanned until it ends, so writes of other tenants wait on it more.
-  Keep such transactions short, or run them at READ COMMITTED: in the measurements below that cut
-  the deadlocks a lot but did not stop them. A server with `binlog_format=STATEMENT` refuses that
+  Keep such transactions short, or run them at READ COMMITTED: in the measurements below that
+  removed the deadlocks that remained. A server with `binlog_format=STATEMENT` refuses that
   level (see below).
+* MariaDB at REPEATABLE READ: with `innodb_snapshot_isolation=ON`, MariaDB's default, a tree write
+  fails with error 1020 ("Record has changed since last read") when it
+  would change a row that another transaction changed after your transaction's snapshot. Before
+  `BuildFromParents` forced its indexes it did so while other tenants' writes ran; in the
+  measurements below it no longer did, but it remains possible. The tree does not repeat it: roll
+  back and redo the transaction, as after a deadlock, or run it at READ COMMITTED, where error 1020
+  does not occur.
 * After a successful tree write the tenant lock is held until your transaction ends, so do not hold
   the transaction across slow work. After a failed tree write the lock may already be released;
   `LockTenant` holds it for the whole transaction.
 * A transaction that writes to several trees or tenants must take their locks in one fixed order,
   everywhere, to avoid deadlocks. `LockTenant` lets it take them all up front.
-* Call `Migrate` on the base tree, not on a copy bound to a transaction: it runs DDL, and MySQL
+* Call `Migrate` on the base tree, not on a copy bound to a transaction: it runs DDL, and MariaDB
   commits the transaction implicitly on DDL.
 
-On MySQL, redo a transaction that a deadlock rolled back in a loop. `db.Transaction` rolls the
-transaction back when the function returns an error, and each attempt starts again from a new item:
+On MariaDB, redo a transaction that a deadlock (1213) or, at REPEATABLE READ, a changed record
+(1020) failed, in a loop. `db.Transaction` rolls the transaction back when the function returns an
+error, and each attempt starts again from a new item:
 
 ```GO
 func addWithAudit(ctx context.Context, db *gorm.DB, tree *ct.Tree) error {
@@ -529,8 +543,9 @@ func addWithAudit(ctx context.Context, db *gorm.DB, tree *ct.Tree) error {
             }
             return tx.Create(&AuditEntry{Action: "add tag", NodeID: tag.Id()}).Error
         })
-        var myErr *mysql.MySQLError // github.com/go-sql-driver/mysql
-        if err == nil || !errors.As(err, &myErr) || myErr.Number != 1213 || attempt == 5 {
+        var myErr *mysql.MySQLError // github.com/go-sql-driver/mysql, the driver of MariaDB too
+        redo := errors.As(err, &myErr) && (myErr.Number == 1213 || myErr.Number == 1020)
+        if err == nil || !redo || attempt == 5 {
             return err
         }
     }
@@ -544,8 +559,8 @@ they see depends on the database and the isolation level of your transaction:
 |---|---|---|
 | PostgreSQL | READ COMMITTED (the default) | Yes. |
 | PostgreSQL | REPEATABLE READ | No, and `LockTenant` does not help: the snapshot is fixed at the transaction's first statement, the lock statement itself, before it waits for the lock. |
-| MySQL | REPEATABLE READ (the default) | Only when `LockTenant` is the first statement: the snapshot is fixed at the first plain read, so a read before the lock makes it stale. |
-| MySQL | READ COMMITTED | Yes. |
+| MariaDB | REPEATABLE READ (the default) | Only when `LockTenant` is the first statement: the snapshot is fixed at the first plain read, so a read before the lock makes it stale. With `innodb_snapshot_isolation=ON` (the default) a write can fail with error 1020 instead (see above). |
+| MariaDB | READ COMMITTED | Yes. |
 | SQLite | any | Yes, with immediate write transactions and a busy timeout. |
 
 On SQLite open write transactions as immediate and set a busy timeout (DSN options `_txlock=immediate`
@@ -553,22 +568,24 @@ and `_busy_timeout=5000` for `gorm.io/driver/sqlite`, `_txlock=immediate` and
 `_pragma=busy_timeout(5000)` for `github.com/glebarez/sqlite`). A deferred transaction that reads
 first and then writes fails with a busy error that the timeout does not retry.
 
-On PostgreSQL and MySQL the transactions the library opens itself (any write on a tree not bound to
-a transaction) run at READ COMMITTED, whatever the connection's default level is. A MySQL server
-with binary logging on and `binlog_format=STATEMENT` refuses InnoDB writes at READ COMMITTED (error
-1665), so that setup is not supported; `ROW`, the default, and `MIXED` work.
+On PostgreSQL and MariaDB the transactions the library opens itself (any write on a tree not bound
+to a transaction) run at READ COMMITTED, whatever the connection's default level is. A MariaDB
+server with binary logging on and `binlog_format=STATEMENT` refuses InnoDB writes at READ COMMITTED
+(error 1665), so that setup is not supported; `MIXED`, the default, and `ROW` work.
 
-#### Concurrent writes on MySQL
+#### Concurrent writes on MariaDB
 
-On MySQL a write that deletes closure rows, such as `DeleteRecurse`, `DeleteRecurseMany`,
-`DeleteTenant`, `BuildFromParents` with `Rebuild()`, or an `Update` that moves a node, locks the
-closure rows it scans and waits for a row that another transaction holds, so writes of different
-tenants can deadlock (error 1213). The closure table's index on the tenant keeps most of these scans
-within the tenant's rows, but not all. From MySQL 8.0.20 the tenant-wide deletes of `DeleteTenant`
-and `BuildFromParents` always use it (an index hint; older servers ignore the hint); other deletes
-planned on stale statistics, as on just-loaded tables, and before 8.0.20 the tenant-wide delete of a
-tenant that holds a large share of the closure table, still scan rows of other tenants. A deadlock
-never leaves the tree half-written: MySQL rolls back the whole transaction that loses it.
+On MariaDB a write that deletes or rewrites rows of many nodes, such as `DeleteRecurse`,
+`DeleteRecurseMany`, `DeleteTenant`, `BuildFromParents`, or an `Update` that moves a node, locks the
+rows it scans and waits for a row that another transaction holds, so writes of different tenants
+can deadlock (error 1213). The tenant indexes keep these scans within the tenant's rows. The
+tenant-wide statements force them: the closure-row delete of `DeleteTenant` and `BuildFromParents`
+forces the closure table's tenant index, and the sort-order update of `BuildFromParents` the node
+table's `(tenant, node_id)` index (`FORCE INDEX`). Without that MariaDB scans the whole table for a
+tenant that holds a large share of it, with or without up-to-date statistics, and locks every other
+tenant's rows. Both statements fail, with an error that says to run `Migrate`, until `Migrate` has
+added the indexes. A deadlock never leaves the tree half-written: MariaDB rolls back the whole
+transaction that loses it.
 
 **On a tree not bound to a transaction** the library opens the transaction itself, and when it
 loses a deadlock runs it again: up to 5 attempts in all, with a random pause before each repeat of
@@ -579,7 +596,7 @@ that deadlock error and `ctx.Err()`. A lock wait timeout (error 1205) is not rep
 and SQLite make one attempt.
 
 Because a write can run more than once, your model's gorm hooks (`BeforeCreate`, `AfterCreate`, ...)
-run once per attempt, also in attempts that MySQL then rolled back: keep them free of effects
+run once per attempt, also in attempts that MariaDB then rolled back: keep them free of effects
 outside the database, or let those effects tolerate repeats. `Add` and `GetOrAdd` start each attempt
 from a fresh shallow copy of your item, so a value a hook sets on the copy in a failed attempt
 reaches neither the next attempt nor your item. From the attempt that succeeds, an item passed as a
@@ -594,32 +611,34 @@ writes.
 transaction, and you roll it back and redo it (see "Using closure-tree inside your own
 transaction").
 
-Measured on MySQL 8.0: two or three writers at the same time, each on its own tenant of one small
-tree, in 22 combinations of `Add`, `DeleteTenant`, `DeleteRecurse`, an `Update` moving a subtree,
-`BuildFromParents(Rebuild())` and a `DeleteRecurseMany` of 600 ids followed by their import; ten runs
-of 30 calls per writer, 13,500 calls per row. "Just loaded" tables had no up-to-date statistics, as
-after a bulk load; "analysed" ones had them, after `ANALYZE TABLE`.
+Measured on MariaDB 11.8: two or three writers at the same time, each on its own tenant of one
+small tree, in 22 combinations of `Add`, `DeleteTenant`, `DeleteRecurse`, an `Update` moving a
+subtree, `BuildFromParents(Rebuild())` and a `DeleteRecurseMany` of 600 ids followed by their
+import; ten runs of 30 calls per writer, 13,500 calls per row. "Just loaded" tables had no
+up-to-date statistics, as after a bulk load; "analysed" ones had them, after `ANALYZE TABLE`.
 
 | Transactions | Tables | Calls that failed with a deadlock |
 |---|---|---|
-| the library's own | just loaded | 0 (51 calls needed a second attempt) |
+| the library's own | just loaded | 0 (no call needed a second attempt) |
 | the library's own | analysed | 0 (no call needed a second attempt) |
-| yours (`WithTx`), REPEATABLE READ | just loaded | 608 |
-| yours (`WithTx`), REPEATABLE READ | analysed | 239 |
-| yours (`WithTx`), READ COMMITTED | just loaded | 78 |
+| yours (`WithTx`), REPEATABLE READ | just loaded | 5 |
+| yours (`WithTx`), REPEATABLE READ | analysed | 12 |
+| yours (`WithTx`), READ COMMITTED | just loaded | 0 |
 | yours (`WithTx`), READ COMMITTED | analysed | 0 |
 
-With 40 more tenants in the tables, the library's own transactions had no failed call either (6,000
-calls per row; 53 needed a second attempt just loaded, none analysed), and no call anywhere needed a
-third attempt. In your transactions the deadlocks came only in combinations with the
-`DeleteRecurseMany` writer, and the call that lost was sometimes an `Add`. Before the tenant index,
-the hint and the repeats, the library's own transactions lost 490 calls just loaded and 395
-analysed, and yours at REPEATABLE READ 3,541 just loaded.
+With 40 more tenants in the tables, the library's own transactions had no failed call and no
+repeated attempt either (6,000 calls per row). No call failed with a lock wait timeout (1205) or
+with error 1020. In your transactions the deadlocks came only between two writers that each ran a
+`DeleteRecurseMany` of 600 ids and then imported them with `BuildFromParents`: the two imports'
+inserts into the closure table waited on each other's gap locks in its tenant index, which READ
+COMMITTED does not take. Without the two forced indexes the library's own transactions needed 189
+repeated attempts just loaded and 185 analysed (none failed), yours at REPEATABLE READ failed 2,581
+calls just loaded (246 deadlocks, the rest error 1020) and yours at READ COMMITTED 130.
 
-InnoDB locks the rows a delete scans at every isolation level, so the library makes no promise that
-writes of different tenants never deadlock on MySQL, nor that 5 attempts are always enough. Update
-the statistics after a bulk load (see "Adopting an existing table"), keep your transactions short,
-and redo the ones a deadlock rolled back.
+InnoDB locks the rows a statement scans at every isolation level, so the library makes no promise
+that writes of different tenants never deadlock on MariaDB, nor that 5 attempts are always enough.
+Update the statistics after a bulk load (see "Adopting an existing table"), keep your transactions
+short, run them at READ COMMITTED, and redo the ones a deadlock rolled back.
 
 ### Adopting an existing table
 
@@ -662,9 +681,9 @@ err = tree.BuildFromParents(ctx, "user1", links)
   under it return `ErrParentNotFound`, with a message that names `BuildFromParents`, and write
   nothing.
 * It runs under the tenant lock. Through `WithTx` it runs inside your transaction, so a migration
-  can build the tree and drop its old parent column atomically, except on MySQL, where DDL commits
+  can build the tree and drop its old parent column atomically, except on MariaDB, where DDL commits
   the transaction implicitly: drop the column there after the commit.
-* MySQL: the node table has rows before the first `Migrate`, so `Migrate` does not give the tenant
+* MariaDB: the node table has rows before the first `Migrate`, so `Migrate` does not give the tenant
   columns the exact collation (see "Tenants"): its own collation step never changes the tenant
   collation of a tree with rows. gorm's `AutoMigrate`, which `Migrate` runs first, can: it
   modifies the tenant column of the node table or the closure table when its type, size, default
@@ -678,10 +697,10 @@ err = tree.BuildFromParents(ctx, "user1", links)
   with a duplicate key. Advance the sequence after copying:
   `SELECT setval(pg_get_serial_sequence('categories', 'node_id'), (SELECT MAX(node_id) FROM categories))`.
 * After a bulk build or load, update the table statistics: `ANALYZE` on PostgreSQL
-  (`ANALYZE categories; ANALYZE closure_tree_rel_categories;`) and `ANALYZE TABLE` on MySQL
+  (`ANALYZE categories; ANALYZE closure_tree_rel_categories;`) and `ANALYZE TABLE` on MariaDB
   (`ANALYZE TABLE categories, closure_tree_rel_categories;`), on the tree's tables and on your own
   tables that join them. Freshly loaded tables have no statistics, or stale ones, and the planner
-  then chooses slow plans; on MySQL `GetLeaves` and joins on the closure table can be planned very
+  then chooses slow plans; on MariaDB `GetLeaves` and joins on the closure table can be planned very
   badly.
 
 ---
@@ -694,18 +713,19 @@ this is a quick overview of the exposed methods, check the actual signature/doc 
 
 **Tenants**
 Tenants are compared exactly on every database: "Acme", "acme", "acmé" and "acme " are four
-tenants. On MySQL, `Migrate` sets the collation `utf8mb4_0900_bin` on the tenant column of the
+tenants. On MariaDB, `Migrate` sets the collation `utf8mb4_nopad_bin` on the tenant column of the
 tree's four tables while the tree holds no rows. A tree with rows keeps its collation unless gorm's
-`AutoMigrate` modifies its tenant column (see "Adopting an existing table"); under
-MySQL's default, `utf8mb4_0900_ai_ci`, tenants that differ only in case or accents are one tenant,
-and `DeleteTenant(ctx, "acme")` deletes all of them. To change it, stop writes to the tree, store
-one spelling per tenant, then run the statement below on each of the four tables, with the column's
-current type in place of `varchar(191)`. The four tables are the node table (`NodeTableName()`,
+`AutoMigrate` modifies its tenant column (see "Adopting an existing table"); under MariaDB's
+default, `utf8mb4_uca1400_ai_ci`, tenants that differ only in case or accents are one tenant, and
+`DeleteTenant(ctx, "acme")` deletes all of them. To change it, stop writes to
+the tree, store one spelling per tenant, then run the statement below on each of the four tables,
+with the column's current type in place of `varchar(191)` (on MySQL, with `utf8mb4_0900_bin`). The
+four tables are the node table (`NodeTableName()`,
 say `categories`) and, named after it, `closure_tree_rel_categories` (`ClosureTableName()`),
 `closure_tree_meta_categories` and `closure_tree_lock_categories`:
 
 ```sql
-ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;
+ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin NOT NULL;
 ```
 
 Each rebuilds its table. Resume writes only after all four: until then the tables compare tenants
@@ -722,7 +742,7 @@ model that embeds `Leaf` keeps the collation of your table; it is nullable, so f
 * `ClosureTableName() string` — Return the table name of the closure tree relationship
 
 **Write operations**
-On MySQL, writes of different tenants can deadlock. When the library opens the transaction itself, on a tree not bound with `WithTx` or bound to a handle that is not in a transaction, it repeats a write that lost a deadlock, up to 5 attempts, so your model's gorm hooks run once per attempt; after the fifth the call returns the deadlock error (error 1213). For a write through `WithTx` inside your transaction the server has rolled back your whole transaction: roll it back and redo it (see "Concurrent writes on MySQL").
+On MariaDB, writes of different tenants can deadlock. When the library opens the transaction itself, on a tree not bound with `WithTx` or bound to a handle that is not in a transaction, it repeats a write that lost a deadlock, up to 5 attempts, so your model's gorm hooks run once per attempt; after the fifth the call returns the deadlock error (error 1213). For a write through `WithTx` inside your transaction the server has rolled back your whole transaction: roll it back and redo it (see "Concurrent writes on MariaDB").
 * `Add(ctx, item, parentID, afterNodeID, tenant, opts ...AddOption)` — Add a new node; it is placed first among its siblings unless `afterNodeID` names a sibling or the `PlaceLast()` option is given
 * `GetOrAdd(ctx, item, parentID, tenant, matchFields, opts ...AddOption) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths; takes the same placement options as `Add`
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect; a node that does not exist returns `ErrNodeNotFound` and nothing is written
@@ -742,6 +762,10 @@ Every read below except `IsDescendant` and `IsChildOf` takes trailing `opts ...R
 * `DescendantIds(ctx, parent, maxDepth, tenant, opts ...ReadOption) ([]uint, error)` — Same, IDs only
 * `TreeDescendants(ctx, parent, maxDepth, tenant, items, opts ...ReadOption)` — Nested tree via `Children []*T` field
 * `TreeDescendantsIds(ctx, parent, maxDepth, tenant, opts ...ReadOption) ([]*TreeNode, error)` — Nested `TreeNode` structs
+
+  Both use a recursive CTE. MariaDB stops one after `max_recursive_iterations` steps (default 1000)
+  with only a warning, so on MariaDB these reads lift that limit for their own statement (`SET
+  STATEMENT ... FOR`) and return the whole subtree; a lower limit you set does not apply to them.
 * `Ancestors(ctx, nodeID, tenant, items, opts ...ReadOption) error` — Ancestors of a node, root first, into `[]T` or `[]*T`
 * `AncestorIDs(ctx, nodeID, tenant, opts ...ReadOption) ([]uint, error)` — Same, IDs only
 * `ChildCounts(ctx, ids, tenant, opts ...ReadOption) (map[uint]int64, error)` — Number of direct children per id; ids without counted children are absent

@@ -30,7 +30,7 @@ import (
 // receiver): then its Value is matched. A byte-slice field that is not a driver.Valuer and that Add
 // stores as NULL matches as IS NULL too: a nil one, also behind a pointer, and an empty one of a
 // named type such as json.RawMessage that is not behind a pointer, which gorm writes as NULL; an
-// empty []byte matches empty bytes. On MySQL, a pointer to a nil json.RawMessage matches what the
+// empty []byte matches empty bytes. On MariaDB, a pointer to a nil json.RawMessage matches what the
 // driver stores for it: empty bytes with the driver's interpolateParams=true, NULL without. A node
 // added with one setting is therefore not found with the other, and GetOrAdd adds a duplicate
 // sibling. Do not switch the setting on a tree with data; or, when switching it off, update the
@@ -108,7 +108,7 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // without a column (gorm:"-") holds its zero value.
 //
 // As in Add, the find and the create work on a shallow copy of item, a fresh one for each attempt
-// when MySQL makes the library repeat the write after a deadlock (see the concurrency note on
+// when MariaDB makes the library repeat the write after a deadlock (see the concurrency note on
 // Tree): the model's gorm hooks run once per attempt, and a hook that writes through a pointer,
 // slice or map field changes what item points to, in failed attempts too.
 //
@@ -188,7 +188,7 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // Each field is matched by its ACTUAL value — including zero values (false/0/"") — so a key that
 // is legitimately zero is honored rather than silently dropped. A value that eqValue reports as
 // NULL matches as IS NULL, and so does a byte slice that Add stores as NULL (addedAsNull): the
-// match compares with what Add stores, where Eq binds the value it is given. On MySQL such a byte
+// match compares with what Add stores, where Eq binds the value it is given. On MariaDB such a byte
 // slice behind a pointer is bound as that pointer with the null-safe <=>, because gorm leaves it to
 // the driver, whose interpolateParams renders a nil json.RawMessage as an empty string. Every other
 // value is bound through oneValue, as Eq binds it. The value gorm reads from the field (for a field
@@ -244,8 +244,8 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 		if err != nil {
 			return "", nil, fmt.Errorf("match field %q: %w", name, err)
 		}
-		if !null && addedAsNull(raw, val) && ct.dialect == dialectMySQL && reflect.ValueOf(raw).Kind() == reflect.Pointer {
-			// gorm passes the pointer to the MySQL driver, which sends a nil json.RawMessage
+		if !null && addedAsNull(raw, val) && ct.dialect == dialectMariaDB && reflect.ValueOf(raw).Kind() == reflect.Pointer {
+			// gorm passes the pointer to the driver (go-sql-driver/mysql), which sends a nil json.RawMessage
 			// as NULL but renders it as '' with interpolateParams: bind the same pointer with
 			// the null-safe <=>, so the match compares with what the driver stored
 			conds = append(conds, col+" <=> ?")

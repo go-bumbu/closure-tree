@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-bumbu/testdbs"
@@ -18,7 +19,7 @@ func TestDialectFromName(t *testing.T) {
 		want dialect
 	}{
 		{"sqlite", dialectSQLite},
-		{"mysql", dialectMySQL},
+		{"mysql", dialectMariaDB},
 		{"postgres", dialectPostgres},
 		{"someOtherDriver", dialectPostgres}, // unknown falls back to the FOR UPDATE-capable default
 	}
@@ -29,40 +30,42 @@ func TestDialectFromName(t *testing.T) {
 	}
 }
 
-// TestMySQLVersionOK pins which server versions New accepts on MySQL: 8.0.17 and later, the first
-// release with the collation utf8mb4_0900_bin, with any suffix after the patch number.
-func TestMySQLVersionOK(t *testing.T) {
+// TestCheckServerVersion pins which server versions New accepts on gorm's "mysql" driver: MariaDB
+// 11.8 and later, and MySQL (accepted, untested) 8.0.17 and later, the first release with the
+// collation utf8mb4_0900_bin, with any suffix after the patch number.
+func TestCheckServerVersion(t *testing.T) {
 	tests := []struct {
 		version string
 		want    bool
 	}{
+		{"10.11.6-MariaDB", false},
+		{"11.3.2-MariaDB", false},
+		{"11.4.13-MariaDB-ubu2404", false},
+		{"11.7.2-MariaDB-ubu2404", false},
+		{"11.8.0-MariaDB", true},
+		{"11.8.9-MariaDB-ubu2404", true},
+		{"12.0.2-MariaDB-log", true},
 		{"5.7.44", false},
-		{"8.0.0", false},
 		{"8.0.16", false},
 		{"8.0.11-TiDB-v7.5.0", false},
 		{"8.0.17", true},
-		{"8.0.17-log", true},
 		{"8.0.45-0ubuntu0.22.04.1", true},
-		{"8.1.0", true},
-		{"8.4.0", true},
 		{"9.1.0", true},
-		{"10.11.6-MariaDB", true},
 		{"8.0", false},
-		{"8", false},
 		{"", false},
 		{"unknown", false},
 	}
 	for _, tt := range tests {
-		if got := mysqlVersionOK(tt.version); got != tt.want {
-			t.Errorf("mysqlVersionOK(%q) = %v, want %v", tt.version, got, tt.want)
+		if err := checkServerVersion(tt.version); (err == nil) != tt.want {
+			t.Errorf("checkServerVersion(%q) = %v, want accepted %v", tt.version, err, tt.want)
 		}
 	}
 }
 
 // TestTxOptions pins the options the library passes to the transactions it opens itself: READ
-// COMMITTED on PostgreSQL and MySQL, the connection's default on SQLite.
+// COMMITTED on PostgreSQL and MariaDB, the connection's default on SQLite.
 func TestTxOptions(t *testing.T) {
-	for _, d := range []dialect{dialectPostgres, dialectMySQL} {
+	for _, d := range []dialect{dialectPostgres, dialectMariaDB} {
 		got := d.txOptions()
 		if len(got) != 1 || got[0].Isolation != sql.LevelReadCommitted {
 			t.Errorf("dialect %d: want one option at READ COMMITTED, got %+v", d, got)
@@ -73,10 +76,10 @@ func TestTxOptions(t *testing.T) {
 	}
 }
 
-// TestIsMySQLDeadlock pins which errors the MySQL retry repeats: a deadlock (error 1213), also
+// TestIsMariaDBDeadlock pins which errors the MariaDB retry repeats: a deadlock (error 1213), also
 // wrapped or joined, and no other error: not a lock wait timeout (error 1205), and not an error
 // whose text only quotes "Error 1213" after its start.
-func TestIsMySQLDeadlock(t *testing.T) {
+func TestIsMariaDBDeadlock(t *testing.T) {
 	deadlock := &mysql.MySQLError{Number: 1213, SQLState: [5]byte{'4', '0', '0', '0', '1'},
 		Message: "Deadlock found when trying to get lock; try restarting transaction"}
 	duplicate := &mysql.MySQLError{Number: 1062, SQLState: [5]byte{'2', '3', '0', '0', '0'},
@@ -105,57 +108,27 @@ func TestIsMySQLDeadlock(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isMySQLDeadlock(tt.err); got != tt.want {
-				t.Errorf("isMySQLDeadlock(%v) = %v, want %v", tt.err, got, tt.want)
+			if got := isMariaDBDeadlock(tt.err); got != tt.want {
+				t.Errorf("isMariaDBDeadlock(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestRetryPolicyOfDialect pins which transactions writeTx repeats: on MySQL up to 5 attempts in
+// TestRetryPolicyOfDialect pins which transactions writeTx repeats: on MariaDB up to 5 attempts in
 // all, after a deadlock only, with the jittered pause; on PostgreSQL and SQLite one attempt.
 func TestRetryPolicyOfDialect(t *testing.T) {
-	p := dialectMySQL.retryPolicy()
+	p := dialectMariaDB.retryPolicy()
 	if p.attempts != 5 || p.retryable == nil || p.pause == nil {
-		t.Fatalf("mysql: want 5 attempts with a retryable test and a pause, got %+v", p)
+		t.Fatalf("mariadb: want 5 attempts with a retryable test and a pause, got %+v", p)
 	}
 	if !p.retryable(&mysql.MySQLError{Number: 1213}) || p.retryable(&mysql.MySQLError{Number: 1205}) {
-		t.Error("mysql: want a deadlock retried and a lock wait timeout not")
+		t.Error("mariadb: want a deadlock retried and a lock wait timeout not")
 	}
 	for _, d := range []dialect{dialectPostgres, dialectSQLite} {
 		if got := d.retryPolicy(); got.attempts > 1 {
 			t.Errorf("dialect %d: want one attempt, got %d", d, got.attempts)
 		}
-	}
-}
-
-// TestTenantDeleteSQL pins the statement that deletes a tenant's rows: on MySQL the closure table's
-// carries the hint for the tenant index; the Tree's other tables and the other databases get the
-// plain statement.
-func TestTenantDeleteSQL(t *testing.T) {
-	const (
-		plainRel = "DELETE FROM rel WHERE tenant = ?"
-		hinted   = "DELETE /*+ INDEX(rel idx_rel_tenant) */ FROM rel WHERE tenant = ?"
-	)
-	tests := []struct {
-		name string
-		d    dialect
-		tbl  string
-		want string
-	}{
-		{"mysqlClosure", dialectMySQL, "rel", hinted},
-		{"mysqlNodes", dialectMySQL, "nodes", "DELETE FROM nodes WHERE tenant = ?"},
-		{"mysqlMeta", dialectMySQL, "meta", "DELETE FROM meta WHERE tenant = ?"},
-		{"postgresClosure", dialectPostgres, "rel", plainRel},
-		{"sqliteClosure", dialectSQLite, "rel", plainRel},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ct := &Tree{dialect: tt.d, nodesTbl: "nodes", relationsTbl: "rel", metaTbl: "meta", tenantIdx: "idx_rel_tenant"}
-			if got := ct.tenantDeleteSQL(tt.tbl); got != tt.want {
-				t.Errorf("want %q, got %q", tt.want, got)
-			}
-		})
 	}
 }
 
@@ -198,5 +171,50 @@ func TestUpsertMetaHalvingsKeepsLower(t *testing.T) {
 				t.Errorf("parent 0 changed by the writes for parent 7: %v", got)
 			}
 		})
+	}
+}
+
+// TestTenantDeleteSQL pins the statement that deletes a tenant's rows: on MariaDB the closure
+// table's forces the tenant index in the multi-table form of DELETE; the Tree's other tables and
+// the other databases get the plain statement.
+func TestTenantDeleteSQL(t *testing.T) {
+	const plainRel = "DELETE FROM rel WHERE tenant = ?"
+	tests := []struct {
+		name string
+		d    dialect
+		tbl  string
+		want string
+	}{
+		{"mariadbClosure", dialectMariaDB, "rel", "DELETE rel FROM rel FORCE INDEX (idx_rel_tenant) WHERE tenant = ?"},
+		{"mariadbNodes", dialectMariaDB, "nodes", "DELETE FROM nodes WHERE tenant = ?"},
+		{"mariadbMeta", dialectMariaDB, "meta", "DELETE FROM meta WHERE tenant = ?"},
+		{"postgresClosure", dialectPostgres, "rel", plainRel},
+		{"sqliteClosure", dialectSQLite, "rel", plainRel},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ct := &Tree{dialect: tt.d, nodesTbl: "nodes", relationsTbl: "rel", metaTbl: "meta", tenantIdx: "idx_rel_tenant"}
+			if got := ct.tenantDeleteSQL(tt.tbl); got != tt.want {
+				t.Errorf("want %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+// TestTenantIndexMissing pins which errors of a tenant delete get the advice to run Migrate:
+// MariaDB's error 1176 for a missing index, also wrapped, and no other.
+func TestTenantIndexMissing(t *testing.T) {
+	ct := &Tree{relationsTbl: "rel", tenantIdx: "idx_rel_tenant"}
+	noKey := &mysql.MySQLError{Number: 1176, SQLState: [5]byte{'4', '2', '0', '0', '0'},
+		Message: "Key 'idx_rel_tenant' doesn't exist in table 'rel'"}
+	for _, err := range []error{noKey, fmt.Errorf("exec: %w", noKey)} {
+		got := ct.tenantIndexMissing(err)
+		if !errors.Is(got, noKey) || !strings.Contains(got.Error(), "run Migrate") {
+			t.Errorf("%v: want the advice to run Migrate around the error, got %v", err, got)
+		}
+	}
+	other := &mysql.MySQLError{Number: 1213, Message: "Deadlock found"}
+	if got := ct.tenantIndexMissing(other); got != error(other) {
+		t.Errorf("want a deadlock returned as it is, got %v", got)
 	}
 }

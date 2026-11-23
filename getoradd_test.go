@@ -541,7 +541,7 @@ func TestGetOrAddErrors(t *testing.T) {
 // The per-tenant write lock serializes the find+add transactions, so exactly one goroutine
 // creates the child and every other finds it: exactly one child node exists and exactly one
 // created=true result is returned. (SQLite serializes writers on its own; the lock closes the
-// race on MySQL/Postgres.)
+// race on MariaDB/Postgres.)
 func TestGetOrAddConcurrent(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -860,7 +860,7 @@ type idItem interface{ Id() uint }
 // A byte-slice match field matches what Add stores, so GetOrAdd stays idempotent and FindChild
 // finds the child: NULL for a nil one, also behind a pointer, and for an empty one of a named type
 // that is not behind a pointer, which gorm writes as NULL; empty bytes for an empty []byte and for
-// an empty one behind a pointer; the bytes for any other. On MySQL the cases run also with the
+// an empty one behind a pointer; the bytes for any other. On MariaDB the cases run also with the
 // driver's interpolateParams, which stores a pointer to a nil json.RawMessage as empty bytes.
 func TestMatchByteSlice(t *testing.T) {
 	cases := []struct {
@@ -889,7 +889,7 @@ func TestMatchByteSlice(t *testing.T) {
 	}
 	for _, db := range testdbs.DBs() {
 		conns := []string{db.DbType()}
-		if db.DbType() == testdbs.DBTypeMysql {
+		if db.DbType() == testdbs.DBTypeMariadb {
 			conns = append(conns, db.DbType()+"_interpolateParams")
 		}
 		for _, conn := range conns {
@@ -897,7 +897,7 @@ func TestMatchByteSlice(t *testing.T) {
 				t.Run(conn+"/"+c.name, func(t *testing.T) {
 					gdb := connAndClose(t, db)
 					if conn != db.DbType() {
-						gdb = interpolatedMySQL(t, gdb)
+						gdb = interpolatedMariaDB(t, gdb)
 					}
 					dropTreeTables(gdb, c.model)
 					ct, err := newTestTree(gdb, c.model)
@@ -931,10 +931,10 @@ func TestMatchByteSlice(t *testing.T) {
 	}
 }
 
-// interpolatedMySQL opens another connection to the MySQL database of gdb with the driver's
+// interpolatedMariaDB opens another connection to the MariaDB database of gdb with the driver's
 // interpolateParams, which renders the bound values into the statement text instead of sending
 // them apart, and closes it when the test ends.
-func interpolatedMySQL(t *testing.T, gdb *gorm.DB) *gorm.DB {
+func interpolatedMariaDB(t *testing.T, gdb *gorm.DB) *gorm.DB {
 	t.Helper()
 	dsn := gdb.Dialector.(*mysql.Dialector).DSN + "&interpolateParams=true"
 	idb, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})

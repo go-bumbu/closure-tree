@@ -40,34 +40,43 @@ var ErrSavepointRollback = errors.New("the transaction can no longer be used; ro
 // and RenormalizeAll), fail like a statement of the caller's own, without it. So the caller should
 // also roll the transaction back after an error from a call whose context has ended
 // (ctx.Err() != nil): the driver may have dropped the connection. A successful write keeps the
-// tenant lock until the outer transaction ends (PostgreSQL and MySQL).
+// tenant lock until the outer transaction ends (PostgreSQL and MariaDB).
 //
-// A further exception is a deadlock on MySQL (error 1213): the server has already rolled back the
+// A further exception is a deadlock on MariaDB (error 1213): the server has already rolled back the
 // whole outer transaction, so nothing of it is written, and the caller must roll it back and redo
 // it from the start. The library does not repeat a write inside a caller's transaction, as it does
-// for its own transactions (see the concurrency note on Tree). Never keep using the handle: it is
-// no longer in a transaction, so each following statement on it is committed at once, by itself,
-// and the final Rollback undoes none of them. The returned error contains the driver's error, so
-// it can be tested with errors.As. Inside a tree write the deadlock error also matches
+// for its own transactions (see the concurrency note on Tree). Never keep using the handle: the
+// statements that follow on it are not part of the transaction the caller began: it is no longer in
+// a transaction, so each is committed at once, by itself, and the final Rollback undoes none of
+// them. The returned error contains the driver's error, so it can be tested with errors.As. Inside a tree write the deadlock error also matches
 // ErrSavepointRollback, because the savepoint went with the transaction: a caller that redoes
 // deadlocked transactions should test for the deadlock first.
 //
-// On MySQL, tree writes of different tenants can deadlock at any isolation level: writes that
+// On MariaDB, tree writes of different tenants can deadlock at any isolation level: writes that
 // delete closure rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant, BuildFromParents
 // and an Update that moves a node, lock the closure rows they scan, and some scans still pass other
 // tenants' rows (see the concurrency note on Tree); any tree write of the transaction can be the
-// one that loses. At MySQL's default isolation level (REPEATABLE READ) the transaction keeps those
+// one that loses. At MariaDB's default isolation level (REPEATABLE READ) the transaction keeps those
 // locks until it ends, so writes of other tenants wait on it more. Keep such transactions short, or
 // run them at READ COMMITTED, as the transactions the library opens itself do: in the library's
-// measurements that cut the deadlocks a lot, but did not stop them on tables whose statistics were
-// stale. A server with binary logging on and binlog_format=STATEMENT refuses InnoDB writes at READ
+// measurements on MariaDB 11.8 that removed the deadlocks that remained at REPEATABLE READ, which
+// came from gap locks. A server with binary logging on and binlog_format=STATEMENT refuses InnoDB writes at READ
 // COMMITTED (error 1665).
+//
+// At REPEATABLE READ with innodb_snapshot_isolation=ON, MariaDB's default,
+// a tree write fails with error 1020 ("Record has changed since last read") when it would change a
+// row that another transaction changed after this transaction's snapshot was taken. In the
+// library's measurements BuildFromParents did, while other tenants' writes ran, until its
+// statements forced the tenant indexes; since then the measurements saw no error 1020, but a
+// write that touches another tenant's rows can still get it. The library does not repeat the
+// write: roll the transaction back and redo it, as after a deadlock, or run it at READ COMMITTED,
+// where error 1020 does not occur.
 //
 // Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
 // the transaction waits on the transaction's own lock, so it blocks: forever, or until a lock or
 // busy timeout fails it. A transaction that writes to several trees or tenants must take their
 // locks in one fixed order everywhere, for example with LockTenant up front. Call Migrate on ct,
-// not on the copy: it runs DDL, and MySQL commits the transaction implicitly on DDL.
+// not on the copy: it runs DDL, and MariaDB commits the transaction implicitly on DDL.
 //
 // If tx is not a transaction, each write on the copy opens its own transaction, as on ct.
 // WithTx panics if tx is nil.
@@ -95,7 +104,7 @@ func (ct *Tree) inTransaction() bool {
 // writes (cycle check, sibling order, duplicate check) are plain reads, and taking the lock first
 // makes them see every write committed before the lock was granted, where the database's isolation
 // level allows it. LockTenant behaves like a tree write with an empty body, with the same savepoint
-// handling; the lock is held until the caller's transaction ends (PostgreSQL and MySQL). Later
+// handling; the lock is held until the caller's transaction ends (PostgreSQL and MariaDB). Later
 // tree writes in the same transaction take the lock again, which is harmless.
 //
 // It returns ErrEmptyTenant for an empty tenant, and ErrNotInTransaction when the Tree is not

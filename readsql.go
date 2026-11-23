@@ -169,7 +169,7 @@ func (ct *Tree) descendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDepth 
 // query selects node_id, ancestor_id and sort_order; otherwise every column of the recursive query
 // and, last, ancestor_id again as parent_id, so gorm fills Node.ParentId. The parent is not named
 // parent_id inside the recursive query because a leftover physical parent_id column would make
-// that a duplicate column name, which MySQL rejects there; in the final select a duplicate is
+// that a duplicate column name, which MariaDB rejects there; in the final select a duplicate is
 // allowed and the later column wins when gorm scans. The level counter is cte_depth, not depth, so
 // it cannot shadow a depth column of the model.
 func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDepth int, tenant string) (string, []any) {
@@ -178,6 +178,12 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 		cols = ct.selectList("nodes", p.columns)
 	}
 	var s sqlBuf
+	if ct.dialect == dialectMariaDB && !ct.mysql {
+		// MariaDB stops a recursive query after max_recursive_iterations steps (default 1000) with
+		// only a warning, so a deeper subtree would come back cut without an error. Lift the limit
+		// for this statement to the read's own bound: maxDepth levels need fewer steps than that.
+		s.add(fmt.Sprintf("SET STATEMENT max_recursive_iterations = %d FOR\n", maxDepth))
+	}
 	s.add("WITH RECURSIVE Tree AS (\n")
 	s.add("\t-- Base case: Start with direct children of the parent node\n")
 	s.add("\tSELECT\n\t\t" + cols + ",\n")
@@ -222,14 +228,14 @@ func (ct *Tree) treeDescendantsSQL(p *readPlan, idsOnly bool, parent uint, maxDe
 
 // orderedJoin returns the inner join keyword that keeps the tables in their written order. The
 // recursive step of a tree read must go from the working table to its closure rows to the nodes;
-// that is the only sensible order. On tables without statistics SQLite and MySQL otherwise may
+// that is the only sensible order. On tables without statistics SQLite and MariaDB otherwise may
 // reorder it and scan every node of the tenant per step. SQLite keeps the order of a CROSS JOIN,
-// MySQL that of a STRAIGHT_JOIN; PostgreSQL plans this step well with a plain JOIN.
+// MariaDB that of a STRAIGHT_JOIN; PostgreSQL plans this step well with a plain JOIN.
 func (ct *Tree) orderedJoin() string {
 	switch ct.dialect {
 	case dialectSQLite:
 		return "CROSS JOIN"
-	case dialectMySQL:
+	case dialectMariaDB:
 		return "STRAIGHT_JOIN"
 	default:
 		return "JOIN"

@@ -32,7 +32,7 @@ func (ct *Tree) nodeExists(tx *gorm.DB, id uint, tenant string) (bool, error) {
 }
 
 // updateFieldsInTx applies the column updates to node id within tx. It returns ErrNodeNotFound if
-// no such node exists for tenant; a no-op update (unchanged values) is not an error, even on MySQL
+// no such node exists for tenant; a no-op update (unchanged values) is not an error, even on MariaDB
 // where it reports RowsAffected=0.
 func (ct *Tree) updateFieldsInTx(tx *gorm.DB, id uint, updateMap map[string]any, tenant string) error {
 	res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(updateMap)
@@ -42,7 +42,7 @@ func (ct *Tree) updateFieldsInTx(tx *gorm.DB, id uint, updateMap map[string]any,
 	if res.RowsAffected > 0 {
 		return nil
 	}
-	// MySQL reports RowsAffected=0 for a no-op update (all values unchanged), so an explicit
+	// MariaDB reports RowsAffected=0 for a no-op update (all values unchanged), so an explicit
 	// existence check is needed to tell a missing node from an idempotent one.
 	exists, err := ct.nodeExists(tx, id, tenant)
 	if err != nil {
@@ -240,8 +240,8 @@ func (ct *Tree) moveInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
 
 	// STEP 1: Delete all connections from outside the subtree into the subtree.
 	// Must happen before insert to avoid unique-constraint conflicts on depth changes.
-	delSql := fmt.Sprintf(moveDeleteExternalPaths, ct.relationsTbl, ct.relationsTbl)
-	delExec := tx.Exec(delSql, id, tenant, tenant)
+	delSql := fmt.Sprintf(moveDeleteExternalPaths, ct.relationsTbl)
+	delExec := tx.Exec(delSql, id, tenant, id, tenant, tenant)
 	if delExec.Error != nil {
 		return fmt.Errorf("unable to delete external closure paths: %w", delExec.Error)
 	}
@@ -312,13 +312,13 @@ WHERE p.descendant_id = ? AND p.tenant = ? AND c.tenant = ?;
 // moveDeleteExternalPaths removes all closure rows that come from ancestors OUTSIDE the
 // moved subtree to nodes INSIDE it. This clears the old parent-chain connections while
 // preserving all internal subtree links (self-links and intra-subtree edges).
-// Uses a CTE so MySQL 8.0+ can materialise the subtree before the DELETE, avoiding
-// Error 1093 ("can't specify target table in FROM clause").
+// The subtree is read in a derived table, not a CTE before the DELETE: MariaDB accepts no WITH
+// before DELETE, and the derived table also keeps MySQL from rejecting the read of the table the
+// statement deletes from (error 1093). Placeholders: (node id, tenant, node id, tenant, tenant).
 const moveDeleteExternalPaths = `
-WITH subtree AS (
-    SELECT descendant_id FROM %s WHERE ancestor_id = ? AND tenant = ?
-)
-DELETE FROM %s
-WHERE descendant_id IN (SELECT descendant_id FROM subtree)
-AND ancestor_id NOT IN (SELECT descendant_id FROM subtree)
+DELETE FROM %[1]s
+WHERE descendant_id IN (SELECT descendant_id FROM (
+    SELECT descendant_id FROM %[1]s WHERE ancestor_id = ? AND tenant = ?) AS subtree)
+AND ancestor_id NOT IN (SELECT descendant_id FROM (
+    SELECT descendant_id FROM %[1]s WHERE ancestor_id = ? AND tenant = ?) AS subtree2)
 AND tenant = ?`

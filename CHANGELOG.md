@@ -4,38 +4,54 @@
 
 ### Breaking changes
 
-- **MySQL 8.0.17 or later.** `New` returns an error for a MySQL server older than 8.0.17; v0.10.0
-  accepted any 8.0. Upgrade the server. TiDB, which by default reports itself as 8.0.11, is
-  rejected; it is not supported.
-- **MySQL: tenants are compared exactly.** On MySQL, `Migrate` gives the tenant column of the
-  tree's four tables the collation `utf8mb4_0900_bin` while none of them has a row, so "Acme",
-  "acme" and "acmé" are three tenants, as on PostgreSQL and SQLite. The library does not convert a
-  tree that has rows: it keeps its collation, unless gorm's `AutoMigrate` modifies its tenant
-  column, and under MySQL's default `utf8mb4_0900_ai_ci` tenants that differ only in case or accents
-  stay one tenant (`DeleteTenant` deletes all of them). `Migrate` returns the new
+- **Go 1.26 and gorm v1.30.0 or later.** `go.mod` now says `go 1.26.0` (was 1.25.14) and requires
+  `gorm.io/gorm` v1.30.0 (was v1.26.1), because the test dependency `github.com/go-bumbu/testdbs`
+  v0.5.0 requires them.
+- **MariaDB replaces MySQL.** The library is tested on MariaDB (11.8, the default of `testdbs`
+  v0.5.0) instead of MySQL, and `New` returns an error for a MariaDB server older than 11.8. MariaDB uses MySQL's gorm driver (`gorm.io/driver/mysql`),
+  so you open it the same way. MySQL is still accepted from 8.0.17 (v0.10.0 accepted any 8.0; TiDB,
+  which by default reports itself as 8.0.11, is rejected), but it is no longer tested: the library
+  treats it as MariaDB, except for the tenant collation and the recursion limit below. Moving a tree's data from MySQL to
+  MariaDB is up to you. The deletes of `DeleteRecurse`, `DeleteRecurseMany` and of a move with
+  `Update` no longer start with a CTE (`WITH ... DELETE`), which MariaDB rejects; they read the
+  subtree in a derived table on every database.
+- **MariaDB: tree reads ignore `max_recursive_iterations`.** `TreeDescendants` and
+  `TreeDescendantsIds` lift MariaDB's limit on recursive steps (default 1000, past which MariaDB
+  returns a cut result with only a warning) for their own statement, so they return the whole
+  subtree; a lower limit you set no longer applies to them.
+- **MariaDB: tenants are compared exactly.** On MariaDB, `Migrate` gives the tenant column of the
+  tree's four tables the collation `utf8mb4_nopad_bin` (`utf8mb4_0900_bin` on MySQL) while none of
+  them has a row, so "Acme", "acme", "acmé" and "acme " are four tenants, as on PostgreSQL and
+  SQLite. The library does not convert a tree that has rows: it keeps its collation, unless gorm's
+  `AutoMigrate` modifies its tenant column, and under MariaDB's default `utf8mb4_uca1400_ai_ci`
+  tenants that differ only in case or accents stay one tenant (`DeleteTenant` deletes all of them). `Migrate` returns the new
   `ErrTenantCollation` when the four tenant columns do not share one collation. To change a tree
   with rows, follow the paragraph "Tenants" under "Closure Tree methods" in the README. On a tree
   without rows, `Migrate` sets that collation with `ALTER TABLE ... MODIFY`, also on the first
   `Migrate` of a new tree, so the database user needs the ALTER privilege, where v0.10.0 needed
   only CREATE for a new tree: grant it.
-- **MySQL: the library's own transactions run at READ COMMITTED**, whatever the connection's
+- **MariaDB: the library's own transactions run at READ COMMITTED**, whatever the connection's
   default level is (every write on a Tree that is not inside a caller's transaction). A server with
   binary logging on and `binlog_format=STATEMENT` refuses these writes (error 1665): switch it to
-  `ROW`, the default, or `MIXED`.
-- **Tenant index on the closure table, and repeated writes after a MySQL deadlock.** On a tree
+  `MIXED`, the default, or `ROW`.
+- **Tenant index on the closure table, and repeated writes after a MariaDB deadlock.** On a tree
   created before v0.11.0, the next `Migrate` adds an index on the tenant column of the closure
   table, `idx_closure_tree_rel_<node table>_tenant` (gorm's naming strategy shortens a name that is
-  too long), unless an index of exactly that name exists. On a large closure table the build takes
+  too long), unless an index of exactly that name exists. On MariaDB `DeleteTenant` and
+  `BuildFromParents` force that index (`FORCE INDEX`), and `BuildFromParents` also forces the node
+  table's `(tenant, node_id)` index on its sort_order update; they fail, with an error that says
+  to run `Migrate`, until the index exists: run `Migrate` before them after upgrading. On a large
+  closure table the build takes
   time: PostgreSQL blocks writes to the closure table until it is built, so build it beforehand
   with `CREATE INDEX CONCURRENTLY` under that name (README, the paragraph on `Migrate` under
-  "Usage"); MySQL builds it online, but at its start and end waits for a metadata lock until the
+  "Usage"); MariaDB builds it online, but at its start and end waits for a metadata lock until the
   open transactions that used the closure table end, and while it waits every new statement on that
-  table queues behind it, so run `Migrate` when no long transaction uses the tree. On MySQL, a
+  table queues behind it, so run `Migrate` when no long transaction uses the tree. On MariaDB, a
   write in a transaction the library opens itself (a Tree not bound with `WithTx`, or bound to a
   handle that is not in a transaction) that loses a deadlock (error 1213) now runs again, up to 5
-  attempts in all, so your model's gorm hooks run once per attempt, also in attempts MySQL rolled
+  attempts in all, so your model's gorm hooks run once per attempt, also in attempts MariaDB rolled
   back: keep them free of effects outside the database, or let those effects tolerate repeats. See
-  "Concurrent writes on MySQL" in the README.
+  "Concurrent writes on MariaDB" in the README.
 - **`New` rejects a model with a field of its own on a column of `Node`** (`node_id`,
   `parent_id`, `tenant` or `sort_order`, for example its own `Tenant string`) with the new
   `ErrNodeColumn`; for `parent_id` the error also matches the new `ErrParentIDColumn`. v0.10.0
@@ -92,7 +108,7 @@
 
 - Run a Tree inside your own transaction: `WithTx`, `LockTenant`, `ErrNotInTransaction`,
   `ErrSavepointRollback`, and `ErrLockNotAcquired` for a write or `LockTenant` on PostgreSQL or
-  MySQL whose tenant lock row was deleted between ensuring and locking it on each of its 3
+  MariaDB whose tenant lock row was deleted between ensuring and locking it on each of its 3
   attempts (README "Using closure-tree inside your own transaction").
 - The ancestors of a node, root first: `Ancestors` and `AncestorIDs`.
 - Filter the nodes of a read by their columns: `Filter` with the `Cond`s `Eq`, `IsNull`, `NotNull`

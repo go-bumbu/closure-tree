@@ -13,11 +13,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// exactCollation is the collation Migrate gives the tenant columns of a MySQL tree without rows.
-const exactCollation = "utf8mb4_0900_bin"
+// exactCollation is the collation Migrate gives the tenant columns of a MariaDB tree without rows.
+const exactCollation = "utf8mb4_nopad_bin"
 
 // tenantCollations returns the collation of the tenant column of each of the tree's four tables on
-// MySQL, by table name, read from information_schema.
+// MariaDB, by table name, read from information_schema.
 func tenantCollations(t *testing.T, gdb *gorm.DB, ct *closuretree.Tree) map[string]string {
 	t.Helper()
 	tables := []string{
@@ -59,7 +59,7 @@ func assertTenantCollation(t *testing.T, gdb *gorm.DB, ct *closuretree.Tree, wan
 
 // TestTenantSpellingsStaySeparate pins that tenants are compared exactly on every database:
 // spellings that differ only in case, accents or trailing spaces are four tenants for the reads and
-// for DeleteTenant. On MySQL that needs the collation Migrate gives the tenant columns of a tree
+// for DeleteTenant. On MariaDB that needs the collation Migrate gives the tenant columns of a tree
 // without rows, so the test first checks that the tree got it.
 func TestTenantSpellingsStaySeparate(t *testing.T) {
 	spellings := []string{"Acme", "acme", "acmé", "acme "}
@@ -71,7 +71,7 @@ func TestTenantSpellingsStaySeparate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if db.DbType() == testdbs.DBTypeMysql {
+			if db.DbType() == testdbs.DBTypeMariadb {
 				assertTenantCollation(t, gdb, ct, exactCollation)
 			}
 			ctx := context.Background()
@@ -154,14 +154,14 @@ func assertDeleteTenantExact(t *testing.T, gdb *gorm.DB, ct *closuretree.Tree, s
 }
 
 // TestMigrateTenantCollation pins when Migrate gives the tenant columns the exact collation on
-// MySQL: while no table of the tree has a row, also when the caller's AutoMigrate created the node
+// MariaDB: while no table of the tree has a row, also when the caller's AutoMigrate created the node
 // table first. A tree with rows keeps the collation it has, and Migrate returns ErrTenantCollation
 // when its tenant columns disagree.
 func TestMigrateTenantCollation(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			if db.DbType() != testdbs.DBTypeMysql {
-				t.Skip("MySQL only: PostgreSQL and SQLite compare tenants exactly by default")
+			if db.DbType() != testdbs.DBTypeMariadb {
+				t.Skip("MariaDB only: PostgreSQL and SQLite compare tenants exactly by default")
 			}
 			ctx := context.Background()
 
@@ -239,14 +239,14 @@ func TestMigrateTenantCollation(t *testing.T) {
 					t.Fatal(err)
 				}
 				if err := gdb.Exec(`ALTER TABLE test_payloads MODIFY COLUMN tenant varchar(191)
-					CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL`).Error; err != nil {
+					CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL`).Error; err != nil {
 					t.Fatal(err)
 				}
 				err = ct.Migrate()
 				if !errors.Is(err, closuretree.ErrTenantCollation) {
 					t.Fatalf("want ErrTenantCollation, got %v", err)
 				}
-				for _, want := range []string{"test_payloads.tenant utf8mb4_0900_ai_ci", "closure_tree_rel_test_payloads.tenant utf8mb4_0900_bin"} {
+				for _, want := range []string{"test_payloads.tenant utf8mb4_general_ci", "closure_tree_rel_test_payloads.tenant " + exactCollation} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("error %q does not name %q", err, want)
 					}

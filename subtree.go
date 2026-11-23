@@ -33,13 +33,14 @@ var ErrNoAncestors = errors.New("no ancestors given")
 // ancestor that does not match selects nothing in the pruning form.
 //
 // The slice form binds one value per ancestor, within the databases' limits of bound values
-// (SQLite 32766, PostgreSQL and MySQL 65535 per statement). On PostgreSQL gorm also rewrites the
+// (SQLite 32766, PostgreSQL and MariaDB 65535 per statement). On PostgreSQL gorm also rewrites the
 // placeholders of an embedded subquery one by one, which gets slow beyond a few thousand values:
 // about 0.1 s for 10,000 and 1 s for 30,000 per statement. Use SubtreeIDsOf for large sets.
 //
-// With a filter the subquery reads the node table, and MySQL rejects that inside an UPDATE or
-// DELETE on the node table (error 1093): wrap it as "IN (SELECT descendant_id FROM (?) AS sub)".
-// Do not put a LIMIT inside it (MySQL error 1235); page in the outer query.
+// With a filter the subquery reads the node table. MariaDB accepts that inside an UPDATE or DELETE
+// on the node table, MySQL (accepted, untested) rejects it (error 1093); to keep such a statement
+// portable, wrap it as "IN (SELECT descendant_id FROM (?) AS sub)". Do not put a LIMIT inside it
+// (MariaDB error 1235); page in the outer query.
 func (ct *Tree) SubtreeIDs(tenant string, ancestors []uint, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {
@@ -130,8 +131,8 @@ func (ct *Tree) subquery(sql string, args []any) *gorm.DB {
 // Without ForAncestors the statement reads the tenant's closure rows through the closure table's
 // index on the tenant; for a tenant that holds most of the closure table the databases read the
 // whole table instead. ForAncestors limits the read to the closure rows of those ancestors. With a
-// filter the statement also reads the node table, so MySQL rejects it inside an UPDATE or DELETE on
-// the node table (error 1093); wrap it as SubtreeIDs describes.
+// filter the statement also reads the node table, so MySQL (accepted, untested) rejects it inside an
+// UPDATE or DELETE on the node table (error 1093); wrap it as SubtreeIDs describes.
 func (ct *Tree) ClosurePairs(tenant string, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

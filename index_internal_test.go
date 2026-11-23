@@ -127,7 +127,7 @@ func TestTenantIndexShortenedName(t *testing.T) {
 		t.Run(db.DbType(), func(t *testing.T) {
 			ct := newDBInternalTree(t, db, tenantIndexLongName{})
 			full := "idx_" + ct.relationsTbl + "_tenant"
-			maxLen := 64 // gorm's default; MySQL's limit
+			maxLen := 64 // gorm's default; MariaDB's limit
 			if db.DbType() == testdbs.DBTypePostgres {
 				maxLen = 63 // gorm's PostgreSQL driver, after PostgreSQL's limit
 			}
@@ -166,13 +166,13 @@ func explainKeys(t *testing.T, ct *Tree, stmt, tenant string) []string {
 	return keys
 }
 
-// On MySQL the delete of a tenant holding most closure rows uses the tenant index because of the
-// hint; without it the optimizer scans the table, also the other tenants' rows.
-func TestTenantDeleteHintUsesIndexOnMySQL(t *testing.T) {
+// On MariaDB the delete of a tenant holding most closure rows uses the tenant index because it
+// forces it; without that the optimizer scans the table, also the other tenants' rows.
+func TestTenantDeleteForcesIndexOnMariaDB(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			if db.DbType() != testdbs.DBTypeMysql {
-				t.Skip("MySQL only")
+			if db.DbType() != testdbs.DBTypeMariadb {
+				t.Skip("MariaDB only")
 			}
 			ct := newDBInternalTree(t, db, txSample{})
 			rows := make([]closureTree, 0, 2020)
@@ -203,7 +203,7 @@ func TestTenantDeleteHintUsesIndexOnMySQL(t *testing.T) {
 }
 
 // DeleteTenant and BuildFromParents delete the tenant's closure rows with tenantDeleteSQL, so on
-// MySQL with the hint.
+// MariaDB with the forced index.
 func TestTenantDeletesSendTenantDeleteSQL(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -243,100 +243,65 @@ func TestTenantDeletesSendTenantDeleteSQL(t *testing.T) {
 	}
 }
 
-// warning is a row of SHOW WARNINGS.
-type warning struct {
-	Level   string
-	Code    int
-	Message string
-}
-
-// A hint MySQL cannot apply does not fail the delete: one naming an index the table lacks (a tree
-// migrated before the index existed), and one the server does not know, which stands in for INDEX on
-// MySQL 8.0.17 to 8.0.19 (the test image runs a later 8.0). Each deletes the tenant's rows and leaves
-// one warning.
-func TestTenantDeleteHintNotAppliedOnMySQL(t *testing.T) {
+// On MariaDB the tenant-wide deletes force the tenant index, which fails on a tree whose closure
+// table lacks it (one not migrated since the index was added): DeleteTenant and BuildFromParents
+// then return an error that says to run Migrate, and write nothing. After Migrate they work.
+func TestTenantDeleteWithoutIndexOnMariaDB(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			if db.DbType() != testdbs.DBTypeMysql {
-				t.Skip("MySQL only")
+			if db.DbType() != testdbs.DBTypeMariadb {
+				t.Skip("MariaDB only")
 			}
 			ct := newDBInternalTree(t, db, txSample{})
 			ctx := context.Background()
-			tenants := []string{"bound1", "literal1", "bound2", "literal2", "deleteTenant"}
-			for _, tenant := range tenants {
-				if err := ct.Add(ctx, &txSample{Name: "root"}, nil, nil, tenant); err != nil {
-					t.Fatal(err)
-				}
+			root := txSample{Name: "root"}
+			if err := ct.Add(ctx, &root, nil, nil, "t1"); err != nil {
+				t.Fatal(err)
 			}
 			if err := ct.db.Migrator().DropIndex(ct.relationsTbl, ct.tenantIdx); err != nil {
 				t.Fatalf("drop the tenant index: %v", err)
 			}
-			hinted := ct.tenantDeleteSQL(ct.relationsTbl)
-			unknown := strings.Replace(hinted, "INDEX(", "NO_SUCH_HINT(", 1)
-			if unknown == hinted {
-				t.Fatalf("precondition: no INDEX hint in %s", hinted)
-			}
-			tests := []struct {
-				name    string
-				bound   string // deleted with the tenant bound, as the library sends it
-				literal string // deleted with the tenant in the text, so SHOW WARNINGS sees the parse
-				stmt    string
-				code    int // of the one warning
+			before := closureRows(t, ct)
+			calls := []struct {
+				name string
+				call func() error
 			}{
-				{"missingIndex", "bound1", "literal1", hinted, 3128}, // ER_UNRESOLVED_HINT_NAME
-				{"unknownHint", "bound2", "literal2", unknown, 1064}, // the hint parser's syntax error, as a warning
+				{"BuildFromParents", func() error {
+					return ct.BuildFromParents(ctx, "t1", []ParentLink{{NodeID: root.NodeId}}, Rebuild())
+				}},
+				{"DeleteTenant", func() error { return ct.DeleteTenant(ctx, "t1") }},
 			}
-			for _, tt := range tests {
-				t.Run(tt.name, func(t *testing.T) {
-					res := ct.db.Exec(tt.stmt, tt.bound)
-					if res.Error != nil {
-						t.Fatalf("%s with a bound tenant: %v", tt.stmt, res.Error)
-					}
-					if res.RowsAffected != 2 { // the root's own row and its row under the virtual root
-						t.Errorf("bound tenant: want 2 closure rows deleted, got %d", res.RowsAffected)
-					}
-
-					// A prepared statement's warnings are gone after it executes, so this one is sent
-					// as text, on one connection with the SHOW WARNINGS that follows it.
-					literal := strings.Replace(tt.stmt, "?", "'"+tt.literal+"'", 1)
-					var deleted int64
-					var warnings []warning
-					err := ct.db.Connection(func(conn *gorm.DB) error {
-						res := conn.Exec(literal)
-						if res.Error != nil {
-							return res.Error
-						}
-						deleted = res.RowsAffected
-						return conn.Raw("SHOW WARNINGS").Scan(&warnings).Error
-					})
-					if err != nil {
-						t.Fatalf("%s: %v", literal, err)
-					}
-					if deleted != 2 {
-						t.Errorf("literal tenant: want 2 closure rows deleted, got %d", deleted)
-					}
-					if len(warnings) != 1 || warnings[0].Level != "Warning" || warnings[0].Code != tt.code {
-						t.Errorf("want one warning with code %d, got %+v", tt.code, warnings)
-					}
-				})
+			for _, c := range calls {
+				err := c.call()
+				if err == nil || !strings.Contains(err.Error(), "run Migrate") || !strings.Contains(err.Error(), ct.tenantIdx) {
+					t.Errorf("%s without the tenant index: want an error naming %s and Migrate, got %v", c.name, ct.tenantIdx, err)
+				}
+				if after := closureRows(t, ct); !reflect.DeepEqual(after, before) {
+					t.Errorf("%s changed the closure rows:\nbefore %v\nafter  %v", c.name, before, after)
+				}
 			}
-			if err := ct.DeleteTenant(ctx, "deleteTenant"); err != nil {
-				t.Errorf("DeleteTenant without the tenant index: %v", err)
+			if err := ct.Migrate(); err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range calls {
+				if err := c.call(); err != nil {
+					t.Errorf("%s after Migrate: %v", c.name, err)
+				}
 			}
 		})
 	}
 }
 
-// On MySQL the statement Migrate sends builds the tenant index in place without blocking writes.
-// Migrate sends it without ALGORITHM and LOCK, and MySQL's defaults choose INPLACE and LOCK=NONE
+// On MariaDB the statement Migrate sends builds the tenant index in place without blocking writes.
+// Migrate sends it without ALGORITHM and LOCK, and MariaDB's defaults choose INPLACE and LOCK=NONE
 // when the operation allows them. The test appends ALGORITHM=INPLACE LOCK=NONE to that statement,
-// so MySQL fails it if it cannot build the index that way; it also fails if Migrate sends no
+// so MariaDB fails it if it cannot build the index that way; it also fails if Migrate sends no
 // such statement.
-func TestTenantIndexBuildsOnlineOnMySQL(t *testing.T) {
+func TestTenantIndexBuildsOnlineOnMariaDB(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			if db.DbType() != testdbs.DBTypeMysql {
-				t.Skip("MySQL only")
+			if db.DbType() != testdbs.DBTypeMariadb {
+				t.Skip("MariaDB only")
 			}
 			ct := newDBInternalTree(t, db, txSample{})
 			if err := ct.Add(context.Background(), &txSample{Name: "root"}, nil, nil, "t1"); err != nil {
@@ -369,6 +334,107 @@ func TestTenantIndexBuildsOnlineOnMySQL(t *testing.T) {
 			}
 			if got := tenantIndexColumns(t, ct); !reflect.DeepEqual(got, []string{"tenant"}) {
 				t.Errorf("want the index %s on (tenant), got columns %v", ct.tenantIdx, got)
+			}
+		})
+	}
+}
+
+// The Tree names the node table's (tenant, node_id) index as gorm does, so the index the sort_order
+// update forces on MariaDB is the one Migrate created.
+func TestNodeIndexName(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct := newDBInternalTree(t, db, txSample{})
+			idxs, err := ct.db.Migrator().GetIndexes(ct.nodesTbl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, idx := range idxs {
+				if idx.Name() == ct.nodeIdx {
+					// gorm's PostgreSQL driver lists the columns in table order, not index order
+					got := slices.Sorted(slices.Values(idx.Columns()))
+					if !reflect.DeepEqual(got, []string{"node_id", "tenant"}) {
+						t.Errorf("index %s: want the columns tenant and node_id, got %v", ct.nodeIdx, idx.Columns())
+					}
+					return
+				}
+			}
+			t.Errorf("no index %s on %s", ct.nodeIdx, ct.nodesTbl)
+		})
+	}
+}
+
+// On MariaDB BuildFromParents' sort_order update forces the (tenant, node_id) index: for a batch
+// of hundreds of ids MariaDB otherwise scans the whole primary key, also the other tenants' rows.
+// The test captures the update BuildFromParents sends and EXPLAINs it.
+func TestSortOrderUpdateForcesIndexOnMariaDB(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			if db.DbType() != testdbs.DBTypeMariadb {
+				t.Skip("MariaDB only")
+			}
+			ct := newDBInternalTree(t, db, txSample{})
+			ctx := context.Background()
+			seed := func(tenant string) []ParentLink {
+				rows := make([]txSample, 600)
+				for i := range rows {
+					rows[i] = txSample{Node: Node{Tenant: tenant}, Name: "n"}
+				}
+				if err := ct.db.Table(ct.nodesTbl).CreateInBatches(rows, 300).Error; err != nil {
+					t.Fatal(err)
+				}
+				links := make([]ParentLink, len(rows))
+				for i, r := range rows {
+					links[i] = ParentLink{NodeID: r.NodeId}
+				}
+				return links
+			}
+			seed("before")
+			links := seed("t1")
+			seed("after")
+			if err := ct.db.Exec("ANALYZE TABLE " + ct.nodesTbl).Error; err != nil {
+				t.Fatal(err)
+			}
+
+			var updates []struct {
+				sql  string
+				vars []any
+			}
+			const name = "test:record_sort_update"
+			if err := ct.db.Callback().Raw().Before("gorm:raw").Register(name, func(db *gorm.DB) {
+				if s := db.Statement.SQL.String(); strings.HasPrefix(s, "UPDATE "+ct.nodesTbl) {
+					updates = append(updates, struct {
+						sql  string
+						vars []any
+					}{s, slices.Clone(db.Statement.Vars)})
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := ct.db.Callback().Raw().Remove(name); err != nil {
+					t.Error(err)
+				}
+			})
+			if err := ct.BuildFromParents(ctx, "t1", links); err != nil {
+				t.Fatal(err)
+			}
+			if len(updates) == 0 {
+				t.Fatal("BuildFromParents sent no sort_order update")
+			}
+			u := updates[0]
+			if !strings.Contains(u.sql, "FORCE INDEX ("+ct.nodeIdx+")") {
+				t.Errorf("want the update to force %s, got %.120s", ct.nodeIdx, u.sql)
+			}
+			var plan []struct {
+				Key  sql.NullString `gorm:"column:key"`
+				Rows int64          `gorm:"column:rows"`
+			}
+			if err := ct.db.Raw("EXPLAIN "+u.sql, u.vars...).Scan(&plan).Error; err != nil {
+				t.Fatal(err)
+			}
+			if len(plan) != 1 || plan[0].Key.String != ct.nodeIdx || plan[0].Rows > int64(sortBatchRows) {
+				t.Errorf("want the update to read at most %d rows through %s, got %+v", sortBatchRows, ct.nodeIdx, plan)
 			}
 		})
 	}

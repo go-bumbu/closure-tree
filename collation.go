@@ -7,12 +7,26 @@ import (
 	"strings"
 )
 
-// tenantCollation is the collation Migrate gives the tenant columns on MySQL: binary, so tenants
+// The collations Migrate gives the tenant columns on gorm's "mysql" driver: binary, so tenants
 // that differ in case or accents are different, and NO PAD, so a trailing space counts too. That
-// is how PostgreSQL and SQLite compare them by default.
-const tenantCollation = "utf8mb4_0900_bin"
+// is how PostgreSQL and SQLite compare them by default. On MariaDB 11.8 utf8mb4_0900_bin is an alias
+// of utf8mb4_nopad_bin, but information_schema reports a column by the name it was given, so the
+// library uses and checks the one name utf8mb4_nopad_bin.
+const (
+	tenantCollationMariaDB = "utf8mb4_nopad_bin"
+	tenantCollationMySQL   = "utf8mb4_0900_bin" // MySQL (accepted, untested) has it from 8.0.17
+)
 
-// ErrTenantCollation is returned by Migrate on MySQL when the tenant columns of the tree's four
+// tenantCollationOf returns the collation of the tenant columns for the server of version, as
+// SELECT VERSION() returns it.
+func tenantCollationOf(version string) string {
+	if isMariaDBVersion(version) {
+		return tenantCollationMariaDB
+	}
+	return tenantCollationMySQL
+}
+
+// ErrTenantCollation is returned by Migrate on MariaDB when the tenant columns of the tree's four
 // tables do not share one collation; the error names each column and its collation. The tables would
 // compare tenants differently, so that DeleteTenant could delete a tenant's nodes and keep their
 // closure rows. See Tree for the statement that gives all four the exact collation.
@@ -29,20 +43,20 @@ type tenantColumn struct {
 var tenantColumnType = regexp.MustCompile(`^varchar\(\d+\)$`)
 
 // alterTenantCollationSQL returns the statement that gives the tenant column of table, already
-// quoted, the collation tenantCollation and keeps its type columnType, which must be a varchar.
-func alterTenantCollationSQL(table, columnType string) (string, error) {
+// quoted, the collation collation and keeps its type columnType, which must be a varchar.
+func alterTenantCollationSQL(table, columnType, collation string) (string, error) {
 	if !tenantColumnType.MatchString(columnType) {
 		return "", fmt.Errorf("unexpected type %q of the tenant column of %s: want varchar(n)", columnType, table)
 	}
 	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN tenant %s CHARACTER SET utf8mb4 COLLATE %s NOT NULL",
-		table, columnType, tenantCollation), nil
+		table, columnType, collation), nil
 }
 
-// inexactTenantColumns returns the columns of cols whose collation is not tenantCollation.
-func inexactTenantColumns(cols []tenantColumn) []tenantColumn {
+// inexactTenantColumns returns the columns of cols whose collation is not collation.
+func inexactTenantColumns(cols []tenantColumn, collation string) []tenantColumn {
 	var out []tenantColumn
 	for _, c := range cols {
-		if c.Collation != tenantCollation {
+		if c.Collation != collation {
 			out = append(out, c)
 		}
 	}
@@ -66,19 +80,25 @@ func sameTenantCollation(cols []tenantColumn) error {
 	return fmt.Errorf("%w: %s", ErrTenantCollation, strings.Join(parts, ", "))
 }
 
-// ensureTenantCollation is the last step of Migrate. On MySQL it gives the tenant column of each of
-// the tree's four tables the collation tenantCollation while none of the tables has a row; a tree
-// with rows keeps the collation it has, and gets ErrTenantCollation when its tenant columns do not
-// share one. The other dialects compare tenants exactly already.
+// ensureTenantCollation is the last step of Migrate. On MariaDB it gives the tenant column of each of
+// the tree's four tables the collation utf8mb4_nopad_bin (utf8mb4_0900_bin on MySQL, see
+// tenantCollationOf) while none of the tables has a row; a tree with rows keeps the collation it
+// has, and gets ErrTenantCollation when its tenant columns do not share one. The other dialects
+// compare tenants exactly already.
 func (ct *Tree) ensureTenantCollation() error {
-	if ct.dialect != dialectMySQL {
+	if ct.dialect != dialectMariaDB {
 		return nil
 	}
+	version, err := serverVersion(ct.db)
+	if err != nil {
+		return err
+	}
+	collation := tenantCollationOf(version)
 	cols, err := ct.tenantColumns()
 	if err != nil {
 		return err
 	}
-	inexact := inexactTenantColumns(cols)
+	inexact := inexactTenantColumns(cols, collation)
 	if len(inexact) == 0 {
 		return nil
 	}
@@ -90,7 +110,7 @@ func (ct *Tree) ensureTenantCollation() error {
 		return sameTenantCollation(cols)
 	}
 	for _, c := range inexact {
-		stmt, err := alterTenantCollationSQL(ct.quoteTable(c.Table), c.Type)
+		stmt, err := alterTenantCollationSQL(ct.quoteTable(c.Table), c.Type, collation)
 		if err != nil {
 			return err
 		}
@@ -107,7 +127,7 @@ func (ct *Tree) treeTables() []string {
 }
 
 // tenantColumns reads the type and collation of the tenant column of each of the tree's four
-// tables from information_schema (MySQL), ordered by table name.
+// tables from information_schema (MariaDB), ordered by table name.
 func (ct *Tree) tenantColumns() ([]tenantColumn, error) {
 	tables := ct.treeTables()
 	var cols []tenantColumn

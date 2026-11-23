@@ -66,7 +66,7 @@ func NotNull(column string) Cond { return Cond{column: column, op: opNotNull} }
 // that is itself a slice or an array (other than a byte slice or a driver.Valuer), a gorm
 // expression, a *gorm.DB, a gorm.Valuer or a sql.NamedArg is rejected with an error before the
 // read queries. A tree read binds the values up to three times, so a very long list reaches the
-// database's limit of bound values sooner there (SQLite 32766, PostgreSQL and MySQL 65535 per
+// database's limit of bound values sooner there (SQLite 32766, PostgreSQL and MariaDB 65535 per
 // statement).
 func In(column string, values ...any) Cond {
 	return Cond{column: column, op: opIn, values: slices.Clone(values)}

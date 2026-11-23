@@ -1529,7 +1529,7 @@ const (
 )
 
 // buildLargeTree inserts the node rows of the tree described at largeTreeNodes in batches,
-// builds the closure rows with BuildFromParents, and analyzes the tables on PostgreSQL and MySQL.
+// builds the closure rows with BuildFromParents, and analyzes the tables on PostgreSQL and MariaDB.
 // SQLite is left without statistics, its normal state.
 func buildLargeTree(t *testing.T, gdb *gorm.DB, db testdbs.TargetDb, ct *closuretree.Tree) {
 	t.Helper()
@@ -1557,7 +1557,7 @@ func buildLargeTree(t *testing.T, gdb *gorm.DB, db testdbs.TargetDb, ct *closure
 	switch db.DbType() {
 	case testdbs.DBTypePostgres:
 		analyze = "ANALYZE "
-	case testdbs.DBTypeMysql:
+	case testdbs.DBTypeMariadb:
 		analyze = "ANALYZE TABLE "
 	}
 	if analyze != "" {

@@ -410,7 +410,7 @@ func TestUpdateSortOrder(t *testing.T) {
 				}
 			}
 
-			// afterNodeID=nil leaves sort order unchanged (use a different name to avoid MySQL no-op)
+			// afterNodeID=nil leaves sort order unchanged (use a different name to avoid MariaDB no-op)
 			if err := ct.Update(ctx, a.NodeId, &TestPayload{Name: "a2"}, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
@@ -3031,8 +3031,8 @@ func TestDeleteRecurseCleansInnerMeta(t *testing.T) {
 	}
 }
 
-// TestUpdateNoOpFieldsExistingNode covers the MySQL no-op case: updating an existing node with
-// unchanged field values must succeed, not return ErrNodeNotFound. On MySQL an idempotent update
+// TestUpdateNoOpFieldsExistingNode covers the MariaDB no-op case: updating an existing node with
+// unchanged field values must succeed, not return ErrNodeNotFound. On MariaDB an idempotent update
 // reports RowsAffected=0, so this exercises the existence-check fallback (via make test-full).
 func TestUpdateNoOpFieldsExistingNode(t *testing.T) {
 	for _, db := range testdbs.DBs() {
@@ -3195,7 +3195,7 @@ func countRaw(t *testing.T, gdb *gorm.DB, query string, args ...any) int64 {
 // and "move B under A") many times. Without the per-tenant lock both moves pass their lock-free
 // cycle guards on stale snapshots and commit, making A and B mutual ancestors — a cycle that makes
 // recursive subtree reads run away. The invariant: whichever move wins, A and B are never mutual
-// ancestors. (SQLite serializes writers, so it cannot exhibit the race; MySQL/Postgres can.)
+// ancestors. (SQLite serializes writers, so it cannot exhibit the race; MariaDB/Postgres can.)
 func TestConcurrentConflictingMovesNoCycle(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {

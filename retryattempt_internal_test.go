@@ -195,7 +195,7 @@ func TestDeleteRecurseManyRetriedAttemptCountsOnce(t *testing.T) {
 			// Fail the closure delete, which runs after the node delete.
 			cb := ct.db.Callback().Raw()
 			closureDeletes := failOnce(t, cb.After("gorm:raw").Register, cb.Remove, func(db *gorm.DB) bool {
-				return strings.Contains(db.Statement.SQL.String(), "WITH descendants AS")
+				return strings.Contains(db.Statement.SQL.String(), ") AS descendants)")
 			})
 
 			deleted, err := ct.DeleteRecurseMany(ctx, roots, "t1")
@@ -242,11 +242,11 @@ func failNodeCreates(t *testing.T, ct *Tree, err error) *int {
 	return seen
 }
 
-// Under the MySQL policy a write on the library's own transaction that deadlocks on every attempt
+// Under the MariaDB policy a write on the library's own transaction that deadlocks on every attempt
 // makes 5 attempts and returns the last deadlock, still reachable as the driver's error 1213; a lock
 // wait timeout (error 1205) is returned after one attempt. The errors are injected, so this runs on
 // every database; the pause is skipped.
-func TestMySQLPolicyReturnsTheDeadlockAfterTheLastAttempt(t *testing.T) {
+func TestMariaDBPolicyReturnsTheDeadlockAfterTheLastAttempt(t *testing.T) {
 	deadlock := &mysql.MySQLError{Number: 1213, SQLState: [5]byte{'4', '0', '0', '0', '1'},
 		Message: "Deadlock found when trying to get lock; try restarting transaction"}
 	timeout := &mysql.MySQLError{Number: 1205, SQLState: [5]byte{'H', 'Y', '0', '0', '0'},
@@ -263,7 +263,7 @@ func TestMySQLPolicyReturnsTheDeadlockAfterTheLastAttempt(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(db.DbType()+"/"+tt.name, func(t *testing.T) {
 				ct := newDBInternalTree(t, db, txSample{})
-				ct.retry = dialectMySQL.retryPolicy()
+				ct.retry = dialectMariaDB.retryPolicy()
 				ct.retry.pause = noPause
 				creates := failNodeCreates(t, ct, tt.err)
 

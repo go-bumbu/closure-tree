@@ -18,10 +18,10 @@ import (
 // attached to a node of the requested tenant.
 //
 // Its tenant column keeps the collation of the caller's table; Migrate does not change it. On
-// MySQL, to compare it exactly, run, with the column's current type, the statement in Tree without
+// MariaDB, to compare it exactly, run, with the column's current type, the statement in Tree without
 // NOT NULL, since the column is nullable:
 //
-//	ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+//	ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin;
 //
 // Deprecated: GetLeaves no longer requires it and reads a plain model with a many2many relation to
 // the nodes. A model without Leaf gets no tenant condition on its own table, so a caller who needs

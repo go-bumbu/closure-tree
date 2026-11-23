@@ -22,8 +22,8 @@ var savepointRollbackTimeout = 30 * time.Second
 // mutating operation (Add, GetOrAdd, Update, DeleteRecurse, DeleteRecurseMany, DeleteTenant,
 // Renormalize, BuildFromParents) and LockTenant go through here. The dialect-specific lock
 // acquisition lives in dialect.lockTenant; see the concurrency note on Tree.
-// The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL and MySQL)
-// and is repeated by the Tree's retry policy (ct.retry: on MySQL after a deadlock, see
+// The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL and MariaDB)
+// and is repeated by the Tree's retry policy (ct.retry: on MariaDB after a deadlock, see
 // dialect.retryPolicy), so fn must start from scratch on every call: it may run more than once,
 // each time in a new transaction.
 //
@@ -108,7 +108,8 @@ func releaseSavepoint(tx *gorm.DB, name string) error {
 // SAVEPOINT) as plain SQL that all three databases accept, and returns its error on every database.
 // gorm's SavePoint and RollbackTo are not used: the PostgreSQL and SQLite dialectors discard the
 // statement's error. Like them, it bypasses a prepared-statement connection
-// (gorm.Session.PrepareStmt): MySQL refuses savepoint statements in the prepared statement protocol.
+// (gorm.Session.PrepareStmt): MySQL (accepted, untested) refuses savepoint statements in the
+// prepared statement protocol; MariaDB accepts them.
 func execSavepointStmt(tx *gorm.DB, stmt string) error {
 	if prepared, ok := tx.Statement.ConnPool.(*gorm.PreparedStmtTX); ok {
 		_, err := prepared.Tx.ExecContext(tx.Statement.Context, stmt)

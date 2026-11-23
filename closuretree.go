@@ -67,54 +67,60 @@ var (
 // DeleteRecurse of the same parent leaving orphaned nodes or stale closure rows, and two GetOrAdd
 // calls creating duplicate siblings. Writes for different tenants run concurrently, and reads never
 // take the lock. The transactions the library opens itself run at READ COMMITTED on PostgreSQL and
-// MySQL.
+// MariaDB.
 //
-// On MySQL, tree writes of different tenants can still deadlock (error 1213). A write that deletes
-// closure rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant, BuildFromParents with
-// Rebuild, or an Update that moves a node, locks the closure rows it scans and waits for a row that
-// another transaction holds. The closure table's index on the tenant keeps most of these scans
-// within the tenant's rows, but not all: from MySQL 8.0.20 the tenant-wide deletes of DeleteTenant
-// and BuildFromParents always use it (an index hint), while deletes planned on stale statistics, as
-// on just-loaded tables, and before 8.0.20 the tenant-wide delete of a tenant that holds a large
-// share of the closure table, still scan other tenants' rows. A deadlock never leaves the tree
-// half-written: MySQL rolls back the whole transaction that loses it.
+// On MariaDB, tree writes of different tenants can still deadlock (error 1213). A write that
+// deletes closure rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant, BuildFromParents
+// with Rebuild, or an Update that moves a node, locks the closure rows it scans and waits for a row
+// that another transaction holds. The closure table's index on the tenant keeps most of these scans
+// within the tenant's rows, but not all: the tenant-wide deletes of DeleteTenant and
+// BuildFromParents force it (FORCE INDEX; Migrate must have added the index, or they fail with an
+// error that says so), while the other deletes, planned on stale statistics as on just-loaded
+// tables, can still scan other tenants' rows. A deadlock never leaves the tree half-written:
+// MariaDB rolls back the whole transaction that loses it.
 //
 // A write on a Tree not bound to a transaction runs in a transaction the library opens itself, and
-// on MySQL the library repeats that transaction when it loses a deadlock: up to 5 attempts in all,
+// on MariaDB the library repeats that transaction when it loses a deadlock: up to 5 attempts in all,
 // with a short random pause before each repeat (at most 375 ms over all of them). When every
 // attempt loses, the write returns an error that wraps the last deadlock error, so errors.As still
 // finds the driver's error (for github.com/go-sql-driver/mysql a *mysql.MySQLError with Number
 // 1213); when ctx ends during a pause, the error wraps both that deadlock error and ctx.Err(). A
-// lock wait timeout (error 1205) is not repeated, and PostgreSQL and SQLite make one attempt. In
-// the library's measurements no such write failed, and none needed more than two attempts (README,
-// "Concurrent writes on MySQL"). Because a write can run more than once, the gorm hooks of the
-// model run once per attempt: see Add and GetOrAdd.
+// lock wait timeout (error 1205) is not repeated, and PostgreSQL and SQLite make one attempt.
+// In the library's measurements on MariaDB 11.8 no such write failed, and none needed a second
+// attempt (README, "Concurrent writes on MariaDB"). Because a write can run more than once, the
+// gorm hooks of the model run once per attempt: see Add and GetOrAdd.
 //
-// A write inside a caller's transaction (WithTx) is never repeated: MySQL has rolled back the
+// A write inside a caller's transaction (WithTx) is never repeated: MariaDB has rolled back the
 // caller's whole transaction, which the caller must roll back and redo (see WithTx). There
-// deadlocks remain: while a caller's transaction is open at MySQL's default isolation level
+// deadlocks remain: while a caller's transaction is open at MariaDB's default isolation level
 // (REPEATABLE READ), its tree writes keep the locks of the rows they scanned until it ends, so
 // writes of other tenants wait on it and can deadlock with it (in the library's measurements only
-// in runs with a DeleteRecurseMany of many ids), and any tree write of the transaction, an Add too,
-// can be the one that loses. A write on a Tree not bound to a transaction that MySQL rolls back
-// instead is repeated.
+// between two imports with BuildFromParents, on gap locks of the closure table's tenant index,
+// which READ COMMITTED does not take), and any tree write of
+// the transaction, an Add too, can be the one that loses. A write on a Tree not bound to a
+// transaction that MariaDB rolls back instead is repeated.
 //
-// The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MySQL (released
+// MySQL shares gorm's driver with MariaDB and is accepted from 8.0.17, but not tested: the library
+// treats it as MariaDB, except that its tenant collation is utf8mb4_0900_bin and its tree reads do
+// not lift the recursion limit (see TreeDescendants).
+//
+// The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MariaDB (released
 // when the transaction ends); on SQLite, which already serializes writers per database, it is the
 // anchor upsert. SQLite callers should set a busy_timeout so a waiting writer blocks briefly instead
 // of failing immediately with SQLITE_BUSY.
 //
 // Tenants are compared exactly on every database: "Acme", "acme", "acmé" and "acme " are four
-// tenants. On MySQL, Migrate sets the collation utf8mb4_0900_bin on the tenant column of the tree's
-// four tables while the tree holds no rows. A tree with rows keeps its collation unless gorm's
-// AutoMigrate modifies its tenant column (see Migrate); under MySQL's default, utf8mb4_0900_ai_ci,
-// tenants that differ only in case or accents are one tenant, and DeleteTenant deletes all of them. To change it, stop writes to the tree, store one spelling per
-// tenant, then run the statement below on each of the four tables, with the column's current type
-// in place of varchar(191). The four tables are the node table (NodeTableName) and, named after it,
-// closure_tree_rel_<node table> (ClosureTableName), closure_tree_meta_<node table> and
-// closure_tree_lock_<node table>:
+// tenants. On MariaDB, Migrate sets the collation utf8mb4_nopad_bin on the tenant column of the
+// tree's four tables while the tree holds no rows. A tree with rows keeps its collation unless
+// gorm's AutoMigrate modifies its tenant column (see Migrate); under MariaDB's default,
+// utf8mb4_uca1400_ai_ci, tenants that differ only in case or accents are one tenant, and
+// DeleteTenant deletes all of them. To change it, stop writes to the tree,
+// store one spelling per tenant, then run the statement below on each of the four tables, with the
+// column's current type in place of varchar(191) (on MySQL, with utf8mb4_0900_bin). The four tables
+// are the node table (NodeTableName) and, named after it, closure_tree_rel_<node table>
+// (ClosureTableName), closure_tree_meta_<node table> and closure_tree_lock_<node table>:
 //
-//	ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL;
+//	ALTER TABLE <table> MODIFY tenant varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin NOT NULL;
 //
 // Each rebuilds its table. Resume writes only after all four: until then the tables compare tenants
 // differently. Migrate returns ErrTenantCollation until all four agree.
@@ -126,7 +132,9 @@ type Tree struct {
 	metaTbl      string
 	lockTbl      string
 	tenantIdx    string // the closure table's index on tenant, as gorm names it (see closureTree)
+	nodeIdx      string // the node table's index on (tenant, node_id), as gorm names it (see Node)
 	dialect      dialect
+	mysql        bool        // on dialectMariaDB: New found a MySQL server, not MariaDB (see checkVersion)
 	retry        retryPolicy // how writeTx repeats a transaction it opened itself (dialect.retryPolicy)
 	model        any         // node model retained so Migrate can AutoMigrate it
 
@@ -137,7 +145,8 @@ type Tree struct {
 // New returns a Tree for the given item on the specified gorm database. It parses and validates the
 // schema and the derived table names but does NOT create any tables: call Migrate to create or
 // update the schema. Separating the two means New needs no DDL privilege and callers decide when
-// (and how often) migration runs. On MySQL, New verifies the server is 8.0.17 or later.
+// (and how often) migration runs. On gorm's "mysql" driver, New verifies the server is MariaDB 11.8
+// or later (or MySQL 8.0.17 or later, accepted but not tested).
 //
 // The model must be Node or embed it, and no field of its own may map to a column of Node
 // (node_id, parent_id, tenant or sort_order): New returns ErrNodeColumn for such a field.
@@ -149,7 +158,8 @@ func New(db *gorm.DB, item any) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ct.dialect.checkVersion(db); err != nil {
+	ct.mysql, err = ct.dialect.checkVersion(db)
+	if err != nil {
 		return nil, err
 	}
 	return ct, nil
@@ -197,7 +207,8 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		relationsTbl: relTbl,
 		metaTbl:      metaTbl,
 		lockTbl:      lockTbl,
-		tenantIdx:    db.NamingStrategy.IndexName(relTbl, "Tenant"), // gorm's call for closureTree.Tenant's index tag
+		tenantIdx:    db.NamingStrategy.IndexName(relTbl, "Tenant"),    // gorm's call for closureTree.Tenant's index tag
+		nodeIdx:      db.NamingStrategy.IndexName(name, "tenant_node"), // gorm's call for Node's composite index
 		dialect:      d,
 		retry:        d.retryPolicy(),
 		model:        item,
@@ -241,7 +252,7 @@ func checkNodeColumns(s *schema.Schema) error {
 // a tree created before the closure table had its index on the tenant column, the next Migrate
 // adds it. The index is named idx_<closure table>_tenant, shortened by gorm's naming strategy when
 // that is too long; Migrate builds it unless an index of exactly that name exists. Building it on a
-// large closure table takes time. MySQL builds it in place and lets writes continue, except at its
+// large closure table takes time. MariaDB builds it in place and lets writes continue, except at its
 // start and end, where it needs a short exclusive metadata lock: it waits for that lock until the
 // open transactions that used the closure table end, and while it waits, every new statement on the
 // closure table, reads too, queues behind it. So run Migrate when no long transaction uses the
@@ -253,8 +264,9 @@ func checkNodeColumns(s *schema.Schema) error {
 // and exactly that name. A concurrent build that fails leaves an invalid index of that name, which
 // Migrate takes as present: drop it and build it again.
 //
-// On MySQL, as its last step, Migrate gives the tenant column of the four tables the collation
-// utf8mb4_0900_bin while none of them has a row, so that tenants are compared exactly (see Tree);
+// On MariaDB, as its last step, Migrate gives the tenant column of the four tables the collation
+// utf8mb4_nopad_bin (utf8mb4_0900_bin on MySQL) while none of them has a row, so that tenants are
+// compared exactly (see Tree);
 // that needs the ALTER privilege. That step never changes the tenant collation of a tree with rows,
 // and returns ErrTenantCollation when the tenant columns of such a tree do not share one collation.
 // gorm's AutoMigrate, which runs before it, can: it modifies the tenant column of the node table or
@@ -298,14 +310,16 @@ type closureTree struct {
 	// database, because index names are schema-global on SQLite/Postgres. priority preserves the
 	// column order: (ancestor_id, tenant, depth), (descendant_id, tenant, depth), and the unique
 	// (ancestor_id, descendant_id, tenant, depth). The depth check is likewise left unnamed so GORM
-	// scopes it per table (chk_<reltable>_depth) — MySQL check-constraint names are schema-global.
+	// scopes it per table (chk_<reltable>_depth) — on MySQL check-constraint names are schema-global
+	// (MariaDB scopes them per table).
 	//
 	// The fourth index, on (tenant) alone, is named idx_<reltable>_tenant (Tree.tenantIdx; gorm
-	// shortens a long name). It keeps the tenant-wide deletes (DeleteTenant, BuildFromParents) within
-	// the tenant's rows, so on MySQL they lock fewer rows of other tenants. On MySQL it is as good as
-	// (tenant, ancestor_id, descendant_id, depth) only because the table has no primary key: InnoDB
-	// then clusters it on the unique index, whose columns every secondary index carries. A primary
-	// key would change that. Migrate adds it to a tree created before it existed.
+	// shortens a long name). It keeps the tenant-wide deletes (DeleteTenant, BuildFromParents)
+	// within the tenant's rows, so on MariaDB they lock fewer rows of other tenants; there they force
+	// it (Tree.tenantDeleteSQL). On MariaDB it is as good as (tenant, ancestor_id,
+	// descendant_id, depth) only because the table has no primary key: InnoDB then clusters it on the
+	// unique index, whose columns every secondary index carries. A primary key would change that.
+	// Migrate adds it to a tree created before it existed.
 	AncestorID   uint   `gorm:"not null;index:,composite:anc_ten_dep,priority:1;uniqueIndex:,composite:uniq,priority:1"`
 	DescendantID uint   `gorm:"not null;index:,composite:desc_ten_dep,priority:1;uniqueIndex:,composite:uniq,priority:2"`
 	Tenant       string `gorm:"not null;index;index:,composite:anc_ten_dep,priority:2;index:,composite:desc_ten_dep,priority:2;uniqueIndex:,composite:uniq,priority:3"`
@@ -355,10 +369,10 @@ func derefUint(p *uint) uint {
 // that names BuildFromParents; GetOrAdd and a move with Update reject such a parent the same way.
 //
 // Add creates the row from a shallow copy of item, and of an item passed as a pointer it sets only
-// the embedded Node (to the new node). On MySQL an Add on a Tree not bound to a transaction that
+// the embedded Node (to the new node). On MariaDB an Add on a Tree not bound to a transaction that
 // loses a deadlock is repeated (see the concurrency note on Tree), each attempt with a fresh copy
 // of item, so the model's gorm hooks (BeforeCreate, AfterCreate, ...) run once per attempt, also
-// in attempts whose work MySQL then rolled back. Keep hooks free of effects outside the database,
+// in attempts whose work MariaDB then rolled back. Keep hooks free of effects outside the database,
 // or let them tolerate repeats. The copy shares item's pointer, slice and map fields: a hook that
 // writes through one of them changes what item points to, in every attempt, the failed ones too,
 // so do not rely on such writes.
@@ -567,7 +581,7 @@ func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) e
 	return ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
 
 		// delete the nodes
-		delNodesSql := fmt.Sprintf(deleteNodesRec, ct.nodesTbl, ct.relationsTbl, ct.nodesTbl)
+		delNodesSql := fmt.Sprintf(deleteNodesRec, ct.nodesTbl, ct.relationsTbl)
 		exec1 := tx.Exec(delNodesSql, nodeId, tenant, tenant)
 		if exec1.Error != nil {
 			return fmt.Errorf("deleteRecurse: failed to delete nodes: %w", exec1.Error)
@@ -602,8 +616,8 @@ func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) e
 		}
 
 		// Delete the closure relationships last, after the metadata cleanup above has used them.
-		delRelSql := fmt.Sprintf(deleteRelationsQuery, ct.relationsTbl, ct.relationsTbl)
-		exec2 := tx.Exec(delRelSql, nodeId, tenant, tenant)
+		delRelSql := fmt.Sprintf(deleteRelationsQuery, ct.relationsTbl)
+		exec2 := tx.Exec(delRelSql, nodeId, tenant, nodeId, tenant, tenant)
 		if exec2.Error != nil {
 			return fmt.Errorf("deleteRecurse: failed to delete relations: %w", exec2.Error)
 		}
@@ -612,22 +626,30 @@ func (ct *Tree) DeleteRecurse(ctx context.Context, nodeId uint, tenant string) e
 	})
 }
 
-const deleteNodesRec = `WITH nodes_to_delete AS (
-    SELECT nodes.node_id
-    FROM %s AS nodes
-    JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
-    WHERE ct.ancestor_id = ? AND nodes.tenant = ?
+// deleteNodesRec deletes the nodes of the subtree of a node. Table arguments: node table, closure
+// table. Placeholders: (node id, tenant, tenant).
+// The subtree is read in a derived table (FROM (SELECT ...) AS s), not a CTE before the DELETE: MariaDB
+// accepts no WITH before DELETE, and the derived table also keeps MySQL from rejecting the read of
+// the table the statement deletes from (error 1093).
+const deleteNodesRec = `DELETE FROM %[1]s
+WHERE node_id IN (
+    SELECT node_id FROM (
+        SELECT nodes.node_id
+        FROM %[1]s AS nodes
+        JOIN %[2]s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
+        WHERE ct.ancestor_id = ? AND nodes.tenant = ?
+    ) AS nodes_to_delete
 )
-DELETE FROM %s
-WHERE node_id IN (SELECT node_id FROM nodes_to_delete)
   AND tenant = ?;`
 
-const deleteRelationsQuery = `WITH descendants AS (
-	SELECT descendant_id FROM %s WHERE ancestor_id = ? AND tenant = ?
-)
-DELETE FROM %s
-WHERE tenant = ?
-  AND (
-      descendant_id IN (SELECT descendant_id FROM descendants)
-   OR ancestor_id  IN (SELECT descendant_id FROM descendants)
-  );`
+// deleteRelationsQuery deletes the closure rows of the subtree of a node. Table argument: closure
+// table. Placeholders: (node id, tenant, node id, tenant, tenant). The subtree is read in a derived
+// table, as in deleteNodesRec.
+const deleteRelationsQuery = `DELETE FROM %[1]s
+WHERE (
+      descendant_id IN (SELECT descendant_id FROM (
+          SELECT descendant_id FROM %[1]s WHERE ancestor_id = ? AND tenant = ?) AS descendants)
+   OR ancestor_id  IN (SELECT descendant_id FROM (
+          SELECT descendant_id FROM %[1]s WHERE ancestor_id = ? AND tenant = ?) AS descendants2)
+  )
+  AND tenant = ?;`

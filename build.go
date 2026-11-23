@@ -189,9 +189,9 @@ const sortBatchRows = 500
 // leaves; the next insertion recreates them. A nil option is ignored.
 //
 // It runs under the tenant lock in one transaction, or inside the caller's through WithTx. It
-// returns ErrEmptyTenant if tenant is empty. On MySQL its delete of the tenant's closure rows
-// carries the same index hint as DeleteTenant (no effect before MySQL 8.0.20), and a build on a
-// Tree not bound to a transaction that loses a deadlock is repeated, as every such write is (see
+// returns ErrEmptyTenant if tenant is empty. On MariaDB its delete of the tenant's closure rows
+// forces the tenant index as DeleteTenant does (and fails the same way without it), and a build on
+// a Tree not bound to a transaction that loses a deadlock is repeated, as every such write is (see
 // the concurrency note on Tree).
 func (ct *Tree) BuildFromParents(ctx context.Context, tenant string, links []ParentLink, opts ...BuildOption) error {
 	tenant, err := validateTenant(tenant)
@@ -225,7 +225,7 @@ func (ct *Tree) BuildFromParents(ctx context.Context, tenant string, links []Par
 		}
 		for _, tbl := range []string{ct.relationsTbl, ct.metaTbl} {
 			if err := tx.Exec(ct.tenantDeleteSQL(tbl), tenant).Error; err != nil {
-				return fmt.Errorf("buildFromParents: failed to delete from %s: %w", tbl, err)
+				return fmt.Errorf("buildFromParents: failed to delete from %s: %w", tbl, ct.tenantIndexMissing(err))
 			}
 		}
 		if err := ct.writeClosure(tx, tenant, plan); err != nil {
@@ -298,7 +298,7 @@ func (ct *Tree) writeClosure(tx *gorm.DB, tenant string, plan *buildPlan) error 
 //	WHERE tenant = ? AND node_id BETWEEN ? AND ? AND node_id IN ?
 //
 // Each result is written "? + 0.0": PostgreSQL gives a bare bound CASE result the type text, which
-// it does not assign to the numeric column; the addition makes it numeric. SQLite and MySQL accept
+// it does not assign to the numeric column; the addition makes it numeric. SQLite and MariaDB accept
 // the same form.
 //
 // The nodes are written in id order and the BETWEEN bound, implied by the IN list, is the batch's
@@ -306,6 +306,12 @@ func (ct *Tree) writeClosure(tx *gorm.DB, tenant string, plan *buildPlan) error 
 // "tenant = ?" as a few rows, and scans all the tenant's rows testing each against the IN list,
 // which makes the whole build quadratic. The bound lets it scan only the batch's range of the
 // (tenant, node_id) index.
+//
+// On MariaDB the statement forces that index (UPDATE nodes FORCE INDEX (idx_<nodes>_tenant_node)):
+// for a batch of hundreds of ids MariaDB otherwise scans the whole primary key, statistics or not,
+// which locks the node rows of other tenants, so that their writes deadlock with the build, and at
+// REPEATABLE READ with snapshot isolation fails it with error 1020. A node table without the index
+// fails the statement with error 1176, which indexMissing turns into the advice to run Migrate.
 func (ct *Tree) writeSortOrders(tx *gorm.DB, tenant string, plan *buildPlan) error {
 	type sortOrder struct {
 		id    uint
@@ -324,7 +330,11 @@ func (ct *Tree) writeSortOrders(tx *gorm.DB, tenant string, plan *buildPlan) err
 		var b strings.Builder
 		args := make([]any, 0, 2*len(batch)+4)
 		ids := make([]uint, len(batch))
-		fmt.Fprintf(&b, "UPDATE %s SET sort_order = CASE node_id", ct.nodesTbl)
+		fmt.Fprintf(&b, "UPDATE %s", ct.nodesTbl)
+		if ct.dialect == dialectMariaDB {
+			fmt.Fprintf(&b, " FORCE INDEX (%s)", ct.nodeIdx)
+		}
+		b.WriteString(" SET sort_order = CASE node_id")
 		for i, o := range batch {
 			b.WriteString(" WHEN ? THEN ? + 0.0")
 			args = append(args, o.id, o.order)
@@ -333,7 +343,7 @@ func (ct *Tree) writeSortOrders(tx *gorm.DB, tenant string, plan *buildPlan) err
 		b.WriteString(" END WHERE tenant = ? AND node_id BETWEEN ? AND ? AND node_id IN ?")
 		args = append(args, tenant, ids[0], ids[len(ids)-1], ids)
 		if err := tx.Exec(b.String(), args...).Error; err != nil {
-			return fmt.Errorf("buildFromParents: failed to set sort_order: %w", err)
+			return fmt.Errorf("buildFromParents: failed to set sort_order: %w", indexMissing(err, ct.nodesTbl, ct.nodeIdx))
 		}
 	}
 	return nil

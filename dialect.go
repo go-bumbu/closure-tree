@@ -7,19 +7,22 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 
 	"gorm.io/gorm"
 )
 
 // dialect identifies the SQL database backing a Tree. It is the single home for the handful of
-// places the three supported databases differ (version gate, upsert syntax, row locking): classify
+// places the supported databases differ (version gate, upsert syntax, row locking, retry): classify
 // the database once with dialectOf and read the resulting value instead of scattering db.Name()
 // checks. The zero value is dialectPostgres, the standard-SQL / FOR UPDATE-capable default.
 type dialect uint8
 
 const (
 	dialectPostgres dialect = iota // default: any engine supporting standard SELECT ... FOR UPDATE
-	dialectMySQL
+	// dialectMariaDB is gorm's "mysql" driver: MariaDB, the supported server, and MySQL, which
+	// shares the driver and the protocol and is accepted but not tested (see checkServerVersion).
+	dialectMariaDB
 	dialectSQLite
 )
 
@@ -35,36 +38,65 @@ func dialectFromName(name string) dialect {
 	case "sqlite":
 		return dialectSQLite
 	case "mysql":
-		return dialectMySQL
+		return dialectMariaDB
 	default:
 		return dialectPostgres
 	}
 }
 
-// checkVersion enforces any minimum server version the dialect requires. Only MySQL has one
-// (8.0.17+, for recursive CTEs, the upsert syntax used here and the collation utf8mb4_0900_bin of
-// the tenant columns); the other dialects return nil.
-func (d dialect) checkVersion(db *gorm.DB) error {
-	if d != dialectMySQL {
-		return nil
+// checkVersion enforces the minimum server version of the dialect and reports whether the server
+// of dialectMariaDB is MySQL rather than MariaDB. Only dialectMariaDB has a minimum (see
+// checkServerVersion); the other dialects return false and nil without a query.
+func (d dialect) checkVersion(db *gorm.DB) (mysql bool, err error) {
+	if d != dialectMariaDB {
+		return false, nil
 	}
+	version, err := serverVersion(db)
+	if err != nil {
+		return false, err
+	}
+	return !isMariaDBVersion(version), checkServerVersion(version)
+}
+
+// serverVersion returns the server's version as SELECT VERSION() returns it.
+func serverVersion(db *gorm.DB) (string, error) {
 	var version string
 	if err := db.Raw("SELECT VERSION()").Scan(&version).Error; err != nil {
-		return fmt.Errorf("unable to check MySQL version: %w", err)
+		return "", fmt.Errorf("unable to read the server version: %w", err)
 	}
-	if !mysqlVersionOK(version) {
-		return fmt.Errorf("MySQL 8.0.17 or later required; got %s", version)
+	return version, nil
+}
+
+// checkServerVersion returns an error unless version, as SELECT VERSION() returns it on gorm's
+// "mysql" driver, is MariaDB 11.8 or later, the version the library is tested on. A version without "MariaDB" is MySQL, which is accepted
+// from 8.0.17, the first release with its tenant collation (see tenantCollationOf), but not tested.
+func checkServerVersion(version string) error {
+	if isMariaDBVersion(version) {
+		if !versionAtLeast(version, 11, 8, 0) {
+			return fmt.Errorf("MariaDB 11.8 or later required; got %s", version)
+		}
+		return nil
+	}
+	if !versionAtLeast(version, 8, 0, 17) {
+		return fmt.Errorf("MariaDB 11.8 or later required (MySQL is accepted from 8.0.17, untested); got %s", version)
 	}
 	return nil
 }
 
-// mysqlVersionPrefix matches the major, minor and patch number at the start of a version string as
-// SELECT VERSION() returns it; a suffix such as "-log" may follow.
-var mysqlVersionPrefix = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
+// isMariaDBVersion reports whether version, as SELECT VERSION() returns it on gorm's "mysql" driver,
+// is MariaDB's rather than MySQL's.
+func isMariaDBVersion(version string) bool {
+	return strings.Contains(version, "MariaDB")
+}
 
-// mysqlVersionOK reports whether version, as SELECT VERSION() returns it, is 8.0.17 or later.
-func mysqlVersionOK(version string) bool {
-	m := mysqlVersionPrefix.FindStringSubmatch(version)
+// serverVersionPrefix matches the major, minor and patch number at the start of a version string as
+// SELECT VERSION() returns it; a suffix such as "-MariaDB-ubu2404" or "-log" may follow.
+var serverVersionPrefix = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
+
+// versionAtLeast reports whether version, as SELECT VERSION() returns it, is major.minor.patch or
+// later.
+func versionAtLeast(version string, major, minor, patch int) bool {
+	m := serverVersionPrefix.FindStringSubmatch(version)
 	if m == nil {
 		return false
 	}
@@ -76,13 +108,13 @@ func mysqlVersionOK(version string) bool {
 		}
 		got[i] = n
 	}
-	return slices.Compare(got[:], []int{8, 0, 17}) >= 0
+	return slices.Compare(got[:], []int{major, minor, patch}) >= 0
 }
 
 // metaUpsertSQL returns the statement that inserts a sort-order meta row or, on conflict, keeps the
 // lower min_halvings. Placeholders are (tenant, parent_id, min_halvings) on every dialect.
 func (d dialect) metaUpsertSQL(metaTbl string) string {
-	if d == dialectMySQL {
+	if d == dialectMariaDB {
 		return fmt.Sprintf(
 			`INSERT INTO %s (tenant, parent_id, min_halvings) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE min_halvings = LEAST(min_halvings, VALUES(min_halvings))`,
 			metaTbl)
@@ -90,21 +122,6 @@ func (d dialect) metaUpsertSQL(metaTbl string) string {
 	return fmt.Sprintf(
 		`INSERT INTO %s (tenant, parent_id, min_halvings) VALUES (?, ?, ?) ON CONFLICT (tenant, parent_id) DO UPDATE SET min_halvings = EXCLUDED.min_halvings WHERE %s.min_halvings > EXCLUDED.min_halvings`,
 		metaTbl, metaTbl)
-}
-
-// tenantDeleteSQL returns the statement that deletes all rows of a tenant from tbl. With an index
-// name idx on MySQL, it carries the optimizer hint INDEX(tbl idx): MySQL then reads the tenant's
-// rows through idx even when the tenant holds most of the table or its statistics are stale, where
-// it would otherwise scan the whole table and lock other tenants' rows too. The hint exists from
-// MySQL 8.0.20; earlier servers ignore it with a warning, as does a later server when tbl lacks idx
-// (a tree not migrated since the index was added), so the delete still runs. FORCE INDEX is not
-// used: single-table DELETE does not accept it, and it fails on a missing index. Placeholder:
-// (tenant).
-func (d dialect) tenantDeleteSQL(tbl, idx string) string {
-	if d == dialectMySQL && idx != "" {
-		return fmt.Sprintf(`DELETE /*+ INDEX(%s %s) */ FROM %s WHERE tenant = ?`, tbl, idx, tbl)
-	}
-	return fmt.Sprintf(`DELETE FROM %s WHERE tenant = ?`, tbl)
 }
 
 // lockAttempts bounds how often lockTenantHook repeats "ensure the row, then lock it" when the
@@ -119,7 +136,7 @@ var ErrLockNotAcquired = errors.New("unable to lock the tenant: the lock row dis
 // conflicting structural writes within a tenant run one at a time (see writeTx and the concurrency
 // note on Tree). It upserts the anchor row (so it always exists) and then locks it:
 //
-//   - PostgreSQL / MySQL: SELECT ... FOR UPDATE holds the row until the transaction ends, released
+//   - PostgreSQL / MariaDB: SELECT ... FOR UPDATE holds the row until the transaction ends, released
 //     automatically on commit or rollback. If the select returns no row, because the row was
 //     deleted after the upsert, the upsert and the lock are repeated up to lockAttempts times
 //     before ErrLockNotAcquired is returned.
@@ -127,7 +144,7 @@ var ErrLockNotAcquired = errors.New("unable to lock the tenant: the lock row dis
 //     database, and the anchor upsert takes that writer lock up front.
 //
 // Taking the lock before the operation's own reads is what makes their guards see committed state;
-// this matters under MySQL REPEATABLE READ, where the read view is fixed at the first read.
+// this matters under MariaDB's REPEATABLE READ, where the read view is fixed at the first read.
 func (d dialect) lockTenant(tx *gorm.DB, lockTbl, tenant string) error {
 	return d.lockTenantHook(tx, lockTbl, tenant, nil)
 }
@@ -166,10 +183,10 @@ func (d dialect) lockTenantHook(tx *gorm.DB, lockTbl, tenant string, afterEnsure
 	return ErrLockNotAcquired
 }
 
-// ensureLockRow inserts the tenant's lock row unless it already exists (PostgreSQL and MySQL).
+// ensureLockRow inserts the tenant's lock row unless it already exists (PostgreSQL and MariaDB).
 func (d dialect) ensureLockRow(tx *gorm.DB, lockTbl, tenant string) error {
 	stmt := `INSERT INTO %s (tenant) VALUES (?) ON CONFLICT (tenant) DO NOTHING` // postgres and any other engine supporting SELECT ... FOR UPDATE
-	if d == dialectMySQL {
+	if d == dialectMariaDB {
 		stmt = `INSERT INTO %s (tenant) VALUES (?) ON DUPLICATE KEY UPDATE tenant = tenant`
 	}
 	if err := tx.Exec(fmt.Sprintf(stmt, lockTbl), tenant).Error; err != nil {
@@ -179,16 +196,16 @@ func (d dialect) ensureLockRow(tx *gorm.DB, lockTbl, tenant string) error {
 }
 
 // txOptions returns the options for the transactions the library opens itself (see writeTx). On
-// PostgreSQL and MySQL they run at READ COMMITTED whatever the connection's default is. On
+// PostgreSQL and MariaDB they run at READ COMMITTED whatever the connection's default is. On
 // PostgreSQL at REPEATABLE READ the snapshot is fixed at the transaction's first statement, which
 // is the lock statement, before it waits for the lock, so the guards after the lock would not see
-// the writes committed while it waited. On MySQL at REPEATABLE READ a delete that scans the closure
+// the writes committed while it waited. On MariaDB at REPEATABLE READ a delete that scans the closure
 // table past the tenant's rows (see the concurrency note on Tree) keeps locks on the closure rows of
 // other tenants and on the gaps between them, so it deadlocks with other tenants' writes; at READ
-// COMMITTED it takes no gap locks and releases the rows it does not delete, which removed its
-// deadlocks with other tenants' adds. It still locks the rows it scans, also other tenants' rows,
-// so two writes of different tenants that both delete closure rows can still deadlock, and writeTx
-// then repeats the transaction (retryPolicy; see the concurrency note on Tree). The guards need no
+// COMMITTED it takes no gap locks and releases the rows it does not delete. A statement that scans
+// other tenants' rows still locks them while it runs, so two writes of different tenants can still
+// deadlock, and writeTx then repeats the transaction (retryPolicy; see the concurrency note on
+// Tree); in the library's measurements on MariaDB 11.8, with the forced tenant indexes, none did. The guards need no
 // snapshot that lasts across statements: every writer of the tenant holds its lock. SQLite uses the
 // connection's default (nil): it serializes writers.
 func (d dialect) txOptions() []*sql.TxOptions {
@@ -198,44 +215,55 @@ func (d dialect) txOptions() []*sql.TxOptions {
 	return []*sql.TxOptions{{Isolation: sql.LevelReadCommitted}}
 }
 
-// mysqlDeadlockAttempts is how many times in all writeTx runs a transaction it opened itself on
-// MySQL when every attempt but the last ends in a deadlock.
-const mysqlDeadlockAttempts = 5
+// mariadbDeadlockAttempts is how many times in all writeTx runs a transaction it opened itself on
+// MariaDB when every attempt but the last ends in a deadlock.
+const mariadbDeadlockAttempts = 5
 
-// retryPolicy returns the policy by which writeTx repeats a transaction it opened itself. On MySQL
-// it makes up to mysqlDeadlockAttempts attempts, the next one only after a deadlock (error 1213):
+// retryPolicy returns the policy by which writeTx repeats a transaction it opened itself. On MariaDB
+// it makes up to mariadbDeadlockAttempts attempts, the next one only after a deadlock (error 1213):
 // InnoDB has then rolled back the whole transaction, so the write can run again from the start. A
 // lock wait timeout (error 1205) is not repeated: InnoDB rolls back only the statement that timed
 // out, and it is not a deadlock. PostgreSQL and SQLite make one attempt.
 func (d dialect) retryPolicy() retryPolicy {
-	if d != dialectMySQL {
+	if d != dialectMariaDB {
 		return retryPolicy{}
 	}
-	return retryPolicy{attempts: mysqlDeadlockAttempts, retryable: isMySQLDeadlock, pause: retryPause}
+	return retryPolicy{attempts: mariadbDeadlockAttempts, retryable: isMariaDBDeadlock, pause: retryPause}
 }
 
-// mysqlDeadlockText matches the start of the text of the driver's error for MySQL's deadlock,
+// mariadbDeadlockText matches the start of the text of the driver's error for MariaDB's deadlock,
 // number 1213: "Error 1213 (40001): Deadlock found ...", or "Error 1213: ..." without a SQL state.
-var mysqlDeadlockText = regexp.MustCompile(`^Error 1213\b`)
+var mariadbDeadlockText = regexp.MustCompile(`^Error 1213\b`)
 
-// isMySQLDeadlock reports whether err or an error in its chain (errors.Unwrap, and each error of an
-// Unwrap() []error, as from errors.Join) is MySQL's deadlock error: an error whose text begins with
-// "Error 1213". It reads the text, so the library needs no import of the MySQL driver. Only the
+// mariadbNoSuchKeyText matches the start of the text of the driver's error for a FORCE INDEX that
+// names an index the table lacks, number 1176: "Error 1176 (42000): Key '...' doesn't exist ...".
+var mariadbNoSuchKeyText = regexp.MustCompile(`^Error 1176\b`)
+
+// isMariaDBDeadlock reports whether err or an error in its chain (errors.Unwrap, and each error of an
+// Unwrap() []error, as from errors.Join) is MariaDB's deadlock error: an error whose text begins with
+// "Error 1213". It reads the text, so the library needs no import of the driver
+// (github.com/go-sql-driver/mysql, which MariaDB shares with MySQL). Only the
 // start of each text counts, so an error that quotes the deadlock's text later on, like a duplicate
 // key error on a value holding "Error 1213" or a hook's "hook failed: Error 1213 ...", is not one.
-func isMySQLDeadlock(err error) bool {
+func isMariaDBDeadlock(err error) bool {
+	return errorTextInChain(err, mariadbDeadlockText)
+}
+
+// errorTextInChain reports whether the text of err or of an error in its chain (errors.Unwrap, and
+// each error of an Unwrap() []error) matches re.
+func errorTextInChain(err error, re *regexp.Regexp) bool {
 	if err == nil {
 		return false
 	}
-	if mysqlDeadlockText.MatchString(err.Error()) {
+	if re.MatchString(err.Error()) {
 		return true
 	}
 	switch u := err.(type) {
 	case interface{ Unwrap() error }:
-		return isMySQLDeadlock(u.Unwrap())
+		return errorTextInChain(u.Unwrap(), re)
 	case interface{ Unwrap() []error }:
 		for _, e := range u.Unwrap() {
-			if isMySQLDeadlock(e) {
+			if errorTextInChain(e, re) {
 				return true
 			}
 		}

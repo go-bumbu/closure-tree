@@ -231,10 +231,12 @@ const absMaxDepth = 2147483647
 // always matches. Column names of every option are validated, so an unknown one returns
 // ErrUnknownColumn.
 //
-// Note: this uses a recursive CTE. On MySQL 8 the recursion is bounded by cte_max_recursion_depth
-// (default 1000), so loading a subtree deeper than that many levels fails with error 3636; SQLite
-// and PostgreSQL have no such default ceiling. Set maxDepth, or raise cte_max_recursion_depth for
-// the session, if you need deeper trees on MySQL.
+// Note: this uses a recursive CTE. MariaDB stops one after max_recursive_iterations steps (default
+// 1000) with only a warning, so on MariaDB the read lifts that limit for its own statement (SET
+// STATEMENT ... FOR) to its depth bound, and returns the whole subtree as SQLite and PostgreSQL do;
+// a lower limit set for the session or the server does not apply to it. MySQL (accepted, untested)
+// bounds the recursion by cte_max_recursion_depth (default 1000) and fails with error 3636 beyond
+// it; set maxDepth, or raise that variable, for deeper trees there.
 func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any, opts ...ReadOption) (err error) {
 	if err := validateItems(items); err != nil {
 		return err
@@ -285,8 +287,9 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 // TreeDescendants; PerNode and Columns are ignored. Column names of every option are validated, so
 // an unknown one returns ErrUnknownColumn.
 //
-// Note: like TreeDescendants this uses a recursive CTE, so on MySQL 8 it is bounded by
-// cte_max_recursion_depth (default 1000, error 3636 beyond it); SQLite and PostgreSQL are not.
+// Note: like TreeDescendants this uses a recursive CTE, and on MariaDB lifts max_recursive_iterations
+// for its own statement, so it returns the whole subtree; on MySQL (accepted, untested) it is
+// bounded by cte_max_recursion_depth (default 1000, error 3636 beyond it).
 func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth int, tenant string, opts ...ReadOption) (tree []*TreeNode, err error) {
 	tenant, err = validateTenant(tenant)
 	if err != nil {
