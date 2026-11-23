@@ -1776,8 +1776,10 @@ func TestWriteUnderUnbuiltParent(t *testing.T) {
 				}
 				for name, write := range writes {
 					err := write()
-					if !errors.Is(err, closuretree.ErrParentNotFound) || !strings.Contains(fmt.Sprint(err), "BuildFromParents") {
-						t.Errorf("%s under %d: want ErrParentNotFound naming BuildFromParents, got %v", name, parent, err)
+					if !errors.Is(err, closuretree.ErrParentNotFound) || !strings.Contains(fmt.Sprint(err), "BuildFromParents") ||
+						!strings.Contains(fmt.Sprint(err), fmt.Sprintf("node %d is not linked into the tree", parent)) {
+						t.Errorf("%s under %d: want ErrParentNotFound saying the node is not linked into the tree and naming BuildFromParents, got %v",
+							name, parent, err)
 					}
 				}
 			}

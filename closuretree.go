@@ -469,7 +469,7 @@ func (ct *Tree) requireParent(tx *gorm.DB, parentID uint, tenant string) error {
 		return ErrParentNotFound
 	}
 	if row.Linked == nil {
-		return fmt.Errorf("%w: node %d has no closure rows; build them with BuildFromParents", ErrParentNotFound, parentID)
+		return fmt.Errorf("%w: node %d is not linked into the tree; build the tree with BuildFromParents", ErrParentNotFound, parentID)
 	}
 	return nil
 }
