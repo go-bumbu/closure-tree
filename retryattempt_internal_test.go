@@ -113,10 +113,12 @@ func TestAddRetriedAttemptStartsFromTheCallersItem(t *testing.T) {
 }
 
 // A GetOrAdd whose create failed starts its next attempt from a fresh copy of the caller's item.
-// When it creates the node, the hook of the failed attempt leaves no trace in the stored row and
-// the caller's item gets only the new Node. When it finds the node another call added between the
-// attempts, the caller's item is overwritten with the stored row, as on every found path: gorm's
-// scan zeroes the copy first, so the field without a column is empty, not the hook's value.
+// The created case checks that the hook of the failed attempt leaves no trace in the stored row and
+// that the caller's item gets only the new Node; it is the case that fails without the fresh copy.
+// The found case passes with or without the fresh copy, because gorm's Scan zeroes its destination
+// before it fills it. It pins the result of the found path after a retry: the node another call
+// added between the attempts, with the caller's item overwritten by the stored row, so the field
+// without a column is empty, not the hook's value.
 func TestGetOrAddRetriedAttemptStartsFromTheCallersItem(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
