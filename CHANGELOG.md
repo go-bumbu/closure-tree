@@ -5,7 +5,8 @@
 ### Breaking changes
 
 - **MySQL 8.0.17 or later.** `New` returns an error for a MySQL server older than 8.0.17; v0.10.0
-  accepted any 8.0. TiDB, which reports itself as 8.0.11, is rejected too. Upgrade the server.
+  accepted any 8.0. Upgrade the server. TiDB, which always reports itself as 8.0.11, is rejected
+  and is not supported.
 - **MySQL: tenants are compared exactly.** On MySQL, `Migrate` gives the tenant column of the
   tree's four tables the collation `utf8mb4_0900_bin` while none of them has a row, so "Acme",
   "acme" and "acmé" are three tenants, as on PostgreSQL and SQLite. The library does not convert a
@@ -13,7 +14,10 @@
   column, and under MySQL's default `utf8mb4_0900_ai_ci` tenants that differ only in case or accents
   stay one tenant (`DeleteTenant` deletes all of them). `Migrate` returns the new
   `ErrTenantCollation` when the four tenant columns do not share one collation. To change a tree
-  with rows, follow the paragraph "Tenants" under "Closure Tree methods" in the README.
+  with rows, follow the paragraph "Tenants" under "Closure Tree methods" in the README. On a tree
+  without rows, `Migrate` sets that collation with `ALTER TABLE ... MODIFY`, also on the first
+  `Migrate` of a new tree, so the database user needs the ALTER privilege, where v0.10.0 needed
+  only CREATE for a new tree: grant it.
 - **MySQL: the library's own transactions run at READ COMMITTED**, whatever the connection's
   default level is (every write on a Tree that is not inside a caller's transaction). A server with
   binary logging on and `binlog_format=STATEMENT` refuses these writes (error 1665): switch it to
@@ -26,12 +30,12 @@
   with `CREATE INDEX CONCURRENTLY` under that name (README, the paragraph on `Migrate` under
   "Usage"); MySQL builds it online, but at its start and end waits for a metadata lock until the
   open transactions that used the closure table end, and while it waits every new statement on that
-  table queues behind it, so run `Migrate` when no long transaction uses the tree. On MySQL, a write in a transaction the library
-  opens itself (a Tree not bound with `WithTx`, or bound to a handle that is not in a transaction)
-  that loses a deadlock (error 1213) now runs again, up to 5 attempts in all, so your model's gorm
-  hooks run once per attempt, also in attempts MySQL rolled back: keep them free of effects outside
-  the database, or let those effects tolerate repeats. See "Concurrent writes on MySQL" in the
-  README.
+  table queues behind it, so run `Migrate` when no long transaction uses the tree. On MySQL, a
+  write in a transaction the library opens itself (a Tree not bound with `WithTx`, or bound to a
+  handle that is not in a transaction) that loses a deadlock (error 1213) now runs again, up to 5
+  attempts in all, so your model's gorm hooks run once per attempt, also in attempts MySQL rolled
+  back: keep them free of effects outside the database, or let those effects tolerate repeats. See
+  "Concurrent writes on MySQL" in the README.
 - **`New` rejects a model with a field of its own on a column of `Node`** (`node_id`,
   `parent_id`, `tenant` or `sort_order`, for example its own `Tenant string`) with the new
   `ErrNodeColumn`; for `parent_id` the error also matches the new `ErrParentIDColumn`. v0.10.0
@@ -49,9 +53,12 @@
   - a field whose value is a list (a slice other than a byte slice, or an array), a gorm
     expression, a `gorm.Valuer` or a `sql.NamedArg` returns an error. Such a field cannot be a match
     field.
-  - a field with a column default (a `default:` tag, or `autoIncrement`) whose value is the zero
-    value returns an error: gorm stores the default instead, so v0.10.0 never found the node and
-    `GetOrAdd` added a new one on every call. Set a value, or remove the default.
+  - a field with a column default (a `default:` tag, or `autoIncrement`, which gorm treats as a
+    default) whose value is the zero value returns an error. gorm stores the default instead of the
+    zero value (for `autoIncrement`, the next number); where that differs from the zero value,
+    v0.10.0 never found the node and `GetOrAdd` added a new one on every call. A field whose default
+    is the zero value (`default:0`) is rejected as well, though v0.10.0 found its node. Set a value,
+    or remove the default.
   - on a model that embeds `Node` through another struct, a field of `Node` (`NodeId`, `Tenant`,
     `SortOrder`) returns `ErrUnknownMatchField`, as it already did for a model that embeds `Node`
     directly; v0.10.0 matched it. Remove it from the match fields.
@@ -84,8 +91,9 @@
 ### New
 
 - Run a Tree inside your own transaction: `WithTx`, `LockTenant`, `ErrNotInTransaction`,
-  `ErrSavepointRollback`, and `ErrLockNotAcquired` for a write whose tenant lock row is deleted
-  while it takes the lock (README "Using closure-tree inside your own transaction").
+  `ErrSavepointRollback`, and `ErrLockNotAcquired` for a write on PostgreSQL or MySQL whose tenant
+  lock row was deleted between ensuring and locking it on each of its 3 attempts (README "Using
+  closure-tree inside your own transaction").
 - The ancestors of a node, root first: `Ancestors` and `AncestorIDs`.
 - Filter the nodes of a read by their columns: `Filter` with the `Cond`s `Eq`, `IsNull`, `NotNull`
   and `In`, `PerNode`, `Unfiltered`, a default filter with `WithFilter`, and `ErrUnknownColumn`;
@@ -104,8 +112,8 @@
   the options `DepthRange`, `ForAncestors` and `IncludeVirtualRoot`, and the errors
   `ErrNoAncestors` and `ErrInvalidDepthRange` (README "Subtree subqueries"). `GetLeaves` reads any
   model with a many2many relation to the nodes, into `[]T` or `[]*T`, and takes the read options,
-  `Relation` and `NoPreload`; `Leaf` is optional (also embedded by pointer) and deprecated, and so is
-  `ErrItemIsNotTreeLeaf`, which `GetLeaves` no longer returns (README "Querying leaves").
+  `Relation` and `NoPreload`; `Leaf` is optional (also embedded by pointer) and deprecated, and so
+  is `ErrItemIsNotTreeLeaf`, which `GetLeaves` no longer returns (README "Querying leaves").
 
 ### Fixed
 
