@@ -522,3 +522,61 @@ func TestPlanReadNewOptions(t *testing.T) {
 		t.Errorf("flags: %+v", p)
 	}
 }
+
+// The element types below exercise childrenIndex on embedding the public tests do not cover.
+// CyclicChildren embeds a pointer to itself and has no Children field.
+type CyclicChildren struct {
+	*CyclicChildren
+	Name string
+}
+
+type shallowLinks struct{ Children []*shallowWins }
+type deepLinks struct{ Children []*shallowWins }
+type deepHolder struct{ deepLinks }
+
+// shallowWins has a Children field at depth 1 and one at depth 2; Go promotes the shallower.
+type shallowWins struct {
+	shallowLinks
+	deepHolder
+}
+
+type ExportedPtrLinks struct{ Children []*exportedPtrInValue }
+type valueHolder struct{ *ExportedPtrLinks }
+
+// exportedPtrInValue reaches Children through an unexported struct value, then an exported pointer.
+type exportedPtrInValue struct{ valueHolder }
+
+type hiddenPtrLinks struct{ Children []*hiddenPtrInValue }
+type ExportedHolder struct{ *hiddenPtrLinks }
+
+// hiddenPtrInValue reaches Children through an exported struct value, then an unexported pointer.
+type hiddenPtrInValue struct{ ExportedHolder }
+
+func TestChildrenIndex(t *testing.T) {
+	cases := []struct {
+		elem    any
+		want    []int
+		wantErr string
+	}{
+		{(*CyclicChildren)(nil), nil, "no field Children"},
+		{(*shallowWins)(nil), []int{0, 0}, ""},
+		{(*exportedPtrInValue)(nil), []int{0, 0, 0}, ""},
+		{(*hiddenPtrInValue)(nil), nil, "cannot be reached"},
+	}
+	for _, c := range cases {
+		elemType := reflect.TypeOf(c.elem)
+		got, err := childrenIndex(elemType)
+		if c.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) || !strings.Contains(err.Error(), elemType.Elem().Name()) {
+				t.Errorf("%s: want an error with %q, got %v", elemType, c.wantErr, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", elemType, err)
+		}
+		if diff := cmp.Diff(c.want, got); diff != "" {
+			t.Errorf("%s: index (-want +got):\n%s", elemType, diff)
+		}
+	}
+}

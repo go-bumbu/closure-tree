@@ -281,24 +281,70 @@ type treeEntry struct {
 	node Node
 }
 
+// childrenIndex returns the index path of the Children field of the tree element type elemType, a
+// *T. The field must be a []*T that can be reached on every element. It returns an error naming T
+// when T has no Children field, when embedded structs at the same depth both have one (Go promotes
+// neither), when the field has another type, and when it is promoted through an embedded pointer
+// to an unexported type, which reflection cannot allocate. An embedded unexported struct value is
+// no obstacle: the exported fields promoted through it can be set.
+func childrenIndex(elemType reflect.Type) ([]int, error) {
+	t := elemType.Elem()
+	f, ok := t.FieldByName("Children")
+	if !ok {
+		if embedsField(t, "Children", map[reflect.Type]bool{}) {
+			return nil, fmt.Errorf("cannot read a tree into %s: its field Children is ambiguous, embedded structs at the same depth both have one", t)
+		}
+		return nil, fmt.Errorf("cannot read a tree into %s: it has no field Children; add one of type %s, or read with Descendants", t, reflect.SliceOf(elemType))
+	}
+	if f.Type != reflect.SliceOf(elemType) {
+		return nil, fmt.Errorf("cannot read a tree into %s: its field Children is %s, not %s", t, f.Type, reflect.SliceOf(elemType))
+	}
+	outer := t
+	for _, x := range f.Index[:len(f.Index)-1] {
+		embedded := outer.Field(x)
+		outer = embedded.Type
+		if outer.Kind() == reflect.Pointer {
+			if !embedded.IsExported() {
+				return nil, fmt.Errorf("cannot read a tree into %s: its field Children cannot be reached, it is promoted through the embedded pointer %s to an unexported type", t, outer)
+			}
+			outer = outer.Elem()
+		}
+	}
+	return f.Index, nil
+}
+
+// embedsField reports whether the struct type t, or a struct embedded in it at any depth, by value
+// or by pointer, declares a field called name.
+func embedsField(t reflect.Type, name string, seen map[reflect.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if f.Name == name {
+			return true
+		}
+		ft := f.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if f.Anonymous && ft.Kind() == reflect.Struct && embedsField(ft, name, seen) {
+			return true
+		}
+	}
+	return false
+}
+
 // linkTree appends every element to the Children field of its parent, found through the Node of
 // the scanned rows, and returns the elements whose parent is not among them. children is the index
-// path of the Children field in the element type, nil when it has none; TreeDescendants rejects a
-// Children field of another type than []*T before the query runs. The field is reached on every
-// element, leaves included, allocating nil embedded pointers on the way; when one cannot be
-// allocated, as one to an unexported type, the element has no Children field to link into. An
-// element whose parent is among them but has no Children field is neither linked nor returned, so
-// it is dropped. Siblings, and the returned roots, are ordered by sort_order, then node id.
+// path of the Children field in the element type, which childrenIndex has checked before the query
+// ran, so the field is reached on every element, leaves included, allocating nil embedded pointers
+// on the way. Siblings, and the returned roots, are ordered by sort_order, then node id.
 func linkTree(entries []treeEntry, children []int) []reflect.Value {
 	childrenOf := make(map[uint]reflect.Value, len(entries))
 	for _, e := range entries {
-		var field reflect.Value
-		if children != nil {
-			if f, ok := settableField(e.elem.Elem(), children); ok && f.CanSet() {
-				field = f
-			}
-		}
-		childrenOf[e.node.NodeId] = field
+		childrenOf[e.node.NodeId], _ = settableField(e.elem.Elem(), children)
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].node.SortOrder != entries[j].node.SortOrder {
@@ -314,9 +360,7 @@ func linkTree(entries []treeEntry, children []int) []reflect.Value {
 			roots = append(roots, e.elem)
 			continue
 		}
-		if siblings.IsValid() {
-			siblings.Set(reflect.Append(siblings, e.elem))
-		}
+		siblings.Set(reflect.Append(siblings, e.elem))
 	}
 	return roots
 }

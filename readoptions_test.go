@@ -581,38 +581,144 @@ type childlessNode struct {
 	Name string
 }
 
-// An element type without a Children field gets only the top-level nodes of the read: the deeper
-// nodes of the chain a > b > c are not returned.
-func TestTreeDescendantsWithoutChildrenReturnsTopLevel(t *testing.T) {
+// leftLinks and rightLinks both hold a Children field of sharedLinksNode, which embeds them at the
+// same depth, so Go promotes neither.
+type leftLinks struct {
+	Children []*sharedLinksNode
+}
+
+type rightLinks struct {
+	Children []*sharedLinksNode
+}
+
+type sharedLinksNode struct {
+	closuretree.Node
+	Name string
+	leftLinks
+	rightLinks
+}
+
+// treeLinks holds the Children of hiddenLinksNode, which embeds it by pointer. Reflection cannot
+// allocate a pointer to an unexported embedded type.
+type treeLinks struct {
+	Children []*hiddenLinksNode
+}
+
+type hiddenLinksNode struct {
+	closuretree.Node
+	Name string
+	*treeLinks
+}
+
+// newChainTree returns a tree of TestPayload on db holding the chain a > b > c in tenant1.
+func newChainTree(t *testing.T, db testdbs.TargetDb) *closuretree.Tree {
+	t.Helper()
+	gdb := connAndClose(t, db)
+	dropTreeTables(gdb, TestPayload{})
+	ct, err := newTestTree(gdb, TestPayload{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parent *uint
+	for _, name := range []string{"a", "b", "c"} {
+		n := &TestPayload{Name: name}
+		if err := ct.Add(context.Background(), n, parent, nil, tenant1); err != nil {
+			t.Fatal(err)
+		}
+		parent = up(n.NodeId)
+	}
+	return ct
+}
+
+// A tree read into an element type whose Children field cannot be reached returns an error naming
+// the type and the case, for every maxDepth, before it validates the tenant and the read options
+// and before any query: with the context cancelled a query would fail with context.Canceled.
+func TestTreeDescendantsRejectsUnreachableChildren(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct := newChainTree(t, db)
+			ctx := context.Background()
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel()
+
+			cases := []struct {
+				name     string
+				read     func(ctx context.Context, maxDepth int, tenant string, opts ...closuretree.ReadOption) error
+				elemType string
+				want     string
+			}{
+				{"no Children field", func(ctx context.Context, maxDepth int, tenant string, opts ...closuretree.ReadOption) error {
+					var items []*childlessNode
+					return ct.TreeDescendants(ctx, 0, maxDepth, tenant, &items, opts...)
+				}, "childlessNode", "no field Children"},
+				{"Children shared by two embedded structs", func(ctx context.Context, maxDepth int, tenant string, opts ...closuretree.ReadOption) error {
+					var items []*sharedLinksNode
+					return ct.TreeDescendants(ctx, 0, maxDepth, tenant, &items, opts...)
+				}, "sharedLinksNode", "ambiguous"},
+				{"Children behind an unexported embedded pointer", func(ctx context.Context, maxDepth int, tenant string, opts ...closuretree.ReadOption) error {
+					var items []*hiddenLinksNode
+					return ct.TreeDescendants(ctx, 0, maxDepth, tenant, &items, opts...)
+				}, "hiddenLinksNode", "cannot be reached"},
+			}
+			for _, c := range cases {
+				for _, maxDepth := range []int{0, 1} {
+					errs := map[string]error{
+						"read":           c.read(ctx, maxDepth, tenant1),
+						"cancelled":      c.read(cancelled, maxDepth, tenant1),
+						"empty tenant":   c.read(ctx, maxDepth, ""),
+						"unknown column": c.read(ctx, maxDepth, tenant1, closuretree.Columns("nope")),
+					}
+					for what, err := range errs {
+						if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, closuretree.ErrEmptyTenant) ||
+							errors.Is(err, closuretree.ErrUnknownColumn) ||
+							!strings.Contains(err.Error(), c.elemType) || !strings.Contains(err.Error(), c.want) {
+							t.Errorf("%s, maxDepth %d, %s: want an error naming %s and %q, got %v", c.name, maxDepth, what, c.elemType, c.want, err)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// Without PerNode, Descendants with maxDepth 1 returns the nodes of TreeDescendants with maxDepth
+// 1 in the same order, so it reads one level into an element type without a Children field.
+func TestDescendantsMatchesTreeDescendantsOneLevel(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
-			dropTreeTables(gdb, TestPayload{})
-			ct, err := newTestTree(gdb, TestPayload{})
+			dropTreeTables(gdb, filterNode{})
+			ct, err := newTestTree(gdb, filterNode{})
 			if err != nil {
 				t.Fatal(err)
 			}
+			id := buildFilterTree(t, ct)
 			ctx := context.Background()
-			var parent *uint
-			for _, name := range []string{"a", "b", "c"} {
-				n := &TestPayload{Name: name}
-				if err := ct.Add(ctx, n, parent, nil, tenant1); err != nil {
-					t.Fatal(err)
+			ids := func(nodes []*filterNode) []uint {
+				out := make([]uint, len(nodes))
+				for i, n := range nodes {
+					out[i] = n.NodeId
 				}
-				parent = up(n.NodeId)
+				return out
 			}
 
-			for _, maxDepth := range []int{0, 1} {
-				var items []*childlessNode
-				if err := ct.TreeDescendants(ctx, 0, maxDepth, tenant1, &items); err != nil {
-					t.Fatalf("maxDepth %d: %v", maxDepth, err)
-				}
-				names := make([]string, len(items))
-				for i, it := range items {
-					names[i] = it.Name
-				}
-				if diff := cmp.Diff([]string{"a"}, names); diff != "" {
-					t.Errorf("maxDepth %d (-want +got):\n%s", maxDepth, diff)
+			reads := map[string][]closuretree.ReadOption{
+				"no options": nil,
+				"filter":     {closuretree.Filter(closuretree.IsNull("archived_at"))},
+				"columns":    {closuretree.Columns("name")},
+			}
+			for _, parent := range []string{"", "a", "x", "x2", "b", "x21"} {
+				for what, opts := range reads {
+					var flat, tree []*filterNode
+					if err := ct.Descendants(ctx, id[parent], 1, tenantF, &flat, opts...); err != nil {
+						t.Fatal(err)
+					}
+					if err := ct.TreeDescendants(ctx, id[parent], 1, tenantF, &tree, opts...); err != nil {
+						t.Fatal(err)
+					}
+					if diff := cmp.Diff(ids(tree), ids(flat)); diff != "" {
+						t.Errorf("parent %q, %s (-TreeDescendants +Descendants):\n%s", parent, what, diff)
+					}
 				}
 			}
 		})
@@ -630,40 +736,27 @@ type linkedNode struct {
 	*TreeLinks
 }
 
-// treeLinks holds the Children of hiddenLinksNode, which embeds it by pointer. Reflection cannot
-// allocate a pointer to an unexported embedded type.
-type treeLinks struct {
-	Children []*hiddenLinksNode
+// plainLinks holds the Children of plainLinksNode, which embeds it by value. The exported Children
+// promoted through an unexported embedded struct value can be set.
+type plainLinks struct {
+	Children []*plainLinksNode
 }
 
-type hiddenLinksNode struct {
+type plainLinksNode struct {
 	closuretree.Node
 	Name string
-	*treeLinks
+	plainLinks
 }
 
 // A Children field promoted through an embedded pointer struct is reached by allocating the
 // pointer on every element, so the chain a > b > c comes back linked and the Children of a leaf can
-// be read. When the pointer is unexported and cannot be allocated, the elements are not linked: only
-// the top-level nodes come back, as for an element type without Children.
+// be read. When the pointer is unexported and cannot be allocated, the read returns an error
+// before querying.
 func TestTreeDescendantsChildrenThroughEmbeddedPointer(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
-			gdb := connAndClose(t, db)
-			dropTreeTables(gdb, TestPayload{})
-			ct, err := newTestTree(gdb, TestPayload{})
-			if err != nil {
-				t.Fatal(err)
-			}
+			ct := newChainTree(t, db)
 			ctx := context.Background()
-			var parent *uint
-			for _, name := range []string{"a", "b", "c"} {
-				n := &TestPayload{Name: name}
-				if err := ct.Add(ctx, n, parent, nil, tenant1); err != nil {
-					t.Fatal(err)
-				}
-				parent = up(n.NodeId)
-			}
 
 			var linked []*linkedNode
 			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &linked); err != nil {
@@ -686,15 +779,27 @@ func TestTreeDescendantsChildrenThroughEmbeddedPointer(t *testing.T) {
 			}
 
 			var hidden []*hiddenLinksNode
-			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &hidden); err != nil {
+			if err := ct.TreeDescendants(ctx, 0, 0, tenant1, &hidden); err == nil || !strings.Contains(err.Error(), "hiddenLinksNode") ||
+				!strings.Contains(err.Error(), "cannot be reached") || len(hidden) != 0 {
+				t.Errorf("unexported embedded pointer: want an error naming hiddenLinksNode, got %d roots, %v", len(hidden), err)
+			}
+		})
+	}
+}
+
+// A Children field promoted through an unexported embedded struct value can be set, so the chain
+// a > b > c comes back linked.
+func TestTreeDescendantsChildrenThroughEmbeddedValue(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct := newChainTree(t, db)
+			var plain []*plainLinksNode
+			if err := ct.TreeDescendants(context.Background(), 0, 0, tenant1, &plain); err != nil {
 				t.Fatal(err)
 			}
-			names := make([]string, len(hidden))
-			for i, n := range hidden {
-				names[i] = n.Name
-			}
-			if diff := cmp.Diff([]string{"a"}, names); diff != "" {
-				t.Errorf("unexported embedded pointer (-want +got):\n%s", diff)
+			if len(plain) != 1 || len(plain[0].Children) != 1 || len(plain[0].Children[0].Children) != 1 ||
+				plain[0].Children[0].Children[0].Name != "c" {
+				t.Errorf("want the chain a > b > c, got %d roots", len(plain))
 			}
 		})
 	}

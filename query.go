@@ -198,12 +198,15 @@ const absMaxDepth = 2147483647
 //
 // Each row is scanned with gorm's scanner into the Tree's model and then copied into the element
 // type as in Descendants. Children are linked through the node id and parent id of the scanned
-// row, so the element type does not have to embed Node. With an element type without a Children
-// field only the top-level nodes of the read come back, the direct children of parent; deeper nodes
-// are not returned. One whose Children field is not a []*T returns an error before querying. A
-// Children field promoted through an embedded pointer struct is reached on every element, leaves
-// included, by allocating the nil pointer; when it cannot be allocated (a pointer to an unexported
-// type), the read behaves as without Children.
+// row, so the element type does not have to embed Node. A Children field promoted through an
+// embedded pointer struct is reached on every element, leaves included, by allocating the nil
+// pointer. The read returns an error before it validates the tenant and before any query, for
+// every maxDepth, when the element type has no Children field that can be linked: none, one in
+// each of two structs embedded at the same depth (Go promotes neither), one that is not a []*T, or
+// one promoted through an embedded pointer to an unexported type, which cannot be allocated. A
+// caller without such a field adds it, or reads with Descendants, which takes the same parameters:
+// without PerNode, Descendants with maxDepth 1 returns the nodes of TreeDescendants with maxDepth 1
+// in the same order.
 //
 // TreeDescendants honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A
 // node that does not match the filter is left out with its whole subtree; its children are never
@@ -222,12 +225,9 @@ func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, 
 
 	sliceVal := reflect.ValueOf(items).Elem()
 	elemType := sliceVal.Type().Elem()
-	var children []int
-	if f, ok := elemType.Elem().FieldByName("Children"); ok {
-		if f.Type != reflect.SliceOf(elemType) {
-			return fmt.Errorf("cannot read a tree into %s: its field Children is %s, not %s", elemType.Elem(), f.Type, reflect.SliceOf(elemType))
-		}
-		children = f.Index
+	children, err := childrenIndex(elemType)
+	if err != nil {
+		return err
 	}
 
 	tenant, err = validateTenant(tenant)
