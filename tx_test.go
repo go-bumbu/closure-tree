@@ -496,14 +496,18 @@ func TestLockTenantFirstSerializesConflictingMoves(t *testing.T) {
 					return err
 				}
 				releaseB()
-				if db.DbType() == testdbs.DBTypePostgres {
+				switch db.DbType() {
+				case testdbs.DBTypePostgres:
 					if err := waitForPostgresLockWaiter(ctx, gdb, 10*time.Second); err != nil {
 						return fmt.Errorf("B did not wait on the lock: %w", err)
 					}
-				} else {
+				case testdbs.DBTypeMysql:
+					if err := waitForMySQLLockStatement(ctx, gdb, ct.NodeTableName(), 10*time.Second); err != nil {
+						return fmt.Errorf("B did not wait on the lock: %w", err)
+					}
+				default:
 					// SQLite shows no lock waits: B's write fails as busy and B retries (see above).
-					// MySQL shows them (INNODB_TRX, performance_schema.data_lock_waits) only to a user
-					// with privileges the test user lacks. A gives B time to reach the lock.
+					// A gives B time to reach the lock.
 					time.Sleep(200 * time.Millisecond)
 				}
 				return tt.Update(ctx, x.NodeId, nil, up(y.NodeId), nil, tenant1)
@@ -539,6 +543,33 @@ func waitForPostgresLockWaiter(ctx context.Context, gdb *gorm.DB, timeout time.D
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("no session waited on a lock within %v", timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForMySQLLockStatement returns once another session on gdb's MySQL database runs a statement on
+// the lock table of the tree whose node table is nodeTbl, or an error when none does within
+// timeout. MySQL shows lock waits (INNODB_TRX, performance_schema.data_lock_waits) only to a user
+// with privileges the test user lacks, and the processlist has no state for a row-lock wait, but
+// each user sees its own sessions there. A session that runs a statement on the lock table while
+// another holds the tenant's row is at the lock: B's attempt blocks on the upsert of the lock row
+// or on its SELECT ... FOR UPDATE (lockTenantHook). A prepared statement shows command Execute.
+func waitForMySQLLockStatement(ctx context.Context, gdb *gorm.DB, nodeTbl string, timeout time.Duration) error {
+	const query = "SELECT COUNT(*) FROM information_schema.processlist WHERE db = DATABASE() " +
+		"AND id <> CONNECTION_ID() AND command <> 'Sleep' AND LOCATE(?, info) > 0"
+	lockTbl := "closure_tree_lock_" + nodeTbl
+	deadline := time.Now().Add(timeout)
+	for {
+		var n int64
+		if err := gdb.WithContext(ctx).Raw(query, lockTbl).Scan(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no session ran a statement on %s within %v", lockTbl, timeout)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
