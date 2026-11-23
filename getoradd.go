@@ -38,7 +38,10 @@ import (
 // Every other value is bound as one value. Every value is checked as Eq checks its value: a field
 // whose value is a slice or an array (other than a byte slice or a driver.Valuer), or whose type is
 // a gorm.Valuer (also as a nil pointer), returns an error before any query. Such a field cannot be
-// a match field, but an item with a gorm.Valuer field can still be added. gorm expands a list into
+// a match field, but an item with a gorm.Valuer field can still be added. A field with a column
+// default (a default: tag, or autoIncrement) whose value is the zero value, also a nil pointer,
+// returns an error before any query too, because gorm stores the default instead of the zero value;
+// any other value, also a pointer to the zero value, is matched as it is. gorm expands a list into
 // several values on insert as well, so an item whose list field holds more than one element cannot
 // be added; give such a field a serializer. A field with a gorm serializer is matched by its
 // serialized value.
@@ -86,7 +89,8 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 // actual value including zero values as in FindChild. An empty matchFields returns ErrEmptyMatch;
 // an unknown or Node-owned field, or a Go field name that fields of several columns share, returns
 // ErrUnknownMatchField before anything is added. A match field whose value is a list or a
-// gorm.Valuer returns an error before any query, as in FindChild.
+// gorm.Valuer, or the zero value of a field with a column default, returns an error before any
+// query, as in FindChild.
 //
 // When item is a pointer, its embedded Node — including NodeId — is populated on BOTH paths, so the
 // returned node id can be chained as the parentID of the next level down.
@@ -171,7 +175,9 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // match compares with what Add stores, where Eq binds the value it is given. Every other value is
 // bound through oneValue, as Eq binds it. The value gorm reads from the field (for a field with a
 // serializer, a driver.Valuer that serializes it) is checked as Eq checks its value
-// (checkBindValue), so a list or a gorm.Valuer is rejected before any query. Node-owned fields
+// (checkBindValue), so a list or a gorm.Valuer is rejected before any query, and so is a value
+// that gorm reports as zero in a field with a default (HasDefaultValue), which Create replaces
+// with the default. Node-owned fields
 // (NodeId/Tenant/SortOrder/ParentId) and unknown fields are rejected with ErrUnknownMatchField. An
 // empty matchFields returns ErrEmptyMatch. Column identifiers are dialect-quoted, so a field
 // mapping to a reserved-word column still produces valid SQL.
@@ -208,7 +214,12 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 		ct.db.QuoteTo(&b, "nodes."+f.DBName)
 		col := b.String()
 
-		raw, _ := f.ValueOf(ctx, rv)
+		raw, zero := f.ValueOf(ctx, rv)
+		if zero && f.HasDefaultValue {
+			// gorm's Create writes the column default instead of a zero value, so the match
+			// would never find the node that Add stores
+			return "", nil, fmt.Errorf("match field %q: its zero value is stored as the column default; set a value or remove the default", name)
+		}
 		if err := checkBindValue(raw); err != nil {
 			return "", nil, fmt.Errorf("match field %q: %w", name, err)
 		}

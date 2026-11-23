@@ -1178,6 +1178,107 @@ func TestMatchRejectsUnboundValues(t *testing.T) {
 	}
 }
 
+// defaultKindNode and defaultPtrKindNode have a column with a default, which gorm writes instead of
+// the field's zero value.
+type defaultKindNode struct {
+	closuretree.Node
+	Name string
+	Kind string `gorm:"size:20;default:x"`
+}
+
+type defaultPtrKindNode struct {
+	closuretree.Node
+	Name string
+	Kind *string `gorm:"size:20;default:x"`
+}
+
+// A match field with a default whose value is the zero value fails before any query, since Add
+// would store the default and the next GetOrAdd would not find the node. GetOrAdd creates nothing.
+func TestMatchRejectsZeroValueWithDefault(t *testing.T) {
+	cases := []struct {
+		name  string
+		model any
+		item  func() any
+	}{
+		{"zero value", defaultKindNode{}, func() any { return &defaultKindNode{Name: "a"} }},
+		{"nil pointer", defaultPtrKindNode{}, func() any { return &defaultPtrKindNode{Name: "a"} }},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, c := range cases {
+			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, c.model)
+				ct, err := newTestTree(gdb, c.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fields := []string{"Name", "Kind"}
+				rejected := func(what string, err error) {
+					t.Helper()
+					if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Kind") {
+						t.Errorf("%s: want an error naming Kind before any query, got %v", what, err)
+					}
+				}
+				cancelled, cancel := context.WithCancel(context.Background())
+				cancel() // a query would fail with context.Canceled, so the check must come first
+				_, err = ct.GetOrAdd(cancelled, c.item(), 0, tenant1, fields)
+				rejected("GetOrAdd", err)
+				_, err = ct.FindChild(cancelled, 0, tenant1, c.item(), fields, c.item())
+				rejected("FindChild", err)
+
+				for range 2 {
+					_, err := ct.GetOrAdd(context.Background(), c.item(), 0, tenant1, fields)
+					rejected("GetOrAdd", err)
+				}
+				if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 0 {
+					t.Errorf("GetOrAdd must create nothing, got %d nodes", n)
+				}
+			})
+		}
+	}
+}
+
+// A match field with a default whose value is not the zero value, also a pointer to the zero
+// value, is stored and matched as it is.
+func TestMatchValueWithDefault(t *testing.T) {
+	empty := ""
+	cases := []struct {
+		name  string
+		model any
+		item  func() idItem
+	}{
+		{"value", defaultKindNode{}, func() idItem { return &defaultKindNode{Name: "a", Kind: "y"} }},
+		{"pointer to the zero value", defaultPtrKindNode{}, func() idItem { return &defaultPtrKindNode{Name: "a", Kind: &empty} }},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, c := range cases {
+			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, c.model)
+				ct, err := newTestTree(gdb, c.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				fields := []string{"Name", "Kind"}
+				first := c.item()
+				if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, fields); err != nil || !created {
+					t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+				}
+				second := c.item()
+				created, err := ct.GetOrAdd(ctx, second, 0, tenant1, fields)
+				if err != nil || created || second.Id() != first.Id() {
+					t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.Id(), first.Id(), err)
+				}
+				out := c.item()
+				if found, err := ct.FindChild(ctx, 0, tenant1, c.item(), fields, out); err != nil || !found || out.Id() != first.Id() {
+					t.Errorf("FindChild: found=%v id=%d (first %d) err=%v", found, out.Id(), first.Id(), err)
+				}
+			})
+		}
+	}
+}
+
 // A gorm.Valuer field is checked only when it is a match field: GetOrAdd matching on another field
 // adds the item with it, and finds that item the second time.
 func TestGetOrAddStoresValuerThatIsNotMatched(t *testing.T) {

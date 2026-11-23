@@ -163,7 +163,10 @@ value it is given, so use `IsNull` there. Every other value is bound as one valu
 and every value is checked as `Eq` checks it: a field whose value is a slice or an array (other
 than a byte slice or a `driver.Valuer`), or whose type is a `gorm.Valuer` (such as a JSON column
 type, also as a nil pointer), returns an error before any query. Such a field cannot be a match
-field, but an item with a `gorm.Valuer` field can still be added. gorm expands a list into several
+field, but an item with a `gorm.Valuer` field can still be added. A field with a column default
+(a `default:` tag, or `autoIncrement`) whose value is the zero value, also a nil pointer, returns
+an error before any query too, because gorm stores the default instead of the zero value; any other
+value, also a pointer to the zero value, is matched as it is. gorm expands a list into several
 values on insert as well, so an item whose list field holds more than one element cannot be added;
 give such a field a serializer. A field with a gorm serializer (`gorm:"serializer:json"`) is
 matched by its serialized value. The match is scoped to the tenant; `parentID = 0` operates on the
