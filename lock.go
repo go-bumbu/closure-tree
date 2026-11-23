@@ -5,12 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"gorm.io/gorm"
 )
 
 // savepointSeq numbers the savepoints writeTx takes, so every call uses a name of its own.
 var savepointSeq atomic.Uint64
+
+// savepointRollbackTimeout bounds the rollback to the savepoint after a failed write, which runs
+// detached from the write's cancellation. A variable only so that a test can shorten it.
+var savepointRollbackTimeout = 30 * time.Second
 
 // writeTx runs fn inside a transaction that first takes the per-tenant lock, so structural writes
 // for a tenant serialize instead of racing on the lock-free guards in Add/Update/moveInTx. Every
@@ -38,9 +43,11 @@ func (ct *Tree) writeTx(ctx context.Context, tenant string, fn func(tx *gorm.DB)
 // DisableNestedTransaction is set. On success the savepoint is released, so savepoints do not nest
 // deeper with every write; the lock survives the release. On an error, or a panic, the work is
 // rolled back to the savepoint, even when the write's context is cancelled, which leaves the
-// caller's transaction usable, and the original error is returned (or the panic re-raised). When
-// that rollback fails, for example because the context ended during a statement and the driver
-// dropped the connection, the transaction is unusable: the failed rollback, wrapped in
+// caller's transaction usable, and the original error is returned (or the panic re-raised). The
+// rollback keeps the context's values but not its cancellation, and runs under a timeout of its
+// own (savepointRollbackTimeout, 30 seconds). When that rollback fails, for example because the
+// context ended during a statement and the driver dropped the connection, or because it timed
+// out, the transaction is unusable: the failed rollback, wrapped in
 // ErrSavepointRollback, is joined to the original error.
 func (ct *Tree) savepointTx(tx *gorm.DB, tenant string, fn func(tx *gorm.DB) error) (err error) {
 	name := fmt.Sprintf("ct_sp_%d", savepointSeq.Add(1))
@@ -54,8 +61,10 @@ func (ct *Tree) savepointTx(tx *gorm.DB, tenant string, fn func(tx *gorm.DB) err
 		if panicked || err != nil {
 			// Detach from the write's cancellation: database/sql refuses a statement on a done
 			// context, and a skipped rollback would leave the partial write in the caller's
-			// transaction.
-			rbTx := tx.WithContext(context.WithoutCancel(tx.Statement.Context))
+			// transaction. Bound it instead, so a stuck server cannot hold the caller forever.
+			rbCtx, cancel := context.WithTimeout(context.WithoutCancel(tx.Statement.Context), savepointRollbackTimeout)
+			defer cancel()
+			rbTx := tx.WithContext(rbCtx)
 			if rbErr := rollbackToSavepoint(rbTx, name); rbErr != nil {
 				err = errors.Join(err, fmt.Errorf("%w: %w", ErrSavepointRollback, rbErr))
 			}

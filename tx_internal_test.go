@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-bumbu/testdbs"
 	"gorm.io/gorm"
@@ -177,6 +178,43 @@ func TestWriteTxFailedRollbackKeepsOriginalError(t *testing.T) {
 			}
 			if !errors.Is(err, ErrSavepointRollback) {
 				t.Errorf("want ErrSavepointRollback, got %v", err)
+			}
+		})
+	}
+}
+
+// The rollback to the savepoint after a failed write is detached from the write's cancellation but
+// runs under savepointRollbackTimeout: with a deadline already past, it is refused and reported as
+// ErrSavepointRollback with context.DeadlineExceeded, next to the write's own error.
+func TestWriteTxRollbackRunsUnderTimeout(t *testing.T) {
+	if savepointRollbackTimeout != 30*time.Second {
+		t.Errorf("want a 30 s bound on the rollback to the savepoint, got %v", savepointRollbackTimeout)
+	}
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			ct := newDBInternalTree(t, db, txSample{})
+			old := savepointRollbackTimeout
+			savepointRollbackTimeout = 0 // a deadline already past
+			t.Cleanup(func() { savepointRollbackTimeout = old })
+			errWrite := errors.New("write failed")
+
+			// The rollback to the savepoint fails on purpose; keep the output clean.
+			tx := ct.db.Session(&gorm.Session{Logger: logger.Discard}).Begin()
+			if tx.Error != nil {
+				t.Fatal(tx.Error)
+			}
+			defer tx.Rollback()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			err := ct.WithTx(tx).writeTx(ctx, "t1", func(tx *gorm.DB) error {
+				cancel()
+				return errWrite
+			})
+			if !errors.Is(err, errWrite) {
+				t.Errorf("want the write's error, got %v", err)
+			}
+			if !errors.Is(err, ErrSavepointRollback) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("want ErrSavepointRollback with context.DeadlineExceeded, got %v", err)
 			}
 		})
 	}

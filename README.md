@@ -450,7 +450,8 @@ err := db.Transaction(func(tx *gorm.DB) error {
   instead after a MySQL deadlock (below); when `errors.Is(err, closuretree.ErrSavepointRollback)` is
   true: the tree could not roll back to its savepoint, for example because the context ended during
   a statement and the driver dropped the connection, which loses your transaction's earlier work
-  too; and when the context you passed has ended (`ctx.Err() != nil`), because the driver may have
+  too, or because the rollback, which runs even after your context has ended, took more than 30
+  seconds; and when the context you passed has ended (`ctx.Err() != nil`), because the driver may have
   dropped the connection and the tree reports that only for statements inside its savepoint.
 * Reads on the copy, and the statements a write runs before its savepoint (`SAVEPOINT` itself, the
   first reads of `DeleteTenant` and `RenormalizeAll`), are outside the savepoint: their failure
