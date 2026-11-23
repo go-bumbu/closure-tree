@@ -60,7 +60,9 @@ func (ct *Tree) updateFieldsInTx(tx *gorm.DB, id uint, updateMap map[string]any,
 // Pass a non-nil newParentID to move the node: &0 moves to root, &someID moves under someID. A move
 // without afterNodeID appends the node last among its new siblings.
 // Pass a non-nil afterNodeID to set sort order: &0 places first, &someID places after that sibling.
-// Passing all three nil returns ErrNoOp.
+// Passing all three nil returns ErrNoOp. A node that does not exist for tenant returns
+// ErrNodeNotFound and nothing is written; so does a move or a reorder of a node that has no closure
+// rows yet (see BuildFromParents).
 func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint, afterNodeID *uint, tenant string) error {
 	var err error
 	tenant, err = validateTenant(tenant)
@@ -116,12 +118,16 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint
 
 // maybeMoveInTx moves node id to newPID unless hasReorder is true and the node is
 // already under newPID (same-parent reorder). Without this guard, moveInTx would return
-// ErrInvalidMove for a same-parent reorder before the reorder gets to run.
+// ErrInvalidMove for a same-parent reorder before the reorder gets to run. A node without a parent
+// row does not exist: it returns ErrNodeNotFound before anything is written.
 func (ct *Tree) maybeMoveInTx(tx *gorm.DB, id, newPID uint, hasReorder bool, tenant string) error {
 	if hasReorder {
-		curParent, _, err := ct.currentParent(tx, id, tenant)
+		curParent, found, err := ct.currentParent(tx, id, tenant)
 		if err != nil {
 			return err
+		}
+		if !found {
+			return ErrNodeNotFound
 		}
 		if curParent == newPID {
 			return nil // already under target parent; let reorder handle the rest

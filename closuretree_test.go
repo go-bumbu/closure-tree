@@ -2821,6 +2821,47 @@ func TestUpdateReorderOnlyMissingNode(t *testing.T) {
 	}
 }
 
+// An Update that moves a node that does not exist to the root and places it there must return
+// ErrNodeNotFound and write nothing, also when the missing node's parent would be the root, which
+// a reorder within the same parent skips the move for.
+func TestUpdateMoveAndReorderMissingNode(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			a := &TestPayload{Name: "a"}
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			before := countTenant(t, gdb, ct, tenant1)
+
+			for _, after := range []uint{0, a.NodeId} {
+				err := ct.Update(ctx, 9999, nil, up(0), up(after), tenant1)
+				if !errors.Is(err, closuretree.ErrNodeNotFound) {
+					t.Errorf("move to root after %d of a missing id: want ErrNodeNotFound, got %v", after, err)
+				}
+			}
+			if got := countTenant(t, gdb, ct, tenant1); got != before {
+				t.Errorf("rows of the tenant changed: before %+v, after %+v", before, got)
+			}
+			if got := countTenant(t, gdb, ct, tenant2); got.Meta != 0 || got.Closure != 0 || got.Nodes != 0 {
+				t.Errorf("tenant without nodes got rows: %+v", got)
+			}
+			if err := ct.Update(ctx, a.NodeId, nil, up(0), up(0), tenant2); !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("move to root of an id of another tenant: want ErrNodeNotFound, got %v", err)
+			}
+			if got := countTenant(t, gdb, ct, tenant2); got.Meta != 0 || got.Closure != 0 || got.Nodes != 0 {
+				t.Errorf("tenant without nodes got rows: %+v", got)
+			}
+		})
+	}
+}
+
 // TestNilItemPointer is a regression test: passing a typed-nil pointer to the entry
 // points that reflect over the item used to panic; they must now return ErrNilItem.
 func TestNilItemPointer(t *testing.T) {
