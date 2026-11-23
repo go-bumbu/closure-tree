@@ -57,7 +57,7 @@ LOCAL_SQLITE=true go test -run TestTreeGetNode ./...
 - **Schema**: the closure table has a unique constraint on `(ancestor_id, descendant_id, tenant, depth)`. A reflexive self-row at `depth=0` exists for every node; root nodes also have an ancestor row with `ancestor_id=0, depth=1`. A node row without a closure row at `depth=1`, as before `BuildFromParents`, is not part of the tree: `Add`, `GetOrAdd` and a move under it return `ErrParentNotFound` wrapped with a message naming `BuildFromParents` (`requireParent` in `closuretree.go`, one statement).
 - **`Add`/`Update` use reflection** to copy only non-`Node` fields, using a `map[string]any` for `Update` to preserve zero values. Fields with `gorm:"-"` (empty `DBName`) are excluded.
 - **Transactions**: a write on a Tree bound to a transaction (`WithTx`) runs in its own savepoint, and a failed rollback to it is wrapped in `ErrSavepointRollback` (the caller's transaction is then unusable); on PostgreSQL and MySQL the library's own transactions run at READ COMMITTED.
-- **`New` rejects a model with its own field mapped to `parent_id`** (`ErrParentIDColumn`); only `Node.ParentId` may use that column.
+- **`New` rejects a model with its own field mapped to `parent_id`** (`ErrParentIDColumn`); only `Node.ParentId` may use that column. `Node` itself is a valid model: `nodeOwned` counts all its fields as Node-owned, and `findNodeValue` returns the value itself.
 - **`TreeDescendants`/`TreeDescendantsIds`** use `WITH RECURSIVE` CTEs. The internal depth counter is named `cte_depth` (not `depth`) to avoid shadowing any `depth` column in the user struct.
 - **MySQL 8.0.17+** is enforced at `New` time via `checkVersion` in `dialect.go`.
 

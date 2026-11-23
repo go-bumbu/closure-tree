@@ -40,6 +40,40 @@ func TestNewRejectsOwnParentIDColumn(t *testing.T) {
 	}
 }
 
+// Node itself is a valid model, as in v0.10.0: its ParentId is Node's own field.
+func TestNodeAsModel(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, closuretree.Node{})
+			ct, err := newTestTree(gdb, closuretree.Node{})
+			if err != nil {
+				t.Fatalf("New or Migrate with Node as the model: %v", err)
+			}
+			ctx := context.Background()
+			root := &closuretree.Node{}
+			if err := ct.Add(ctx, root, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			child := &closuretree.Node{}
+			if err := ct.Add(ctx, child, up(root.NodeId), nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			if err := ct.Update(ctx, child.NodeId, &closuretree.Node{SortOrder: 99}, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			var got []closuretree.Node
+			if err := ct.Descendants(ctx, root.NodeId, 0, tenant1, &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].NodeId != child.NodeId || got[0].ParentId != root.NodeId ||
+				got[0].SortOrder != child.SortOrder || got[0].Tenant != tenant1 || child.Tenant != tenant1 {
+				t.Errorf("want the child %+v under %d, got %+v", child, root.NodeId, got)
+			}
+		})
+	}
+}
+
 // Node's own columns must be recognised when Node is embedded through another struct.
 func TestNodeFieldsOnMultiLevelModel(t *testing.T) {
 	for _, db := range testdbs.DBs() {
