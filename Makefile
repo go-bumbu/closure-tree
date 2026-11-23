@@ -10,10 +10,10 @@ test: ## run fast go tests
 	@go test ./...
 
 test-full: ## run go full tests (uses test containers)
-	@go test ./... -alldbs
+	@go test ./... -alldbs -timeout 20m
 
-test-race: ## run go full tests with race test (uses test containers)
-	@go test ./... -race -count 2
+test-race: ## run go tests with the race detector (SQLite only, skips the large-tree tests)
+	@go test ./... -race -short -count 2
 
 lint: ## run go linter
 	@# depends on https://github.com/golangci/golangci-lint
@@ -21,7 +21,7 @@ lint: ## run go linter
 
 license-check: ## check for invalid licenses
 	@# depends on : https://github.com/elastic/go-licence-detector
-	@go list -m -mod=readonly  -json all  | go-licence-detector -includeIndirect -validate -rules allowedLicenses.json
+	@go list -m -mod=readonly  -json all  | go-licence-detector -includeIndirect -validate -rules allowedLicenses.json -overrides overrideLicenses.json
 
 benchmark: ## run go benchmarks
 	@go test -run=^$$ -bench=. ./...
@@ -29,7 +29,7 @@ benchmark: ## run go benchmarks
 .PHONY: verify
 verify: ## run all checks; runs every check and fails if any fail
 	@fail=0; \
-	for target in lint test-full license-check benchmark coverage; do \
+	for target in lint test-full test-race license-check benchmark coverage; do \
 		echo "==================== make $$target ===================="; \
 		$(MAKE) --no-print-directory $$target || fail=1; \
 	done; \

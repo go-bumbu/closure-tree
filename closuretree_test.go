@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -107,12 +108,16 @@ func up(v uint) *uint { return &v }
 
 // connAndClose creates a database connection for the test and disables idle connection
 // pooling so connections are released immediately after each operation, preventing
-// PostgreSQL connection exhaustion when many tests accumulate open pools.
+// PostgreSQL connection exhaustion when many tests accumulate open pools. On PostgreSQL it also
+// frees the connections the harness itself leaks; see freeLeakedPostgresConns.
 func connAndClose(t *testing.T, db testdbs.TargetDb) *gorm.DB {
 	t.Helper()
 	gdb := db.ConnDbName(t.Name())
 	if sqlDB, err := gdb.DB(); err == nil {
 		sqlDB.SetMaxIdleConns(0)
+	}
+	if db.DbType() == testdbs.DBTypePostgres {
+		freeLeakedPostgresConns(t, gdb)
 	}
 	return gdb
 }
@@ -405,7 +410,7 @@ func TestUpdateSortOrder(t *testing.T) {
 				}
 			}
 
-			// afterNodeID=nil leaves sort order unchanged (use a different name to avoid MySQL no-op)
+			// afterNodeID=nil leaves sort order unchanged (use a different name to avoid MariaDB no-op)
 			if err := ct.Update(ctx, a.NodeId, &TestPayload{Name: "a2"}, nil, nil, tenant1); err != nil {
 				t.Fatal(err)
 			}
@@ -1641,6 +1646,158 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+// DeleteRecurse does not reject the virtual root: id 0 deletes every node of the tenant that has
+// closure rows, with its closure and sort-order rows, and keeps the lock row and the other tenants.
+// Once no node with closure rows is left, id 0 is not found.
+func TestDeleteRecurseVirtualRoot(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			populateTree(t, ct)
+			otherBefore := closureRows(t, gdb, ct, tenant2)
+			if before := countTenant(t, gdb, ct, tenant1); before.Nodes != 6 || before.Meta == 0 || before.Lock != 1 {
+				t.Fatalf("precondition: want 6 nodes, meta rows and one lock row, got %+v", before)
+			}
+
+			if err := ct.DeleteRecurse(ctx, 0, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			if got := countTenant(t, gdb, ct, tenant1); got != (tenantCounts{Lock: 1}) {
+				t.Errorf("after DeleteRecurse of id 0: %+v", got)
+			}
+			if diff := cmp.Diff(otherBefore, closureRows(t, gdb, ct, tenant2)); diff != "" {
+				t.Errorf("tenant 2 changed (-before +after):\n%s", diff)
+			}
+			if got := countTenant(t, gdb, ct, tenant2); got.Nodes != 8 {
+				t.Errorf("tenant 2 nodes: %d", got.Nodes)
+			}
+			if err := ct.DeleteRecurse(ctx, 0, tenant1); !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("empty tenant: want ErrNodeNotFound, got %v", err)
+			}
+		})
+	}
+}
+
+// DeleteRecurse of id 0 finds nodes through their closure rows, so node rows without closure rows,
+// as before BuildFromParents, are not deleted: alone they are not found, and next to a node that
+// has closure rows they are kept. DeleteTenant deletes them.
+func TestDeleteRecurseVirtualRootUnbuilt(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			const unbuilt = "unbuilt"
+			seedNodes(t, gdb, db, unbuilt, []seed{{100001, "u1"}, {100002, "u2"}})
+			if err := ct.DeleteRecurse(ctx, 0, unbuilt); !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("only unbuilt rows: want ErrNodeNotFound, got %v", err)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 2 || got.Closure != 0 {
+				t.Errorf("only unbuilt rows, after DeleteRecurse of id 0: %+v", got)
+			}
+			// with a node added next to them, id 0 deletes that node and keeps the unbuilt rows
+			if err := ct.Add(ctx, &TestPayload{Name: "built"}, nil, nil, unbuilt); err != nil {
+				t.Fatal(err)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 3 || got.Closure != 2 {
+				t.Fatalf("precondition: want 3 nodes and 2 closure rows, got %+v", got)
+			}
+			if err := ct.DeleteRecurse(ctx, 0, unbuilt); err != nil {
+				t.Errorf("unbuilt rows and a node: %v", err)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 2 || got.Closure != 0 || got.Meta != 0 {
+				t.Errorf("unbuilt rows and a node, after DeleteRecurse of id 0: %+v", got)
+			}
+			if err := ct.DeleteTenant(ctx, unbuilt); err != nil {
+				t.Fatal(err)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got.Nodes != 0 || got.Closure != 0 || got.Meta != 0 {
+				t.Errorf("after DeleteTenant: %+v", got)
+			}
+		})
+	}
+}
+
+// A node row without closure rows, as before BuildFromParents, or with only its self row, is not
+// a parent: Add, GetOrAdd and a move under it return ErrParentNotFound naming BuildFromParents,
+// and write nothing.
+func TestWriteUnderUnbuiltParent(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db) // one database per test name
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			const unbuilt = "unbuilt"
+			const noRows, selfOnly = 100001, 100002
+			seedNodes(t, gdb, db, unbuilt, []seed{{noRows, "no rows"}, {selfOnly, "self row only"}})
+			if err := gdb.Exec("INSERT INTO "+ct.ClosureTableName()+
+				" (ancestor_id, descendant_id, tenant, depth) VALUES (?, ?, ?, 0)", selfOnly, selfOnly, unbuilt).Error; err != nil {
+				t.Fatal(err)
+			}
+			b := &TestPayload{Name: "built"}
+			if err := ct.Add(ctx, b, nil, nil, unbuilt); err != nil {
+				t.Fatal(err)
+			}
+			before := namedClosure(t, gdb, ct, unbuilt)
+			counts := countTenant(t, gdb, ct, unbuilt)
+
+			for _, parent := range []uint{noRows, selfOnly} {
+				writes := map[string]func() error{
+					"Add": func() error {
+						return ct.Add(ctx, &TestPayload{Name: "c"}, up(parent), nil, unbuilt)
+					},
+					"Add PlaceLast": func() error {
+						return ct.Add(ctx, &TestPayload{Name: "c"}, up(parent), nil, unbuilt, closuretree.PlaceLast())
+					},
+					"GetOrAdd": func() error {
+						_, err := ct.GetOrAdd(ctx, &TestPayload{Name: "c"}, parent, unbuilt, []string{"Name"})
+						return err
+					},
+					"move": func() error {
+						return ct.Update(ctx, b.NodeId, nil, up(parent), nil, unbuilt)
+					},
+					"move and reorder": func() error {
+						return ct.Update(ctx, b.NodeId, nil, up(parent), up(0), unbuilt)
+					},
+				}
+				for name, write := range writes {
+					err := write()
+					if !errors.Is(err, closuretree.ErrParentNotFound) || !strings.Contains(fmt.Sprint(err), "BuildFromParents") ||
+						!strings.Contains(fmt.Sprint(err), fmt.Sprintf("node %d is not linked into the tree", parent)) {
+						t.Errorf("%s under %d: want ErrParentNotFound saying the node is not linked into the tree and naming BuildFromParents, got %v",
+							name, parent, err)
+					}
+				}
+			}
+			if diff := cmp.Diff(before, namedClosure(t, gdb, ct, unbuilt)); diff != "" {
+				t.Errorf("closure rows changed (-before +after):\n%s", diff)
+			}
+			if got := countTenant(t, gdb, ct, unbuilt); got != counts {
+				t.Errorf("rows changed: before %+v, after %+v", counts, got)
+			}
+			// a parent that does not exist keeps the plain error
+			if err := ct.Add(ctx, &TestPayload{Name: "c"}, up(99999), nil, unbuilt); !errors.Is(err, closuretree.ErrParentNotFound) ||
+				strings.Contains(err.Error(), "BuildFromParents") {
+				t.Errorf("Add under a missing parent: want the plain ErrParentNotFound, got %v", err)
+			}
+		})
+	}
+}
+
 func TestIsDescendant(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -1802,8 +1959,8 @@ func TestGetLeaves(t *testing.T) {
 				}
 				var leaves []NoLeaf
 				err := ct.GetLeaves(context.Background(), &leaves, 1, 0, tenant1)
-				if !errors.Is(err, closuretree.ErrItemIsNotTreeLeaf) {
-					t.Errorf("expected ErrItemIsNotTreeLeaf, got %v", err)
+				if !errors.Is(err, closuretree.ErrLeafMissingM2M) {
+					t.Errorf("expected ErrLeafMissingM2M, got %v", err)
 				}
 			})
 
@@ -2735,6 +2892,47 @@ func TestUpdateReorderOnlyMissingNode(t *testing.T) {
 	}
 }
 
+// An Update that moves a node that does not exist to the root and places it there must return
+// ErrNodeNotFound and write nothing, also when the missing node's parent would be the root, which
+// a reorder within the same parent skips the move for.
+func TestUpdateMoveAndReorderMissingNode(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, TestPayload{})
+			ct, err := newTestTree(gdb, TestPayload{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			a := &TestPayload{Name: "a"}
+			if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			before := countTenant(t, gdb, ct, tenant1)
+
+			for _, after := range []uint{0, a.NodeId} {
+				err := ct.Update(ctx, 9999, nil, up(0), up(after), tenant1)
+				if !errors.Is(err, closuretree.ErrNodeNotFound) {
+					t.Errorf("move to root after %d of a missing id: want ErrNodeNotFound, got %v", after, err)
+				}
+			}
+			if got := countTenant(t, gdb, ct, tenant1); got != before {
+				t.Errorf("rows of the tenant changed: before %+v, after %+v", before, got)
+			}
+			if got := countTenant(t, gdb, ct, tenant2); got.Meta != 0 || got.Closure != 0 || got.Nodes != 0 {
+				t.Errorf("tenant without nodes got rows: %+v", got)
+			}
+			if err := ct.Update(ctx, a.NodeId, nil, up(0), up(0), tenant2); !errors.Is(err, closuretree.ErrNodeNotFound) {
+				t.Errorf("move to root of an id of another tenant: want ErrNodeNotFound, got %v", err)
+			}
+			if got := countTenant(t, gdb, ct, tenant2); got.Meta != 0 || got.Closure != 0 || got.Nodes != 0 {
+				t.Errorf("tenant without nodes got rows: %+v", got)
+			}
+		})
+	}
+}
+
 // TestNilItemPointer is a regression test: passing a typed-nil pointer to the entry
 // points that reflect over the item used to panic; they must now return ErrNilItem.
 func TestNilItemPointer(t *testing.T) {
@@ -2833,8 +3031,8 @@ func TestDeleteRecurseCleansInnerMeta(t *testing.T) {
 	}
 }
 
-// TestUpdateNoOpFieldsExistingNode covers the MySQL no-op case: updating an existing node with
-// unchanged field values must succeed, not return ErrNodeNotFound. On MySQL an idempotent update
+// TestUpdateNoOpFieldsExistingNode covers the MariaDB no-op case: updating an existing node with
+// unchanged field values must succeed, not return ErrNodeNotFound. On MariaDB an idempotent update
 // reports RowsAffected=0, so this exercises the existence-check fallback (via make test-full).
 func TestUpdateNoOpFieldsExistingNode(t *testing.T) {
 	for _, db := range testdbs.DBs() {
@@ -2997,7 +3195,7 @@ func countRaw(t *testing.T, gdb *gorm.DB, query string, args ...any) int64 {
 // and "move B under A") many times. Without the per-tenant lock both moves pass their lock-free
 // cycle guards on stale snapshots and commit, making A and B mutual ancestors — a cycle that makes
 // recursive subtree reads run away. The invariant: whichever move wins, A and B are never mutual
-// ancestors. (SQLite serializes writers, so it cannot exhibit the race; MySQL/Postgres can.)
+// ancestors. (SQLite serializes writers, so it cannot exhibit the race; MariaDB/Postgres can.)
 func TestConcurrentConflictingMovesNoCycle(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -3007,53 +3205,7 @@ func TestConcurrentConflictingMovesNoCycle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx := context.Background()
-			rel := ct.ClosureTableName()
-
-			move := func(id, under uint) error {
-				var e error
-				for attempt := 0; attempt < 50; attempt++ {
-					e = ct.Update(ctx, id, nil, up(under), nil, tenant1)
-					if e == nil || errors.Is(e, closuretree.ErrInvalidMove) || !isTransientDBErr(e) {
-						return e
-					}
-					runtime.Gosched()
-					time.Sleep(time.Millisecond)
-				}
-				return e
-			}
-
-			const iterations = 40
-			for i := 0; i < iterations; i++ {
-				a := &TestPayload{Name: "A"}
-				if err := ct.Add(ctx, a, nil, nil, tenant1); err != nil {
-					t.Fatal(err)
-				}
-				b := &TestPayload{Name: "B"}
-				if err := ct.Add(ctx, b, nil, nil, tenant1); err != nil {
-					t.Fatal(err)
-				}
-
-				start := make(chan struct{})
-				var wg sync.WaitGroup
-				errs := make([]error, 2)
-				wg.Add(2)
-				go func() { defer wg.Done(); <-start; errs[0] = move(a.NodeId, b.NodeId) }()
-				go func() { defer wg.Done(); <-start; errs[1] = move(b.NodeId, a.NodeId) }()
-				close(start)
-				wg.Wait()
-
-				for _, e := range errs {
-					if e != nil && !errors.Is(e, closuretree.ErrInvalidMove) {
-						t.Fatalf("iteration %d: unexpected move error: %v", i, e)
-					}
-				}
-
-				if relCount(t, gdb, rel, b.NodeId, a.NodeId, tenant1) > 0 &&
-					relCount(t, gdb, rel, a.NodeId, b.NodeId, tenant1) > 0 {
-					t.Fatalf("iteration %d: cycle formed — A(%d) and B(%d) are mutual ancestors", i, a.NodeId, b.NodeId)
-				}
-			}
+			raceConflictingMoves(t, gdb, ct, 40)
 		})
 	}
 }

@@ -32,7 +32,7 @@ func (ct *Tree) nodeExists(tx *gorm.DB, id uint, tenant string) (bool, error) {
 }
 
 // updateFieldsInTx applies the column updates to node id within tx. It returns ErrNodeNotFound if
-// no such node exists for tenant; a no-op update (unchanged values) is not an error, even on MySQL
+// no such node exists for tenant; a no-op update (unchanged values) is not an error, even on MariaDB
 // where it reports RowsAffected=0.
 func (ct *Tree) updateFieldsInTx(tx *gorm.DB, id uint, updateMap map[string]any, tenant string) error {
 	res := tx.Table(ct.nodesTbl).Where("node_id = ? AND tenant = ?", id, tenant).Updates(updateMap)
@@ -42,7 +42,7 @@ func (ct *Tree) updateFieldsInTx(tx *gorm.DB, id uint, updateMap map[string]any,
 	if res.RowsAffected > 0 {
 		return nil
 	}
-	// MySQL reports RowsAffected=0 for a no-op update (all values unchanged), so an explicit
+	// MariaDB reports RowsAffected=0 for a no-op update (all values unchanged), so an explicit
 	// existence check is needed to tell a missing node from an idempotent one.
 	exists, err := ct.nodeExists(tx, id, tenant)
 	if err != nil {
@@ -57,9 +57,12 @@ func (ct *Tree) updateFieldsInTx(tx *gorm.DB, id uint, updateMap map[string]any,
 // Update modifies a node's fields and/or moves it to a new parent, and/or reorders it, atomically.
 //
 // Pass a non-nil item to update fields (must embed Node; Node fields are ignored).
-// Pass a non-nil newParentID to move the node: &0 moves to root, &someID moves under someID.
+// Pass a non-nil newParentID to move the node: &0 moves to root, &someID moves under someID. A move
+// without afterNodeID appends the node last among its new siblings.
 // Pass a non-nil afterNodeID to set sort order: &0 places first, &someID places after that sibling.
-// Passing all three nil returns ErrNoOp.
+// Passing all three nil returns ErrNoOp. A node that does not exist for tenant returns
+// ErrNodeNotFound and nothing is written; so does a move or a reorder of a node that has no closure
+// rows yet (see BuildFromParents).
 func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint, afterNodeID *uint, tenant string) error {
 	var err error
 	tenant, err = validateTenant(tenant)
@@ -115,12 +118,16 @@ func (ct *Tree) Update(ctx context.Context, id uint, item any, newParentID *uint
 
 // maybeMoveInTx moves node id to newPID unless hasReorder is true and the node is
 // already under newPID (same-parent reorder). Without this guard, moveInTx would return
-// ErrInvalidMove for a same-parent reorder before the reorder gets to run.
+// ErrInvalidMove for a same-parent reorder before the reorder gets to run. A node without a parent
+// row does not exist: it returns ErrNodeNotFound before anything is written.
 func (ct *Tree) maybeMoveInTx(tx *gorm.DB, id, newPID uint, hasReorder bool, tenant string) error {
 	if hasReorder {
-		curParent, _, err := ct.currentParent(tx, id, tenant)
+		curParent, found, err := ct.currentParent(tx, id, tenant)
 		if err != nil {
 			return err
+		}
+		if !found {
+			return ErrNodeNotFound
 		}
 		if curParent == newPID {
 			return nil // already under target parent; let reorder handle the rest
@@ -194,7 +201,7 @@ func (ct *Tree) buildUpdateMap(item any, id uint, tenant string) (map[string]any
 		if f.DBName == "" || !f.Updatable {
 			continue
 		}
-		if f.OwnerSchema != nil && f.OwnerSchema.ModelType == reflect.TypeOf(Node{}) {
+		if nodeOwned(updateStmt.Schema.ModelType, f) {
 			continue
 		}
 		fieldVal := reflect.ValueOf(reflectItem).Elem().FieldByName(f.Name)
@@ -233,8 +240,8 @@ func (ct *Tree) moveInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
 
 	// STEP 1: Delete all connections from outside the subtree into the subtree.
 	// Must happen before insert to avoid unique-constraint conflicts on depth changes.
-	delSql := fmt.Sprintf(moveDeleteExternalPaths, ct.relationsTbl, ct.relationsTbl)
-	delExec := tx.Exec(delSql, id, tenant, tenant)
+	delSql := fmt.Sprintf(moveDeleteExternalPaths, ct.relationsTbl)
+	delExec := tx.Exec(delSql, id, tenant, id, tenant, tenant)
 	if delExec.Error != nil {
 		return fmt.Errorf("unable to delete external closure paths: %w", delExec.Error)
 	}
@@ -243,6 +250,13 @@ func (ct *Tree) moveInTx(tx *gorm.DB, id, newPID uint, tenant string) error {
 	// preserve the move invariant and avoid coupling the two code paths.
 	if delExec.RowsAffected == 0 {
 		return ErrNodeNotFound
+	}
+	// Checked after STEP 1 so that a missing node is ErrNodeNotFound whatever the target; an error
+	// rolls STEP 1 back with the rest of the write.
+	if newPID != 0 {
+		if err := ct.requireParent(tx, newPID, tenant); err != nil {
+			return err
+		}
 	}
 
 	// STEP 2: Insert new connections from destination's ancestors to the subtree.
@@ -254,6 +268,9 @@ func (ct *Tree) insertNewPathsInTx(tx *gorm.DB, id, newPID uint, tenant string) 
 	if newPID == 0 {
 		insertSql := fmt.Sprintf(moveQueryInsertNewToRoot, ct.relationsTbl, ct.relationsTbl)
 		insExec := tx.Exec(insertSql, id, tenant)
+		// Defensive: STEP 1 deleted external rows of the node, so it has closure rows, and its self
+		// row is not deleted; no row here means the closure rows are inconsistent. Without this
+		// guard a corrupt tree would be moved silently.
 		if insExec.Error == nil && insExec.RowsAffected == 0 {
 			return ErrNodeNotFound
 		}
@@ -264,6 +281,10 @@ func (ct *Tree) insertNewPathsInTx(tx *gorm.DB, id, newPID uint, tenant string) 
 	}
 	insertSql := fmt.Sprintf(moveQueryInsertNew, ct.relationsTbl, ct.relationsTbl, ct.relationsTbl)
 	insExec := tx.Exec(insertSql, id, newPID, tenant, tenant)
+	// Defensive: requireParent (in moveInTx) already returned ErrParentNotFound for a missing or
+	// unlinked parent, so the parent has ancestor rows, and no row here means the closure rows are
+	// inconsistent (the moved node has no self row). Without this guard a corrupt tree would be
+	// moved silently.
 	if insExec.Error == nil && insExec.RowsAffected == 0 {
 		return ErrParentNotFound
 	}
@@ -291,13 +312,13 @@ WHERE p.descendant_id = ? AND p.tenant = ? AND c.tenant = ?;
 // moveDeleteExternalPaths removes all closure rows that come from ancestors OUTSIDE the
 // moved subtree to nodes INSIDE it. This clears the old parent-chain connections while
 // preserving all internal subtree links (self-links and intra-subtree edges).
-// Uses a CTE so MySQL 8.0+ can materialise the subtree before the DELETE, avoiding
-// Error 1093 ("can't specify target table in FROM clause").
+// The subtree is read in a derived table, not a CTE before the DELETE: MariaDB accepts no WITH
+// before DELETE, and the derived table also keeps MySQL from rejecting the read of the table the
+// statement deletes from (error 1093). Placeholders: (node id, tenant, node id, tenant, tenant).
 const moveDeleteExternalPaths = `
-WITH subtree AS (
-    SELECT descendant_id FROM %s WHERE ancestor_id = ? AND tenant = ?
-)
-DELETE FROM %s
-WHERE descendant_id IN (SELECT descendant_id FROM subtree)
-AND ancestor_id NOT IN (SELECT descendant_id FROM subtree)
+DELETE FROM %[1]s
+WHERE descendant_id IN (SELECT descendant_id FROM (
+    SELECT descendant_id FROM %[1]s WHERE ancestor_id = ? AND tenant = ?) AS subtree)
+AND ancestor_id NOT IN (SELECT descendant_id FROM (
+    SELECT descendant_id FROM %[1]s WHERE ancestor_id = ? AND tenant = ?) AS subtree2)
 AND tenant = ?`

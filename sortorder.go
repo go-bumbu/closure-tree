@@ -114,27 +114,35 @@ func (ct *Tree) placeAmongSiblings(tx *gorm.DB, parentID, afterID uint, tenant s
 	return sortOrder, nil
 }
 
+// lastSortOrder returns the sort_order that places a node after the current last child of
+// parentID, ignoring the child excludeID (0 excludes nothing), and the halvings that gap leaves.
+// With no other child it returns 0 and 9999 halvings; otherwise the maximum plus 10.
+// Must be called inside a transaction.
+func (ct *Tree) lastSortOrder(tx *gorm.DB, parentID, excludeID uint, tenant string) (order float64, halvings int, err error) {
+	var maxOrder *float64
+	err = tx.Raw(
+		fmt.Sprintf(`SELECT MAX(n.sort_order) FROM %s n
+JOIN %s r ON r.descendant_id = n.node_id AND r.depth = 1 AND r.tenant = n.tenant
+WHERE r.ancestor_id = ? AND n.tenant = ? AND n.node_id != ?`, ct.nodesTbl, ct.relationsTbl),
+		parentID, tenant, excludeID,
+	).Scan(&maxOrder).Error
+	if err != nil {
+		return 0, 0, fmt.Errorf("unable to find last sibling: %w", err)
+	}
+	if maxOrder == nil {
+		return 0.0, 9999, nil // no other siblings
+	}
+	order = *maxOrder + 10.0
+	return order, halvingsRemaining(*maxOrder, order), nil
+}
+
 // placeLastInTx gives node id a fresh sort_order after the current last child of parentID
 // (excluding id itself) and refreshes the meta. Used when a move supplies no afterNodeID, so the
 // moved node appends among its new siblings instead of keeping its old sort_order.
 func (ct *Tree) placeLastInTx(tx *gorm.DB, id, parentID uint, tenant string) error {
-	var maxOrder *float64
-	err := tx.Raw(
-		fmt.Sprintf(`SELECT MAX(n.sort_order) FROM %s n
-JOIN %s r ON r.descendant_id = n.node_id AND r.depth = 1 AND r.tenant = n.tenant
-WHERE r.ancestor_id = ? AND n.tenant = ? AND n.node_id != ?`, ct.nodesTbl, ct.relationsTbl),
-		parentID, tenant, id,
-	).Scan(&maxOrder).Error
+	newOrder, halvings, err := ct.lastSortOrder(tx, parentID, id, tenant)
 	if err != nil {
-		return fmt.Errorf("unable to find last sibling: %w", err)
-	}
-	var newOrder float64
-	var halvings int
-	if maxOrder == nil {
-		newOrder, halvings = 0.0, 9999 // no other siblings
-	} else {
-		newOrder = *maxOrder + 10.0
-		halvings = halvingsRemaining(*maxOrder, newOrder)
+		return err
 	}
 	if err := ct.upsertMetaHalvings(tx, parentID, tenant, halvings); err != nil {
 		return fmt.Errorf("unable to update sort order metadata: %w", err)
@@ -169,19 +177,10 @@ func halvingsRemaining(a, b float64) int {
 
 // upsertMetaHalvings records halvings as the new minimum for (tenant, parentID)
 // if it is lower than the current stored value, or inserts a new row.
+// It is the single upsert statement of dialect.metaUpsertSQL: an UPDATE that matches no row would
+// leave a gap lock on MariaDB that makes adjacent tenants' first writes deadlock.
 // Must be called inside a transaction.
 func (ct *Tree) upsertMetaHalvings(tx *gorm.DB, parentID uint, tenant string, halvings int) error {
-	// Try to lower the existing value
-	res := tx.Exec(
-		fmt.Sprintf(`UPDATE %s SET min_halvings = ? WHERE tenant = ? AND parent_id = ? AND min_halvings > ?`,
-			ct.metaTbl), halvings, tenant, parentID, halvings)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected > 0 {
-		return nil
-	}
-	// Row doesn't exist or already has an equal/lower value — insert, keeping the lower min_halvings.
 	return tx.Exec(ct.dialect.metaUpsertSQL(ct.metaTbl), tenant, parentID, halvings).Error
 }
 
@@ -246,8 +245,10 @@ ORDER BY n.sort_order ASC, n.node_id ASC`, ct.nodesTbl, ct.relationsTbl)
 // RenormalizeAll renormalizes every sibling group under tenant where the halvings
 // remaining is at or below halvingsBuffer. Returns the number of groups renormalized.
 // Use DefaultHalvingsBuffer for the recommended early-warning threshold.
-// Each group is renormalized in its own transaction. On error, returns the number
-// of groups successfully renormalized so far along with the error.
+// It reads the groups to renormalize before taking any lock, and then renormalizes each group in a
+// write of its own, as Renormalize does: its own transaction, or a savepoint on a Tree bound to a
+// transaction (WithTx). On error, returns the number of groups successfully renormalized so far
+// along with the error.
 func (ct *Tree) RenormalizeAll(ctx context.Context, tenant string, halvingsBuffer int) (int, error) {
 	var err error
 	tenant, err = validateTenant(tenant)

@@ -7,8 +7,12 @@ import (
 	"sort"
 )
 
-// GetNode loads a single item into the passed pointer
-func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item any) error {
+// GetNode loads a single item into the passed pointer, scanning straight into it.
+//
+// GetNode honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A node that
+// does not match the filter returns ErrNodeNotFound. Column names of every option are validated,
+// so an unknown one returns ErrUnknownColumn.
+func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item any, opts ...ReadOption) error {
 
 	if err := checkItem(item); err != nil {
 		return err
@@ -24,8 +28,12 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 		return ErrItemNotPointerToStruct
 	}
 
-	sqlstr := fmt.Sprintf(getNodeQuery, ct.nodesTbl, ct.relationsTbl)
-	result := ct.db.WithContext(ctx).Raw(sqlstr, nodeID, tenant).Scan(item)
+	p, err := ct.planRead(opts)
+	if err != nil {
+		return err
+	}
+	sqlstr, args := ct.getNodeSQL(p, nodeID, tenant)
+	result := ct.db.WithContext(ctx).Raw(sqlstr, args...).Scan(item)
 	if result.Error != nil {
 		return fmt.Errorf("failed to get node: %w", result.Error)
 	}
@@ -34,15 +42,6 @@ func (ct *Tree) GetNode(ctx context.Context, nodeID uint, tenant string, item an
 	}
 	return nil
 }
-
-const getNodeQuery = `SELECT nodes.*, parent_rel.ancestor_id AS parent_id
-FROM %s AS nodes
-LEFT JOIN %s AS parent_rel
-  ON parent_rel.descendant_id = nodes.node_id
-  AND parent_rel.depth = 1
-  AND parent_rel.tenant = nodes.tenant
-WHERE nodes.node_id = ? AND nodes.tenant = ?
-LIMIT 1`
 
 // IsDescendant returns true if descendantID is a descendant of ancestorID in the given tenant.
 func (ct *Tree) IsDescendant(ctx context.Context, ancestorID, descendantID uint, tenant string) (bool, error) {
@@ -86,90 +85,100 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 // parent determines the root node id of to load.
 // maxDepth determines the depth of the relationship to load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
-func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any) (err error) {
-	sliceVal, err := pointerToSlice(items)
+//
+// Each row is scanned with gorm's scanner into the Tree's model and then copied into the element
+// type, which may be the model, a smaller struct, or a struct that wraps the model. An element type
+// that embeds the model directly gets the whole row there. Otherwise each field goes to the
+// element field at the same path of Go names (Name, or Addr.Name for a field of an embedded
+// struct); when there is none, to the field with its Go name, if no other model field has that
+// name. A field of another type is assigned, converted or dereferenced; if that is not possible
+// the read returns "cannot assign type ... to field ..." before querying. An integer is never
+// converted to a string (Go would make it a code point). A number may be converted to a smaller
+// type, but a value outside its range, or a float that is NaN or infinite converted to an integer,
+// fails the read with "cannot copy field ... overflows ...". An element that is neither a struct
+// nor a pointer to a struct returns an error before querying. On any error items keeps the length
+// it had, so no row of a failed read is left in it.
+//
+// Descendants honours the read options Filter, Unfiltered, PerNode and Columns. By default a node
+// is returned only if it and every node between parent and it match the filter; with PerNode it
+// is returned when it matches. In the default mode a parent that is a real node and does not
+// match gives an empty result; parent 0 always matches. Column names of every option are
+// validated, so an unknown one returns ErrUnknownColumn.
+func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any, opts ...ReadOption) (err error) {
+	structType, add, reset, err := appendTarget(items)
 	if err != nil {
 		return err
 	}
-	// Descendants intentionally accepts both value ([]T) and pointer ([]*T) element slices;
-	// TreeDescendants, by contrast, requires []*T because it links child pointers into a tree.
-	// structPtrType is always *T so a single mapRowToStruct call serves both cases.
-	elemType := sliceVal.Type().Elem()
-	elemIsPtr := elemType.Kind() == reflect.Pointer
-	structPtrType := elemType
-	if !elemIsPtr {
-		structPtrType = reflect.PointerTo(elemType)
-	}
 
-	var tenantErr error
-	tenant, tenantErr = validateTenant(tenant)
-	if tenantErr != nil {
-		return tenantErr
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return err
+	}
+	p, err := ct.planRead(opts)
+	if err != nil {
+		return err
 	}
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
 	}
-	sqlstr := fmt.Sprintf(descendantsQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl)
-
-	rows, err := ct.db.WithContext(ctx).Raw(sqlstr, parent, maxDepth, tenant).Rows()
+	toElem, err := ct.modelToElem(ctx, structType)
 	if err != nil {
-		return fmt.Errorf("failed to execute query: %w", err)
+		return err
 	}
-	defer func() {
-		e := rows.Close()
-		if err == nil { // don't overwrite the original error
-			err = e
-		}
-	}()
-
-	columns, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("failed to read column names: %w", err)
+	sqlstr, args := ct.descendantsSQL(p, false, parent, maxDepth, tenant)
+	if err := ct.scanEach(ctx, sqlstr, args, toElem, "failed to execute query", add); err != nil {
+		reset()
+		return err
 	}
-
-	for rows.Next() {
-		values := make([]any, len(columns))
-		valuePtrs := make([]any, len(columns))
-		for i := range values {
-			valuePtrs[i] = &values[i]
-		}
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return fmt.Errorf("failed to scan row: %w", err)
-		}
-		// Route through the same mapRowToStruct coercion TreeDescendants uses, so both read
-		// paths agree on driver type conversions (e.g. PostgreSQL []byte numerics).
-		elem, _, _, mapErr := mapRowToStruct(values, columns, ct.col2FieldMap, structPtrType)
-		if mapErr != nil {
-			return mapErr
-		}
-		if elemIsPtr {
-			sliceVal.Set(reflect.Append(sliceVal, elem))
-		} else {
-			sliceVal.Set(reflect.Append(sliceVal, elem.Elem()))
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("row iteration error: %w", err)
-	}
-
 	return nil
 }
 
-const descendantsQuery = `SELECT nodes.*, parent_rel.ancestor_id AS parent_id
-FROM %s AS nodes
-JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
-LEFT JOIN %s AS parent_rel
-  ON parent_rel.descendant_id = nodes.node_id
-  AND parent_rel.depth = 1
-  AND parent_rel.tenant = nodes.tenant
-WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.tenant = ?
-ORDER BY ct.depth, nodes.sort_order ASC, nodes.node_id ASC;`
+// appendTarget checks that items is a pointer to a slice and returns the struct type each row is
+// copied into, the function that appends a scanned element to the slice, and the function that
+// truncates the slice back to the length it had here, which the caller runs when the read fails.
+// The truncation zeroes the elements it cuts off, so the backing array keeps no row of the failed
+// read and the rows can be garbage collected.
+// Descendants and Ancestors intentionally accept both value ([]T) and pointer ([]*T) element
+// slices; TreeDescendants, by contrast, requires []*T because it links child pointers into a
+// tree. Every row becomes a new T (see scanEach).
+func appendTarget(items any) (reflect.Type, func(elem, row reflect.Value), func(), error) {
+	sliceVal, err := pointerToSlice(items)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	origLen := sliceVal.Len()
+	elemType := sliceVal.Type().Elem()
+	elemIsPtr := elemType.Kind() == reflect.Pointer
+	structType := elemType
+	if elemIsPtr {
+		structType = elemType.Elem()
+	}
+	add := func(elem, _ reflect.Value) {
+		if !elemIsPtr {
+			elem = elem.Elem()
+		}
+		sliceVal.Set(reflect.Append(sliceVal, elem))
+	}
+	reset := func() {
+		sliceVal.Slice(origLen, sliceVal.Len()).Clear()
+		sliceVal.SetLen(origLen)
+	}
+	return structType, add, reset, nil
+}
 
 // DescendantIds behaves the same as Descendants but only returns the node IDs for the search query.
-func (ct *Tree) DescendantIds(ctx context.Context, parent uint, maxDepth int, tenant string) ([]uint, error) {
+//
+// DescendantIds honours the read options Filter, Unfiltered and PerNode, with the meaning they
+// have in Descendants; Columns is ignored. Column names of every option are validated, so an
+// unknown one returns ErrUnknownColumn.
+func (ct *Tree) DescendantIds(ctx context.Context, parent uint, maxDepth int, tenant string, opts ...ReadOption) ([]uint, error) {
 	var err error
 	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return nil, err
+	}
+	p, err := ct.planRead(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -178,19 +187,13 @@ func (ct *Tree) DescendantIds(ctx context.Context, parent uint, maxDepth int, te
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
 	}
-	sqlstr := fmt.Sprintf(descendantsIDQuery, ct.nodesTbl, ct.relationsTbl)
-	err = ct.db.WithContext(ctx).Raw(sqlstr, parent, maxDepth, tenant).Scan(&ids).Error
+	sqlstr, args := ct.descendantsSQL(p, true, parent, maxDepth, tenant)
+	err = ct.db.WithContext(ctx).Raw(sqlstr, args...).Scan(&ids).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch descendants: %w", err)
 	}
 	return ids, nil
 }
-
-const descendantsIDQuery = `SELECT nodes.node_id
-FROM %s AS nodes
-JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
-WHERE ct.ancestor_id = ? AND ct.depth > 0 AND ct.depth <= ? AND nodes.tenant = ?
-ORDER BY ct.depth, nodes.sort_order ASC, nodes.node_id ASC;`
 
 // absMaxDepth is limited by the max value of a 32-bit signed integer (matches the Depth column type)
 const absMaxDepth = 2147483647
@@ -210,89 +213,89 @@ const absMaxDepth = 2147483647
 // maxDepth determines the depth of the relationship to load: 0 means all children, 1 only direct children and so on.
 // tenant determines the tenant to be used
 //
-// Note: this uses a recursive CTE. On MySQL 8 the recursion is bounded by cte_max_recursion_depth
-// (default 1000), so loading a subtree deeper than that many levels fails with error 3636; SQLite
-// and PostgreSQL have no such default ceiling. Set maxDepth, or raise cte_max_recursion_depth for
-// the session, if you need deeper trees on MySQL.
-func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any) (err error) {
+// Each row is scanned with gorm's scanner into the Tree's model and then copied into the element
+// type as in Descendants. Children are linked through the node id and parent id of the scanned
+// row, so the element type does not have to embed Node. A Children field promoted through an
+// embedded pointer struct is reached on every element, leaves included, by allocating the nil
+// pointer. The read returns an error before it validates the tenant and before any query, for
+// every maxDepth, when the element type has no Children field that can be linked: none, one in
+// each of two structs embedded at the same depth (Go promotes neither), one that is not a []*T, or
+// one promoted through an embedded pointer to an unexported type, which cannot be allocated. A
+// caller without such a field adds it, or reads with Descendants, which takes the same parameters:
+// without PerNode, Descendants with maxDepth 1 returns the nodes of TreeDescendants with maxDepth 1
+// in the same order.
+//
+// TreeDescendants honours the read options Filter, Unfiltered and Columns; PerNode is ignored. A
+// node that does not match the filter is left out with its whole subtree; its children are never
+// re-parented. A parent that is a real node and does not match gives an empty result; parent 0
+// always matches. Column names of every option are validated, so an unknown one returns
+// ErrUnknownColumn.
+//
+// Note: this uses a recursive CTE. MariaDB stops one after max_recursive_iterations steps (default
+// 1000) with only a warning, so on MariaDB the read lifts that limit for its own statement (SET
+// STATEMENT ... FOR) to its depth bound, and returns the whole subtree as SQLite and PostgreSQL do;
+// a lower limit set for the session or the server does not apply to it. MySQL (accepted, untested)
+// bounds the recursion by cte_max_recursion_depth (default 1000) and fails with error 3636 beyond
+// it; set maxDepth, or raise that variable, for deeper trees there.
+func (ct *Tree) TreeDescendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any, opts ...ReadOption) (err error) {
 	if err := validateItems(items); err != nil {
 		return err
 	}
 
-	itemsVal := reflect.ValueOf(items)
-	sliceVal := itemsVal.Elem()
+	sliceVal := reflect.ValueOf(items).Elem()
 	elemType := sliceVal.Type().Elem()
+	children, err := childrenIndex(elemType)
+	if err != nil {
+		return err
+	}
 
-	var tenantErr error
-	tenant, tenantErr = validateTenant(tenant)
-	if tenantErr != nil {
-		return tenantErr
+	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return err
+	}
+	p, err := ct.planRead(opts)
+	if err != nil {
+		return err
 	}
 
 	if maxDepth <= 0 {
 		maxDepth = absMaxDepth
 	}
 
-	sqlQuery := fmt.Sprintf(treeDescendantsQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl, ct.nodesTbl)
-	rows, err := ct.db.WithContext(ctx).Raw(sqlQuery, parent, tenant, tenant, tenant, tenant, maxDepth).Rows()
+	toElem, err := ct.modelToElem(ctx, elemType.Elem())
 	if err != nil {
-		return fmt.Errorf("failed to fetch tree descendants: %w", err)
+		return err
 	}
-	defer func() {
-		e := rows.Close()
-		if err == nil { // don't overwrite the original error
-			err = e
-		}
-	}()
-
-	columns, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("failed to read column names: %w", err)
-	}
-
-	nodes, ancestorMap, err := scanRowsToNodes(rows, columns, ct.col2FieldMap, elemType)
+	sqlstr, args := ct.treeDescendantsSQL(p, false, parent, maxDepth, tenant)
+	var entries []treeEntry
+	err = ct.scanEach(ctx, sqlstr, args, toElem, "failed to fetch tree descendants", func(elem, row reflect.Value) {
+		entries = append(entries, treeEntry{elem: elem, node: nodeOf(row)})
+	})
 	if err != nil {
 		return err
 	}
 
-	rootNodes := buildTreeHierarchy(nodes, ancestorMap)
-	for _, node := range rootNodes {
+	for _, node := range linkTree(entries, children) {
 		sliceVal.Set(reflect.Append(sliceVal, node))
 	}
-
 	return nil
 }
 
-const treeDescendantsQuery = `WITH RECURSIVE Tree AS (
-	-- Base case: Start with direct children of the parent node
-	SELECT
-		nodes.*,
-		ct.ancestor_id AS ancestor_id,
-		1 AS cte_depth
-	FROM %s AS nodes
-	JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
-	WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.tenant = ? AND ct.tenant = ?
-
-	UNION ALL
-
-	-- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree
-	SELECT
-		nodes.*,
-		t.node_id AS ancestor_id,
-		t.cte_depth + 1 AS cte_depth
-	FROM Tree AS t
-	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?
-	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
-	WHERE nodes.tenant = ? AND t.cte_depth < ?
-	)
-	SELECT  * FROM Tree ORDER BY cte_depth;`
-
 // TreeDescendantsIds returns the tree structure of the descendants to the passed item.
 //
-// Note: like TreeDescendants this uses a recursive CTE, so on MySQL 8 it is bounded by
-// cte_max_recursion_depth (default 1000, error 3636 beyond it); SQLite and PostgreSQL are not.
-func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth int, tenant string) (tree []*TreeNode, err error) {
+// TreeDescendantsIds honours the read options Filter and Unfiltered, with the meaning they have in
+// TreeDescendants; PerNode and Columns are ignored. Column names of every option are validated, so
+// an unknown one returns ErrUnknownColumn.
+//
+// Note: like TreeDescendants this uses a recursive CTE, and on MariaDB lifts max_recursive_iterations
+// for its own statement, so it returns the whole subtree; on MySQL (accepted, untested) it is
+// bounded by cte_max_recursion_depth (default 1000, error 3636 beyond it).
+func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth int, tenant string, opts ...ReadOption) (tree []*TreeNode, err error) {
 	tenant, err = validateTenant(tenant)
+	if err != nil {
+		return nil, err
+	}
+	p, err := ct.planRead(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -302,8 +305,8 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 		maxDepth = absMaxDepth
 	}
 
-	sqlstr := fmt.Sprintf(treeDescendantsIDQuery, ct.nodesTbl, ct.relationsTbl, ct.relationsTbl, ct.nodesTbl)
-	rows, err := ct.db.WithContext(ctx).Raw(sqlstr, parent, tenant, tenant, tenant, tenant, maxDepth).Rows()
+	sqlstr, args := ct.treeDescendantsSQL(p, true, parent, maxDepth, tenant)
+	rows, err := ct.db.WithContext(ctx).Raw(sqlstr, args...).Rows()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch tree descendants: %w", err)
 	}
@@ -327,7 +330,7 @@ func (ct *Tree) TreeDescendantsIds(ctx context.Context, parent uint, maxDepth in
 	}
 
 	// Sort keys by (SortOrder ASC, NodeId ASC) so children are appended in order
-	// during assembly — consistent with the strategy in buildTreeHierarchy.
+	// during assembly — consistent with the strategy in linkTree.
 	keys := make([]uint, 0, len(nodeMap))
 	for k := range nodeMap {
 		keys = append(keys, k)
@@ -362,32 +365,6 @@ type TreeNode struct {
 	SortOrder float64     `json:"sortOrder"`
 	Children  []*TreeNode `json:"children"`
 }
-
-const treeDescendantsIDQuery = `WITH RECURSIVE Tree AS (
-	-- Base case: Start with direct children of the parent node
-	SELECT
-		nodes.node_id,
-		nodes.sort_order,
-		ct.ancestor_id AS ancestor_id,
-		1 AS cte_depth
-	FROM %s AS nodes
-	JOIN %s AS ct ON ct.descendant_id = nodes.node_id AND ct.tenant = nodes.tenant
-	WHERE ct.ancestor_id = ? AND ct.depth = 1 AND nodes.tenant = ? AND ct.tenant = ?
-
-	UNION ALL
-
-	-- Recursive case: get immediate children (depth = 1 in closure table) of nodes in Tree
-	SELECT
-		nodes.node_id,
-		nodes.sort_order,
-		t.node_id AS ancestor_id,
-		t.cte_depth + 1 AS cte_depth
-	FROM Tree AS t
-	JOIN %s AS ct ON ct.ancestor_id = t.node_id AND ct.depth = 1 AND ct.tenant = ?
-	JOIN %s AS nodes ON nodes.node_id = ct.descendant_id
-	WHERE nodes.tenant = ? AND t.cte_depth < ?
-	)
-	SELECT  Tree.node_id, Tree.ancestor_id, Tree.sort_order FROM Tree ORDER BY cte_depth;`
 
 func SortTree(nodes []*TreeNode) {
 	sort.Slice(nodes, func(i, j int) bool {

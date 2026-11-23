@@ -7,7 +7,7 @@ description: Use when the user runs /verify or asks to run make verify. Runs the
 
 Run `make verify` and fix all issues until it passes clean.
 
-`make verify` runs in order: `test` → `ui-test` → `license-check` → `lint` → `benchmark` → `coverage`
+`make verify` runs in order: `lint` → `test-full` → `test-race` → `license-check` → `benchmark` → `coverage`
 
 ## How to run
 
@@ -49,9 +49,9 @@ Config: `.golangci.yaml` — standard linters + `nolintlint`, `gocyclo` (≥20),
 
 ## Coverage
 
-Threshold: **70%** for `./internal/...` and `./libs/...`
+Threshold: **80%** per package, for every package of `./...` (`COVERAGE_THRESHOLD` in the Makefile)
 
-If coverage drops below 70%: write the missing tests. Do not lower the threshold.
+If coverage drops below 80%: write the missing tests. Do not lower the threshold.
 
 ## Step-by-step
 

@@ -3,10 +3,13 @@ package closuretree
 import (
 	"errors"
 	"reflect"
+
+	"gorm.io/gorm/schema"
 )
 
 // Node is an embeddable ID to be used in closure tree, this is mandatory.
 // ParentId is ignored during write operations, it is only populated during read.
+// Node itself can also be the model of a Tree whose nodes carry no fields of their own.
 type Node struct {
 	// The (tenant, node_id) index uses GORM's empty-name composite form so the generated name is
 	// scoped per node table (idx_<table>_tenant_node). A hardcoded name would collide when two node
@@ -15,6 +18,30 @@ type Node struct {
 	ParentId  uint    `json:"parentId" gorm:"column:parent_id;->;-:migration"` // field is Read-only, no migration
 	Tenant    string  `gorm:"not null;index:,composite:tenant_node,priority:1" json:"tenant"`
 	SortOrder float64 `gorm:"not null;default:0" json:"sortOrder"`
+}
+
+// nodeOwned reports whether f is one of the embedded Node's own fields, at any embedding depth, or a
+// field of Node itself when Node is the model. modelType is the struct type the schema was parsed
+// from. gorm's Field.OwnerSchema cannot be used for this: it is overwritten at every embedding level.
+func nodeOwned(modelType reflect.Type, f *schema.Field) bool {
+	t := modelType
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == reflect.TypeOf(Node{}) {
+		return true
+	}
+	idx := f.StructField.Index
+	if len(idx) < 2 {
+		return false
+	}
+	for _, i := range idx[:len(idx)-1] {
+		if i < 0 || t.Kind() != reflect.Struct || i >= t.NumField() {
+			return false
+		}
+		t = t.Field(i).Type
+	}
+	return t == reflect.TypeOf(Node{})
 }
 
 func (n *Node) Id() uint {
@@ -95,9 +122,13 @@ func getNodeData(item any) (uint, string, error) {
 	return 0, "", errors.New("struct Node not found")
 }
 
-// findNodeValue recursively searches for an embedded Node field and returns its reflect.Value.
+// findNodeValue returns the Node of v, a struct of type t: v itself when t is Node, otherwise the
+// embedded Node field, searched recursively.
 func findNodeValue(t reflect.Type, v reflect.Value) (reflect.Value, bool) {
 	nodeType := reflect.TypeOf(Node{})
+	if t == nodeType {
+		return v, true
+	}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.Anonymous {

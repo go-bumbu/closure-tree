@@ -32,6 +32,9 @@ linters:
     nestif:
       min-complexity: 5   # Default: 5
 
+formatters:
+  enable:
+    - gofmt
 
 output:
   sort-order:

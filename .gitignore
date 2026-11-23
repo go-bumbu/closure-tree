@@ -17,3 +17,4 @@ cover.html
 cover.out
 /docs/
 .directory
+.todo.json.lock

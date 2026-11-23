@@ -2,7 +2,11 @@ package closuretree_test
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"runtime"
 	"strings"
 	"sync"
@@ -12,6 +16,9 @@ import (
 	closuretree "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
 	"github.com/google/go-cmp/cmp"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // TestFindChild covers the query-by-example direct-child lookup: it must match only
@@ -534,7 +541,7 @@ func TestGetOrAddErrors(t *testing.T) {
 // The per-tenant write lock serializes the find+add transactions, so exactly one goroutine
 // creates the child and every other finds it: exactly one child node exists and exactly one
 // created=true result is returned. (SQLite serializes writers on its own; the lock closes the
-// race on MySQL/Postgres.)
+// race on MariaDB/Postgres.)
 func TestGetOrAddConcurrent(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -709,6 +716,666 @@ func TestGetOrAddParentIdBothPaths(t *testing.T) {
 			}
 			if child2.ParentId != root.NodeId {
 				t.Errorf("found path: ParentId = %d, want %d", child2.ParentId, root.NodeId)
+			}
+		})
+	}
+}
+
+type nullNoteNode struct {
+	closuretree.Node
+	Name string
+	Note sql.NullString
+}
+
+// A match field that is a driver.Valuer holding NULL matches as IS NULL, so GetOrAdd stays
+// idempotent and FindChild finds the child.
+func TestGetOrAddMatchesNullValuer(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, nullNoteNode{})
+			ct, err := newTestTree(gdb, nullNoteNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			match := []string{"Name", "Note"}
+
+			first := &nullNoteNode{Name: "a"}
+			if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+			}
+			second := &nullNoteNode{Name: "a"}
+			created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+			if err != nil || created || second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.NodeId, first.NodeId, err)
+			}
+			if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+				t.Errorf("want one node, got %d", n)
+			}
+
+			var out nullNoteNode
+			found, err := ct.FindChild(ctx, 0, tenant1, &nullNoteNode{Name: "a"}, match, &out)
+			if err != nil || !found || out.NodeId != first.NodeId {
+				t.Errorf("FindChild with a NULL Valuer: found=%v id=%d err=%v", found, out.NodeId, err)
+			}
+			valid := &nullNoteNode{Name: "a", Note: sql.NullString{String: "n", Valid: true}}
+			if found, err := ct.FindChild(ctx, 0, tenant1, valid, match, &out); err != nil || found {
+				t.Errorf("FindChild with a non-NULL Valuer must not find the NULL row: found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
+// ptrCode is a driver.Valuer and a sql.Scanner through its pointer only.
+type ptrCode struct{ s string }
+
+func (c *ptrCode) Value() (driver.Value, error) { return c.s, nil }
+
+func (c *ptrCode) Scan(src any) error {
+	switch v := src.(type) {
+	case string:
+		c.s = v
+	case []byte:
+		c.s = string(v)
+	default:
+		return fmt.Errorf("ptrCode: cannot scan %T", src)
+	}
+	return nil
+}
+
+type ptrCodeNode struct {
+	closuretree.Node
+	Name string
+	Code *ptrCode
+}
+
+// A match field that is a pointer driver.Valuer is matched by its Value, not by the struct it
+// points to, which the driver cannot bind.
+func TestGetOrAddMatchesPointerValuer(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, ptrCodeNode{})
+			ct, err := newTestTree(gdb, ptrCodeNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			match := []string{"Name", "Code"}
+
+			first := &ptrCodeNode{Name: "a", Code: &ptrCode{"x"}}
+			if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+			}
+			second := &ptrCodeNode{Name: "a", Code: &ptrCode{"x"}}
+			created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+			if err != nil || created || second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.NodeId, first.NodeId, err)
+			}
+			if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+				t.Errorf("want one node, got %d", n)
+			}
+
+			var out ptrCodeNode
+			found, err := ct.FindChild(ctx, 0, tenant1, &ptrCodeNode{Name: "a", Code: &ptrCode{"x"}}, match, &out)
+			if err != nil || !found || out.NodeId != first.NodeId || out.Code == nil || out.Code.s != "x" {
+				t.Errorf("FindChild with a pointer Valuer: found=%v out=%+v err=%v", found, out, err)
+			}
+			other := &ptrCodeNode{Name: "a", Code: &ptrCode{"y"}}
+			if found, err := ct.FindChild(ctx, 0, tenant1, other, match, &out); err != nil || found {
+				t.Errorf("FindChild with another Value must not find the row: found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
+type rawDocNode struct {
+	closuretree.Node
+	Name string
+	Doc  json.RawMessage
+}
+
+type bytesDocNode struct {
+	closuretree.Node
+	Name string
+	Doc  []byte
+}
+
+type bytesPtrDocNode struct {
+	closuretree.Node
+	Name string
+	Doc  *[]byte
+}
+
+type rawPtrDocNode struct {
+	closuretree.Node
+	Name string
+	Doc  *json.RawMessage
+}
+
+// idItem is a pointer to a struct that embeds Node.
+type idItem interface{ Id() uint }
+
+// A byte-slice match field matches what Add stores, so GetOrAdd stays idempotent and FindChild
+// finds the child: NULL for a nil one, also behind a pointer, and for an empty one of a named type
+// that is not behind a pointer, which gorm writes as NULL; empty bytes for an empty []byte and for
+// an empty one behind a pointer; the bytes for any other. On MariaDB the cases run also with the
+// driver's interpolateParams, which stores a pointer to a nil json.RawMessage as empty bytes.
+func TestMatchByteSlice(t *testing.T) {
+	cases := []struct {
+		name  string
+		model any
+		item  func() idItem
+	}{
+		{"RawMessage nil", rawDocNode{}, func() idItem { return &rawDocNode{Name: "a"} }},
+		{"RawMessage empty", rawDocNode{}, func() idItem { return &rawDocNode{Name: "a", Doc: json.RawMessage{}} }},
+		{"RawMessage non empty", rawDocNode{}, func() idItem { return &rawDocNode{Name: "a", Doc: json.RawMessage(`{"a":1}`)} }},
+		{"bytes nil", bytesDocNode{}, func() idItem { return &bytesDocNode{Name: "a"} }},
+		{"bytes empty", bytesDocNode{}, func() idItem { return &bytesDocNode{Name: "a", Doc: []byte{}} }},
+		{"bytes non empty", bytesDocNode{}, func() idItem { return &bytesDocNode{Name: "a", Doc: []byte("x")} }},
+		{"pointer to nil bytes", bytesPtrDocNode{}, func() idItem {
+			var b []byte
+			return &bytesPtrDocNode{Name: "a", Doc: &b}
+		}},
+		{"pointer to nil RawMessage", rawPtrDocNode{}, func() idItem {
+			var doc json.RawMessage
+			return &rawPtrDocNode{Name: "a", Doc: &doc}
+		}},
+		{"pointer to empty RawMessage", rawPtrDocNode{}, func() idItem {
+			doc := json.RawMessage{}
+			return &rawPtrDocNode{Name: "a", Doc: &doc}
+		}},
+	}
+	for _, db := range testdbs.DBs() {
+		conns := []string{db.DbType()}
+		if db.DbType() == testdbs.DBTypeMariadb {
+			conns = append(conns, db.DbType()+"_interpolateParams")
+		}
+		for _, conn := range conns {
+			for _, c := range cases {
+				t.Run(conn+"/"+c.name, func(t *testing.T) {
+					gdb := connAndClose(t, db)
+					if conn != db.DbType() {
+						gdb = interpolatedMariaDB(t, gdb)
+					}
+					dropTreeTables(gdb, c.model)
+					ct, err := newTestTree(gdb, c.model)
+					if err != nil {
+						t.Fatal(err)
+					}
+					ctx := context.Background()
+					match := []string{"Name", "Doc"}
+
+					first := c.item()
+					if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+						t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+					}
+					second := c.item()
+					created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+					if err != nil || created || second.Id() != first.Id() {
+						t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.Id(), first.Id(), err)
+					}
+					if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+						t.Errorf("want one node, got %d", n)
+					}
+
+					out := c.item()
+					found, err := ct.FindChild(ctx, 0, tenant1, c.item(), match, out)
+					if err != nil || !found || out.Id() != first.Id() {
+						t.Errorf("FindChild: found=%v id=%d (first %d) err=%v", found, out.Id(), first.Id(), err)
+					}
+				})
+			}
+		}
+	}
+}
+
+// interpolatedMariaDB opens another connection to the MariaDB database of gdb with the driver's
+// interpolateParams, which renders the bound values into the statement text instead of sending
+// them apart, and closes it when the test ends.
+func interpolatedMariaDB(t *testing.T, gdb *gorm.DB) *gorm.DB {
+	t.Helper()
+	dsn := gdb.Dialector.(*mysql.Dialector).DSN + "&interpolateParams=true"
+	idb, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := idb.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	return idb
+}
+
+// A nil and an empty json.RawMessage are both stored as NULL, so they match the same node.
+func TestMatchNilAndEmptyRawMessage(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			ctx := context.Background()
+			match := []string{"Name", "Doc"}
+
+			dropTreeTables(gdb, rawDocNode{})
+			raw, err := newTestTree(gdb, rawDocNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			added := &rawDocNode{Name: "a", Doc: json.RawMessage{}}
+			if created, err := raw.GetOrAdd(ctx, added, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("GetOrAdd of an empty RawMessage: created=%v err=%v", created, err)
+			}
+			var out rawDocNode
+			found, err := raw.FindChild(ctx, 0, tenant1, &rawDocNode{Name: "a", Doc: json.RawMessage(nil)}, match, &out)
+			if err != nil || !found || out.NodeId != added.NodeId {
+				t.Errorf("FindChild with a nil RawMessage: found=%v id=%d (added %d) err=%v", found, out.NodeId, added.NodeId, err)
+			}
+			again := &rawDocNode{Name: "a"}
+			if created, err := raw.GetOrAdd(ctx, again, 0, tenant1, match); err != nil || created || again.NodeId != added.NodeId {
+				t.Errorf("GetOrAdd of a nil RawMessage: created=%v id=%d (added %d) err=%v", created, again.NodeId, added.NodeId, err)
+			}
+		})
+	}
+}
+
+// A nil and an empty []byte are stored as NULL and as empty bytes, so they are two different nodes.
+func TestMatchNilAndEmptyBytes(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			ctx := context.Background()
+			match := []string{"Name", "Doc"}
+
+			dropTreeTables(gdb, bytesDocNode{})
+			bin, err := newTestTree(gdb, bytesDocNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			nilDoc := &bytesDocNode{Name: "a"}
+			if created, err := bin.GetOrAdd(ctx, nilDoc, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("GetOrAdd of nil bytes: created=%v err=%v", created, err)
+			}
+			emptyDoc := &bytesDocNode{Name: "a", Doc: []byte{}}
+			if created, err := bin.GetOrAdd(ctx, emptyDoc, 0, tenant1, match); err != nil || !created || emptyDoc.NodeId == nilDoc.NodeId {
+				t.Fatalf("GetOrAdd of empty bytes must add another node: created=%v id=%d (nil %d) err=%v", created, emptyDoc.NodeId, nilDoc.NodeId, err)
+			}
+			for _, want := range []*bytesDocNode{nilDoc, emptyDoc} {
+				var got bytesDocNode
+				found, err := bin.FindChild(ctx, 0, tenant1, &bytesDocNode{Name: "a", Doc: want.Doc}, match, &got)
+				if err != nil || !found || got.NodeId != want.NodeId {
+					t.Errorf("FindChild with Doc %#v: found=%v id=%d (want %d) err=%v", want.Doc, found, got.NodeId, want.NodeId, err)
+				}
+			}
+			if n := countTenant(t, gdb, bin, tenant1).Nodes; n != 2 {
+				t.Errorf("want two nodes, got %d", n)
+			}
+		})
+	}
+}
+
+// A match field that names a Go name several columns share fails in either declaration order,
+// before GetOrAdd creates anything; the column name matches its own column.
+func TestMatchRejectsSharedGoName(t *testing.T) {
+	models := []struct {
+		name  string
+		model any
+		item  func(name, owner string) any
+	}{
+		{"own field first", docOwnerLast{}, func(name, owner string) any {
+			return &docOwnerLast{Name: name, Owner: docOwner{owner}}
+		}},
+		{"own field last", docOwnerFirst{}, func(name, owner string) any {
+			return &docOwnerFirst{Name: name, Owner: docOwner{owner}}
+		}},
+	}
+	id := func(item any) uint { return item.(interface{ Id() uint }).Id() }
+	for _, db := range testdbs.DBs() {
+		for _, m := range models {
+			t.Run(db.DbType()+"/"+m.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, m.model)
+				ct, err := newTestTree(gdb, m.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				shared := func(what string, err error) {
+					t.Helper()
+					if !errors.Is(err, closuretree.ErrUnknownMatchField) || !strings.Contains(err.Error(), "owner_name") {
+						t.Errorf("%s by Name: want ErrUnknownMatchField naming the columns, got %v", what, err)
+					}
+				}
+
+				// the same own name with two owners
+				for _, owner := range []string{"x", "y"} {
+					_, err := ct.GetOrAdd(ctx, m.item("a", owner), 0, tenant1, []string{"Name"})
+					shared("GetOrAdd", err)
+				}
+				if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 0 {
+					t.Fatalf("GetOrAdd by Name must create nothing, got %d nodes", n)
+				}
+				_, err = ct.FindChild(ctx, 0, tenant1, m.item("a", "x"), []string{"Name"}, m.item("", ""))
+				shared("FindChild", err)
+
+				first := m.item("a", "x")
+				if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, []string{"name"}); err != nil || !created {
+					t.Fatalf("first GetOrAdd by name: created=%v err=%v", created, err)
+				}
+				second := m.item("a", "y")
+				created, err := ct.GetOrAdd(ctx, second, 0, tenant1, []string{"name"})
+				if err != nil || created || id(second) != id(first) {
+					t.Errorf("second GetOrAdd by name: created=%v id=%d (first %d) err=%v", created, id(second), id(first), err)
+				}
+				out := m.item("", "")
+				if found, err := ct.FindChild(ctx, 0, tenant1, m.item("b", "x"), []string{"owner_name"}, out); err != nil || !found || id(out) != id(first) {
+					t.Errorf("FindChild by owner_name: found=%v id=%d err=%v", found, id(out), err)
+				}
+			})
+		}
+	}
+}
+
+type matchNameBase struct{ Name string }
+
+// matchBaseFirst and matchBaseLast embed a Name without a column prefix, on the column name of
+// their own Name, declared before and after it.
+type matchBaseFirst struct {
+	closuretree.Node
+	Base matchNameBase `gorm:"embedded"`
+	Name string
+}
+
+type matchBaseLast struct {
+	closuretree.Node
+	Name string
+	Base matchNameBase `gorm:"embedded"`
+}
+
+// A Go name that several fields of one column share is not ambiguous as a match field.
+func TestMatchGoNameOfOneColumn(t *testing.T) {
+	models := []struct {
+		name  string
+		model any
+		item  func(name string) any
+	}{
+		{"embedded first", matchBaseFirst{}, func(name string) any {
+			return &matchBaseFirst{Base: matchNameBase{name}, Name: name}
+		}},
+		{"embedded last", matchBaseLast{}, func(name string) any {
+			return &matchBaseLast{Name: name, Base: matchNameBase{name}}
+		}},
+	}
+	id := func(item any) uint { return item.(interface{ Id() uint }).Id() }
+	for _, db := range testdbs.DBs() {
+		for _, m := range models {
+			t.Run(db.DbType()+"/"+m.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, m.model)
+				ct, err := newTestTree(gdb, m.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				first := m.item("a")
+				if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, []string{"Name"}); err != nil || !created {
+					t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+				}
+				second := m.item("a")
+				created, err := ct.GetOrAdd(ctx, second, 0, tenant1, []string{"Name"})
+				if err != nil || created || id(second) != id(first) {
+					t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, id(second), id(first), err)
+				}
+				out := m.item("")
+				if found, err := ct.FindChild(ctx, 0, tenant1, m.item("a"), []string{"Name"}, out); err != nil || !found || id(out) != id(first) {
+					t.Errorf("FindChild by Name: found=%v id=%d err=%v", found, id(out), err)
+				}
+			})
+		}
+	}
+}
+
+// gormCode is a gorm.Valuer: gorm renders its GormValue as SQL instead of binding it.
+type gormCode string
+
+func (c gormCode) GormValue(context.Context, *gorm.DB) clause.Expr {
+	return clause.Expr{SQL: "?", Vars: []any{string(c)}}
+}
+
+type gormCodeNode struct {
+	closuretree.Node
+	Name string
+	Code gormCode
+}
+
+// gormCodePtrNode has a pointer to a gorm.Valuer type, which gorm renders as SQL when it is not nil.
+type gormCodePtrNode struct {
+	closuretree.Node
+	Name string
+	Code *gormCode
+}
+
+// tagsNode has a list column, which gorm binds as a list.
+type tagsNode struct {
+	closuretree.Node
+	Name string
+	Tags []string `gorm:"type:text"`
+}
+
+// A match field whose value gorm would not bind as one value fails before any query, as Eq does:
+// a list and a gorm.Valuer, also as a nil pointer, which is checked by its type. GetOrAdd creates
+// nothing.
+func TestMatchRejectsUnboundValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		model any
+		field string
+		item  func() any
+	}{
+		{"list", tagsNode{}, "Tags", func() any { return &tagsNode{Name: "a", Tags: []string{}} }},
+		{"gorm.Valuer", gormCodeNode{}, "Code", func() any { return &gormCodeNode{Name: "a", Code: "x"} }},
+		{"nil pointer to a gorm.Valuer", gormCodePtrNode{}, "Code", func() any { return &gormCodePtrNode{Name: "a"} }},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, c := range cases {
+			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, c.model)
+				ct, err := newTestTree(gdb, c.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fields := []string{"Name", c.field}
+				rejected := func(what string, err error) {
+					t.Helper()
+					if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), c.field) {
+						t.Errorf("%s: want an error naming %s before any query, got %v", what, c.field, err)
+					}
+				}
+				cancelled, cancel := context.WithCancel(context.Background())
+				cancel() // a query would fail with context.Canceled, so the check must come first
+				_, err = ct.GetOrAdd(cancelled, c.item(), 0, tenant1, fields)
+				rejected("GetOrAdd", err)
+				_, err = ct.FindChild(cancelled, 0, tenant1, c.item(), fields, c.item())
+				rejected("FindChild", err)
+
+				for range 2 {
+					_, err := ct.GetOrAdd(context.Background(), c.item(), 0, tenant1, fields)
+					rejected("GetOrAdd", err)
+				}
+				if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 0 {
+					t.Errorf("GetOrAdd must create nothing, got %d nodes", n)
+				}
+			})
+		}
+	}
+}
+
+// defaultKindNode and defaultPtrKindNode have a column with a default, which gorm writes instead of
+// the field's zero value.
+type defaultKindNode struct {
+	closuretree.Node
+	Name string
+	Kind string `gorm:"size:20;default:x"`
+}
+
+type defaultPtrKindNode struct {
+	closuretree.Node
+	Name string
+	Kind *string `gorm:"size:20;default:x"`
+}
+
+// A match field with a default whose value is the zero value fails before any query, since Add
+// would store the default and the next GetOrAdd would not find the node. GetOrAdd creates nothing.
+func TestMatchRejectsZeroValueWithDefault(t *testing.T) {
+	cases := []struct {
+		name  string
+		model any
+		item  func() any
+	}{
+		{"zero value", defaultKindNode{}, func() any { return &defaultKindNode{Name: "a"} }},
+		{"nil pointer", defaultPtrKindNode{}, func() any { return &defaultPtrKindNode{Name: "a"} }},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, c := range cases {
+			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, c.model)
+				ct, err := newTestTree(gdb, c.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fields := []string{"Name", "Kind"}
+				rejected := func(what string, err error) {
+					t.Helper()
+					if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Kind") {
+						t.Errorf("%s: want an error naming Kind before any query, got %v", what, err)
+					}
+				}
+				cancelled, cancel := context.WithCancel(context.Background())
+				cancel() // a query would fail with context.Canceled, so the check must come first
+				_, err = ct.GetOrAdd(cancelled, c.item(), 0, tenant1, fields)
+				rejected("GetOrAdd", err)
+				_, err = ct.FindChild(cancelled, 0, tenant1, c.item(), fields, c.item())
+				rejected("FindChild", err)
+
+				for range 2 {
+					_, err := ct.GetOrAdd(context.Background(), c.item(), 0, tenant1, fields)
+					rejected("GetOrAdd", err)
+				}
+				if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 0 {
+					t.Errorf("GetOrAdd must create nothing, got %d nodes", n)
+				}
+			})
+		}
+	}
+}
+
+// A match field with a default whose value is not the zero value, also a pointer to the zero
+// value, is stored and matched as it is.
+func TestMatchValueWithDefault(t *testing.T) {
+	empty := ""
+	cases := []struct {
+		name  string
+		model any
+		item  func() idItem
+	}{
+		{"value", defaultKindNode{}, func() idItem { return &defaultKindNode{Name: "a", Kind: "y"} }},
+		{"pointer to the zero value", defaultPtrKindNode{}, func() idItem { return &defaultPtrKindNode{Name: "a", Kind: &empty} }},
+	}
+	for _, db := range testdbs.DBs() {
+		for _, c := range cases {
+			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
+				gdb := connAndClose(t, db)
+				dropTreeTables(gdb, c.model)
+				ct, err := newTestTree(gdb, c.model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				fields := []string{"Name", "Kind"}
+				first := c.item()
+				if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, fields); err != nil || !created {
+					t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+				}
+				second := c.item()
+				created, err := ct.GetOrAdd(ctx, second, 0, tenant1, fields)
+				if err != nil || created || second.Id() != first.Id() {
+					t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.Id(), first.Id(), err)
+				}
+				out := c.item()
+				if found, err := ct.FindChild(ctx, 0, tenant1, c.item(), fields, out); err != nil || !found || out.Id() != first.Id() {
+					t.Errorf("FindChild: found=%v id=%d (first %d) err=%v", found, out.Id(), first.Id(), err)
+				}
+			})
+		}
+	}
+}
+
+// A gorm.Valuer field is checked only when it is a match field: GetOrAdd matching on another field
+// adds the item with it, and finds that item the second time.
+func TestGetOrAddStoresValuerThatIsNotMatched(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, gormCodeNode{})
+			ct, err := newTestTree(gdb, gormCodeNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			first := &gormCodeNode{Name: "a", Code: "x"}
+			if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, []string{"Name"}); err != nil || !created {
+				t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+			}
+			second := &gormCodeNode{Name: "a", Code: "y"}
+			if created, err := ct.GetOrAdd(ctx, second, 0, tenant1, []string{"Name"}); err != nil || created || second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.NodeId, first.NodeId, err)
+			}
+			var got gormCodeNode
+			if err := ct.GetNode(ctx, first.NodeId, tenant1, &got); err != nil || got.Code != "x" {
+				t.Errorf("stored node: %+v, err=%v; want Code x", got, err)
+			}
+		})
+	}
+}
+
+// labelsNode has a field with a gorm serializer, which gorm binds as one value.
+type labelsNode struct {
+	closuretree.Node
+	Name   string
+	Labels []string `gorm:"serializer:json"`
+}
+
+// A match field with a serializer is matched by its serialized value.
+func TestMatchSerializerField(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, labelsNode{})
+			ct, err := newTestTree(gdb, labelsNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			match := []string{"Name", "Labels"}
+
+			first := &labelsNode{Name: "a", Labels: []string{"x", "y"}}
+			if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+				t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+			}
+			second := &labelsNode{Name: "a", Labels: []string{"x", "y"}}
+			created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+			if err != nil || created || second.NodeId != first.NodeId {
+				t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.NodeId, first.NodeId, err)
+			}
+			var out labelsNode
+			other := &labelsNode{Name: "a", Labels: []string{"x"}}
+			if found, err := ct.FindChild(ctx, 0, tenant1, other, match, &out); err != nil || found {
+				t.Errorf("FindChild with other labels must not find the row: found=%v err=%v", found, err)
+			}
+			if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+				t.Errorf("want one node, got %d", n)
 			}
 		})
 	}

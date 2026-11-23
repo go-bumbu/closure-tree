@@ -1,0 +1,17 @@
+{
+  "_comment": "This file is managed by the todo CLI. Do not edit it directly, by hand or with a script. Read it with todo: `todo next --json` (what to work on), `todo show --id <id|ref> --json` (one task), `todo list --flat` (every item as flat JSON records). Change it with todo commands (add, edit, move, status, assign, rm, ...; see `todo --help`), which keep its ids and rules valid.",
+  "version": 8,
+  "refs": {
+    "last": {
+      "CLOSURETRE": 1
+    }
+  },
+  "sprints": [],
+  "categories": [
+    {
+      "id": "r1nk0vf",
+      "title": "Main"
+    }
+  ],
+  "tasks": []
+}

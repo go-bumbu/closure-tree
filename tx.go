@@ -1,0 +1,121 @@
+package closuretree
+
+import (
+	"context"
+	"errors"
+
+	"gorm.io/gorm"
+)
+
+// ErrNotInTransaction is returned by LockTenant on a Tree that is not bound to a transaction.
+var ErrNotInTransaction = errors.New("the Tree is not bound to a transaction; use WithTx")
+
+// ErrSavepointRollback is returned, joined with the write's own error, when a write on a Tree bound
+// to a transaction (see WithTx) failed and could not then be rolled back to its savepoint, for
+// example because the write's context ended during a statement and the driver dropped the
+// connection. The caller's transaction can no longer be used, and its earlier work may be lost:
+// roll it back. Its absence does not prove the transaction survived; see WithTx.
+var ErrSavepointRollback = errors.New("the transaction can no longer be used; roll it back")
+
+// WithTx returns a copy of the Tree that runs every read and write on tx, usually a transaction
+// the caller opened. The copy shares everything else with ct; only the database handle differs, so
+// it is cheap and meant to be created per transaction. ct itself is unchanged and stays safe for
+// concurrent use.
+//
+// Only the statement tx carries is dropped: its Model, Table, Where and Set values, for example the
+// statement of a running gorm hook, so the tx a hook receives can be passed as it is. The handle's
+// connection (its transaction), its context and its session settings (such as Logger, DryRun or
+// PrepareStmt) are kept, and so is an error already set on the handle.
+//
+// Reads on the copy see the transaction's uncommitted rows. Each write on the copy joins the
+// caller's transaction inside a savepoint that closure-tree takes itself, whatever gorm's
+// DisableNestedTransaction says: a failed write rolls back to its savepoint and returns its error,
+// and the outer transaction stays usable, unless errors.Is(err, ErrSavepointRollback): then the
+// rollback to the savepoint failed, for example because the write's context ended during a
+// statement and the driver dropped the connection, which loses the transaction's earlier work too,
+// and the caller must roll the transaction back. The rollback runs even when the write's context
+// has ended, for at most 30 seconds; one that takes longer fails with ErrSavepointRollback.
+// ErrSavepointRollback covers only the statements inside the savepoint: reads on the copy, and the
+// statements a write runs before its savepoint (SAVEPOINT itself, the first reads of DeleteTenant
+// and RenormalizeAll), fail like a statement of the caller's own, without it. So the caller should
+// also roll the transaction back after an error from a call whose context has ended
+// (ctx.Err() != nil): the driver may have dropped the connection. A successful write keeps the
+// tenant lock until the outer transaction ends (PostgreSQL and MariaDB).
+//
+// A further exception is a deadlock on MariaDB (error 1213): the server has already rolled back the
+// whole outer transaction, so nothing of it is written, and the caller must roll it back and redo
+// it from the start. The library does not repeat a write inside a caller's transaction, as it does
+// for its own transactions (see the concurrency note on Tree). Never keep using the handle: the
+// statements that follow on it are not part of the transaction the caller began: it is no longer in
+// a transaction, so each is committed at once, by itself, and the final Rollback undoes none of
+// them. The returned error contains the driver's error, so it can be tested with errors.As. Inside a tree write the deadlock error also matches
+// ErrSavepointRollback, because the savepoint went with the transaction: a caller that redoes
+// deadlocked transactions should test for the deadlock first.
+//
+// On MariaDB, tree writes of different tenants can deadlock at any isolation level: writes that
+// delete closure rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant, BuildFromParents
+// and an Update that moves a node, lock the closure rows they scan, and some scans still pass other
+// tenants' rows (see the concurrency note on Tree); any tree write of the transaction can be the
+// one that loses. At MariaDB's default isolation level (REPEATABLE READ) the transaction keeps those
+// locks until it ends, so writes of other tenants wait on it more. Keep such transactions short, or
+// run them at READ COMMITTED, as the transactions the library opens itself do: in the library's
+// measurements on MariaDB 11.8 that removed the deadlocks that remained at REPEATABLE READ, which
+// came from gap locks. A server with binary logging on and binlog_format=STATEMENT refuses InnoDB writes at READ
+// COMMITTED (error 1665).
+//
+// At REPEATABLE READ with innodb_snapshot_isolation=ON, MariaDB's default,
+// a tree write fails with error 1020 ("Record has changed since last read") when it would change a
+// row that another transaction changed after this transaction's snapshot was taken. In the
+// library's measurements BuildFromParents did, while other tenants' writes ran, until its
+// statements forced the tenant indexes; since then the measurements saw no error 1020, but a
+// write that touches another tenant's rows can still get it. The library does not repeat the
+// write: roll the transaction back and redo it, as after a deadlock, or run it at READ COMMITTED,
+// where error 1020 does not occur.
+//
+// Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
+// the transaction waits on the transaction's own lock, so it blocks: forever, or until a lock or
+// busy timeout fails it. A transaction that writes to several trees or tenants must take their
+// locks in one fixed order everywhere, for example with LockTenant up front. Call Migrate on ct,
+// not on the copy: it runs DDL, and MariaDB commits the transaction implicitly on DDL.
+//
+// If tx is not a transaction, each write on the copy opens its own transaction, as on ct.
+// WithTx panics if tx is nil.
+func (ct *Tree) WithTx(tx *gorm.DB) *Tree {
+	if tx == nil {
+		panic("closuretree: WithTx called with a nil *gorm.DB")
+	}
+	cp := *ct
+	// A new, clean statement on the same connection and context, then a session so that each tree
+	// query clones that clean statement. NewDB alone is not enough: WithContext would clone
+	// the old statement.
+	cp.db = tx.Session(&gorm.Session{NewDB: true, Initialized: true}).Session(&gorm.Session{})
+	return &cp
+}
+
+// inTransaction reports whether the Tree's handle is inside a transaction, using the same test as
+// gorm's own Transaction: the connection pool is a transaction that can be committed.
+func (ct *Tree) inTransaction() bool {
+	committer, ok := ct.db.Statement.ConnPool.(gorm.TxCommitter)
+	return ok && committer != nil
+}
+
+// LockTenant takes the tenant's write lock in the transaction the Tree is bound to (see WithTx). It
+// is meant to be the first statement of the caller's transaction: the guards inside later tree
+// writes (cycle check, sibling order, duplicate check) are plain reads, and taking the lock first
+// makes them see every write committed before the lock was granted, where the database's isolation
+// level allows it. LockTenant behaves like a tree write with an empty body, with the same savepoint
+// handling; the lock is held until the caller's transaction ends (PostgreSQL and MariaDB). Later
+// tree writes in the same transaction take the lock again, which is harmless.
+//
+// It returns ErrEmptyTenant for an empty tenant, and ErrNotInTransaction when the Tree is not
+// inside a transaction, because the lock would be released at once.
+func (ct *Tree) LockTenant(ctx context.Context, tenant string) error {
+	tenant, err := validateTenant(tenant)
+	if err != nil {
+		return err
+	}
+	if !ct.inTransaction() {
+		return ErrNotInTransaction
+	}
+	return ct.writeTx(ctx, tenant, func(*gorm.DB) error { return nil })
+}
