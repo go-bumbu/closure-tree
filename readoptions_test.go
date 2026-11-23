@@ -998,19 +998,42 @@ func TestFlatReadsKeepSliceLengthOnError(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// small is read first and fits, big overflows the int8 Count.
-			flat := []narrowCountNode{{Name: "earlier"}}
-			ancestors := []*narrowCountNode{{Name: "earlier"}}
+			// small is read first and fits, big overflows the int8 Count. The spare capacity lets
+			// the read append in place, so a row it read stays in the backing array unless zeroed.
+			flat := make([]narrowCountNode, 1, 4)
+			flat[0] = narrowCountNode{Name: "earlier"}
+			ancestors := make([]*narrowCountNode, 1, 4)
+			ancestors[0] = &narrowCountNode{Name: "earlier"}
 			for read, c := range map[string]struct {
 				err  error
 				len  func() int
 				name func() string
+				tail func() bool
 			}{
 				"Descendants": {ct.Descendants(ctx, 0, 0, tenant1, &flat),
-					func() int { return len(flat) }, func() string { return flat[0].Name }},
+					func() int { return len(flat) }, func() string { return flat[0].Name },
+					func() bool {
+						for _, e := range flat[:cap(flat)][1:] {
+							if !cmp.Equal(e, narrowCountNode{}) {
+								return false
+							}
+						}
+						return true
+					}},
 				"Ancestors": {ct.Ancestors(ctx, leaf.NodeId, tenant1, &ancestors),
-					func() int { return len(ancestors) }, func() string { return ancestors[0].Name }},
+					func() int { return len(ancestors) }, func() string { return ancestors[0].Name },
+					func() bool {
+						for _, e := range ancestors[:cap(ancestors)][1:] {
+							if e != nil {
+								return false
+							}
+						}
+						return true
+					}},
 			} {
+				if !c.tail() {
+					t.Errorf("%s: want no row of the failed read left past the slice's length", read)
+				}
 				if c.err == nil || !strings.Contains(c.err.Error(), "300 overflows int8") {
 					t.Errorf("%s: want an overflow error, got %v", read, c.err)
 				}

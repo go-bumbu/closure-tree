@@ -137,6 +137,8 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 // appendTarget checks that items is a pointer to a slice and returns the struct type each row is
 // copied into, the function that appends a scanned element to the slice, and the function that
 // truncates the slice back to the length it had here, which the caller runs when the read fails.
+// The truncation zeroes the elements it cuts off, so the backing array keeps no row of the failed
+// read and the rows can be garbage collected.
 // Descendants and Ancestors intentionally accept both value ([]T) and pointer ([]*T) element
 // slices; TreeDescendants, by contrast, requires []*T because it links child pointers into a
 // tree. Every row becomes a new T (see scanEach).
@@ -158,7 +160,10 @@ func appendTarget(items any) (reflect.Type, func(elem, row reflect.Value), func(
 		}
 		sliceVal.Set(reflect.Append(sliceVal, elem))
 	}
-	reset := func() { sliceVal.SetLen(origLen) }
+	reset := func() {
+		sliceVal.Slice(origLen, sliceVal.Len()).Clear()
+		sliceVal.SetLen(origLen)
+	}
 	return structType, add, reset, nil
 }
 
