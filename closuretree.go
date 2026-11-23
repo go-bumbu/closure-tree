@@ -239,15 +239,14 @@ func checkNodeColumns(s *schema.Schema) error {
 // them. An index idx_<closure table>_tenant left from v0.8 or earlier is the tenant index
 // described below, not a leftover: keep it. AutoMigrate creates the indexes a table lacks, so on
 // a tree created before the closure table had its index on the tenant column, the next Migrate
-// adds it. The index is named idx_<closure table>_tenant,
-// shortened by gorm's naming strategy when that is too long; Migrate builds it unless an index of
-// exactly that name exists. Building it on a large closure table takes time. MySQL builds it in
-// place and lets writes continue, except at its start and end, where it needs a short exclusive
-// metadata lock: it waits for that lock until the open transactions that used the closure table
-// end, and while it waits, every new statement on the closure table, reads too, queues behind it.
-// So run Migrate when no long transaction uses the tree. PostgreSQL blocks writes to the
-// closure table until the index is built. To avoid that, build it beforehand, outside a
-// transaction, with
+// adds it. The index is named idx_<closure table>_tenant, shortened by gorm's naming strategy when
+// that is too long; Migrate builds it unless an index of exactly that name exists. Building it on a
+// large closure table takes time. MySQL builds it in place and lets writes continue, except at its
+// start and end, where it needs a short exclusive metadata lock: it waits for that lock until the
+// open transactions that used the closure table end, and while it waits, every new statement on the
+// closure table, reads too, queues behind it. So run Migrate when no long transaction uses the
+// tree. PostgreSQL blocks writes to the closure table until the index is built. To avoid that,
+// build it beforehand, outside a transaction, with
 //
 //	CREATE INDEX CONCURRENTLY idx_<closure table>_tenant ON <closure table> (tenant);
 //
