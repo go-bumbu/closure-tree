@@ -306,9 +306,9 @@ func derefUint(p *uint) uint {
 // places after that sibling. The PlaceLast option places the node last instead of first; combined
 // with a non-zero afterNodeID it returns ErrConflictingPlacement.
 //
-// A parent that is not a node of tenant returns ErrParentNotFound. So does a node row that has no
-// closure rows yet, as before BuildFromParents, with a message that names BuildFromParents; GetOrAdd
-// and a move with Update reject such a parent the same way.
+// A parent that is not a node of tenant returns ErrParentNotFound. So does a node row without a
+// closure row at depth 1 (not linked into the tree), as before BuildFromParents, with a message
+// that names BuildFromParents; GetOrAdd and a move with Update reject such a parent the same way.
 func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *uint, tenant string, opts ...AddOption) error {
 	if err := checkItem(item); err != nil {
 		return err
