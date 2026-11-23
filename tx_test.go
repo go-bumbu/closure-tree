@@ -1188,7 +1188,8 @@ func TestWithTxTimeoutDuringStatementLosesTransaction(t *testing.T) {
 // MySQL detects the deadlock and rolls back one whole transaction (error 1213), so the rollback to
 // that write's savepoint fails too: the error reports the deadlock first and matches
 // ErrSavepointRollback. The other add gets its lock once the server's rollback has released it,
-// and its transaction commits.
+// and its transaction commits. A statement on the failed transaction's handle is then committed at
+// once, and the handle's rollback does not undo it.
 func TestWithTxDeadlockMatchesSavepointRollback(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -1243,9 +1244,9 @@ func TestWithTxDeadlockMatchesSavepointRollback(t *testing.T) {
 				t.Fatalf("want exactly one add to fail, A: %v, B: %v", errA, errB)
 			}
 			// The failed add's transaction is gone; the other one wrote to the failed one's tenant.
-			failed, survivor, grown, unchanged := errA, txB, tenant1, tenant2
+			failed, failedTx, survivor, grown, unchanged := errA, txA, txB, tenant1, tenant2
 			if errA == nil {
-				failed, survivor, grown, unchanged = errB, txA, tenant2, tenant1
+				failed, failedTx, survivor, grown, unchanged = errB, txB, txA, tenant2, tenant1
 			}
 
 			msg := failed.Error()
@@ -1269,7 +1270,29 @@ func TestWithTxDeadlockMatchesSavepointRollback(t *testing.T) {
 			}
 			assertConsistent(t, gdb, ct, tenant1)
 			assertConsistent(t, gdb, ct, tenant2)
+			assertStatementsAfterDeadlockCommit(t, gdb, ct, failedTx)
 		})
+	}
+}
+
+// assertStatementsAfterDeadlockCommit checks the handle of a transaction that MySQL rolled back
+// on a deadlock: it is no longer in a transaction, so a later statement on it is committed by
+// itself, at once, and the final rollback undoes nothing. A caller that kept using the handle
+// would commit its following statements one by one.
+func assertStatementsAfterDeadlockCommit(t *testing.T, gdb *gorm.DB, ct *closuretree.Tree, failedTx *gorm.DB) {
+	t.Helper()
+	const after = "after the deadlock"
+	if err := failedTx.Create(&TestPayload{Node: closuretree.Node{Tenant: after}, Name: after}).Error; err != nil {
+		t.Fatalf("insert on the failed transaction's handle: %v", err)
+	}
+	if got := countTenant(t, gdb, ct, after).Nodes; got != 1 {
+		t.Errorf("before the rollback: want the insert committed, got %d nodes", got)
+	}
+	if err := failedTx.Rollback().Error; err != nil {
+		t.Errorf("rollback of the failed transaction's handle: %v", err)
+	}
+	if got := countTenant(t, gdb, ct, after).Nodes; got != 1 {
+		t.Errorf("after the rollback: want the insert kept, got %d nodes", got)
 	}
 }
 
