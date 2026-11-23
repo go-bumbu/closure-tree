@@ -29,8 +29,12 @@ LOCAL_SQLITE=true go test -run TestTreeGetNode ./...
 
 ### Core files
 
-- **`closuretree.go`** — `Tree` struct and all CRUD methods. Write SQL is raw via `fmt.Sprintf` with table name substitution (never user input); read SQL is built in `readsql.go`. `New` validates table names with a regex before any migration. Write operations go through `writeTx` in `lock.go`, not `db.Transaction(...)` directly.
+- **`closuretree.go`** — `Tree` struct, `New`, `Migrate`, `Add` and `DeleteRecurse`. Write SQL is raw via `fmt.Sprintf` with table name substitution (never user input); read SQL is built in `readsql.go`. `New` validates table names with a regex before any migration. Write operations go through `writeTx` in `lock.go`, not `db.Transaction(...)` directly.
 - **`node.go`** — `Node` struct to embed in user types. `ParentId` is read-only (populated via LEFT JOIN on read, ignored on write). Reflection helpers `hasNode`/`hasNodeType`/`findNodeValue` support multi-level embedding.
+- **`query.go`** — the node reads `GetNode`, `Descendants`, `DescendantIds`, `TreeDescendants`, `TreeDescendantsIds` (with `TreeNode`, `SortTree`), and the unfiltered checks `IsDescendant`, `IsChildOf`.
+- **`move.go`** — `Update`: changes a node's fields, moves it (`moveInTx`: rejects a cycle or a same-parent move with `ErrInvalidMove`, deletes the subtree's outside paths and inserts the new ones) and reorders it, in one write.
+- **`getoradd.go`** — `FindChild` and `GetOrAdd`: match a direct child of a parent on the named fields (`buildMatchConditions`, NULL matched as `IS NULL`); `GetOrAdd` adds the item when no child matches.
+- **`sortorder.go`** — sibling order: `sort_order` bisection between neighbours (`computeSortOrder`), the halvings left per parent in the meta table (`closureTreeMeta`), `Renormalize`, `RenormalizeAll`, `NeedsRenormalize`, `NeedsRenormalizeAny`, `DefaultHalvingsBuffer`.
 - **`leaves.go`** — `GetLeaves` for any model with a many2many relation to the nodes (`[]T` or `[]*T`, one primary key column). It picks the relation that points to the node table (`Relation` names it when several do), validates the table names and the join columns, and selects the rows with `IN` over the `SubtreeIDs` subquery, ordered by the primary key. `Leaf` is optional and deprecated: embedding it only adds a tenant condition on the model's own table.
 - **`ancestors.go`** — `Ancestors`, `AncestorIDs`: one statement over the closure rows of the node, plus an existence check (`requireNode`).
 - **`childcounts.go`** — `ChildCounts`: direct children per id, ids deduplicated and sent in chunks of `idChunkSize`.
@@ -44,6 +48,8 @@ LOCAL_SQLITE=true go test -run TestTreeGetNode ./...
 - **`scan.go`** — scans each row with gorm's scanner into the Tree's model, then copies it into the caller's element type (`modelToElem`).
 - **`collation.go`** — `ensureTenantCollation`, the last step of `Migrate` on MySQL: gives the tenant columns of a tree without rows the collation `utf8mb4_0900_bin` (the statement from `alterTenantCollationSQL`, which accepts only a `varchar(n)` type), and returns `ErrTenantCollation` when the four columns disagree.
 - **`build.go`** — `BuildFromParents`: builds the closure rows of existing nodes from `ParentLink`s, validated in Go before any write; options `Rebuild` and `OrphansToRoot`.
+- **`dialect.go`** — `dialect`: the places PostgreSQL, MySQL and SQLite differ — the MySQL version gate (`checkVersion`), the meta upsert (`metaUpsertSQL`), the tenant lock (`lockTenant`, `ErrLockNotAcquired`) and the isolation level of the library's transactions (`txOptions`).
+- **`columns.go`** — the constants for the column names the raw SQL uses (`colNodeID`, `colTenant`, …); `TestColumnNamesMatchSchema` checks them against the names gorm derives.
 
 ### Key invariants
 
