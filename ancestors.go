@@ -8,7 +8,8 @@ import (
 // Ancestors appends the ancestors of nodeID to items, a pointer to a []T or []*T, root first and
 // the direct parent last. The node itself and the virtual root (id 0) are left out, so a root
 // node has no ancestors. The parent of every ancestor is filled. Rows are copied into the element
-// type as in Descendants. It is one query plus an existence check; no recursion is involved.
+// type as in Descendants. It is one query plus an existence check; no recursion is involved. On
+// any error items keeps the length it had, so no row of a failed read is left in it.
 //
 // ErrNodeNotFound means one of two things: nodeID does not exist in the tenant (the virtual root
 // included), or it exists but does not match the filter. A filter also applies to the ancestors:
@@ -17,7 +18,7 @@ import (
 // Ancestors honours the read options Filter, Unfiltered and Columns; PerNode is ignored. Column
 // names of every option are validated, so an unknown one returns ErrUnknownColumn.
 func (ct *Tree) Ancestors(ctx context.Context, nodeID uint, tenant string, items any, opts ...ReadOption) error {
-	structType, add, err := appendTarget(items)
+	structType, add, reset, err := appendTarget(items)
 	if err != nil {
 		return err
 	}
@@ -37,7 +38,11 @@ func (ct *Tree) Ancestors(ctx context.Context, nodeID uint, tenant string, items
 		return err
 	}
 	sqlstr, args := ct.ancestorsSQL(p, false, nodeID, tenant)
-	return ct.scanEach(ctx, sqlstr, args, toElem, "failed to fetch ancestors", add)
+	if err := ct.scanEach(ctx, sqlstr, args, toElem, "failed to fetch ancestors", add); err != nil {
+		reset()
+		return err
+	}
+	return nil
 }
 
 // AncestorIDs returns the ids of the ancestors of nodeID, root first, as Ancestors does. A root

@@ -973,6 +973,57 @@ func TestReadNarrowingAndIntegerToString(t *testing.T) {
 	}
 }
 
+// A row that fails after valid rows were read leaves the caller's slice at its original length:
+// the rows read before it are dropped and the caller's own elements are kept.
+func TestFlatReadsKeepSliceLengthOnError(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, countedNode{})
+			ct, err := newTestTree(gdb, countedNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			small := &countedNode{Name: "small", Count: 5}
+			if err := ct.Add(ctx, small, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			big := &countedNode{Name: "big", Count: 300}
+			if err := ct.Add(ctx, big, up(small.NodeId), nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			leaf := &countedNode{Name: "leaf", Count: 1}
+			if err := ct.Add(ctx, leaf, up(big.NodeId), nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			// small is read first and fits, big overflows the int8 Count.
+			flat := []narrowCountNode{{Name: "earlier"}}
+			ancestors := []*narrowCountNode{{Name: "earlier"}}
+			for read, c := range map[string]struct {
+				err  error
+				len  func() int
+				name func() string
+			}{
+				"Descendants": {ct.Descendants(ctx, 0, 0, tenant1, &flat),
+					func() int { return len(flat) }, func() string { return flat[0].Name }},
+				"Ancestors": {ct.Ancestors(ctx, leaf.NodeId, tenant1, &ancestors),
+					func() int { return len(ancestors) }, func() string { return ancestors[0].Name }},
+			} {
+				if c.err == nil || !strings.Contains(c.err.Error(), "300 overflows int8") {
+					t.Errorf("%s: want an overflow error, got %v", read, c.err)
+				}
+				if n := c.len(); n != 1 {
+					t.Errorf("%s: want the slice kept at length 1, got %d", read, n)
+				} else if name := c.name(); name != "earlier" {
+					t.Errorf("%s: want the caller's element kept, got %q", read, name)
+				}
+			}
+		})
+	}
+}
+
 func TestFilterOnSingleNodeReads(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {

@@ -96,7 +96,8 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 // converted to a string (Go would make it a code point). A number may be converted to a smaller
 // type, but a value outside its range, or a float that is NaN or infinite converted to an integer,
 // fails the read with "cannot copy field ... overflows ...". An element that is neither a struct
-// nor a pointer to a struct returns an error before querying.
+// nor a pointer to a struct returns an error before querying. On any error items keeps the length
+// it had, so no row of a failed read is left in it.
 //
 // Descendants honours the read options Filter, Unfiltered, PerNode and Columns. By default a node
 // is returned only if it and every node between parent and it match the filter; with PerNode it
@@ -104,7 +105,7 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 // match gives an empty result; parent 0 always matches. Column names of every option are
 // validated, so an unknown one returns ErrUnknownColumn.
 func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tenant string, items any, opts ...ReadOption) (err error) {
-	structType, add, err := appendTarget(items)
+	structType, add, reset, err := appendTarget(items)
 	if err != nil {
 		return err
 	}
@@ -126,31 +127,39 @@ func (ct *Tree) Descendants(ctx context.Context, parent uint, maxDepth int, tena
 		return err
 	}
 	sqlstr, args := ct.descendantsSQL(p, false, parent, maxDepth, tenant)
-	return ct.scanEach(ctx, sqlstr, args, toElem, "failed to execute query", add)
+	if err := ct.scanEach(ctx, sqlstr, args, toElem, "failed to execute query", add); err != nil {
+		reset()
+		return err
+	}
+	return nil
 }
 
 // appendTarget checks that items is a pointer to a slice and returns the struct type each row is
-// copied into and the function that appends a scanned element to the slice. Descendants and
-// Ancestors intentionally accept both value ([]T) and pointer ([]*T) element slices;
-// TreeDescendants, by contrast, requires []*T because it links child pointers into a tree. Every
-// row becomes a new T (see scanEach).
-func appendTarget(items any) (reflect.Type, func(elem, row reflect.Value), error) {
+// copied into, the function that appends a scanned element to the slice, and the function that
+// truncates the slice back to the length it had here, which the caller runs when the read fails.
+// Descendants and Ancestors intentionally accept both value ([]T) and pointer ([]*T) element
+// slices; TreeDescendants, by contrast, requires []*T because it links child pointers into a
+// tree. Every row becomes a new T (see scanEach).
+func appendTarget(items any) (reflect.Type, func(elem, row reflect.Value), func(), error) {
 	sliceVal, err := pointerToSlice(items)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+	origLen := sliceVal.Len()
 	elemType := sliceVal.Type().Elem()
 	elemIsPtr := elemType.Kind() == reflect.Pointer
 	structType := elemType
 	if elemIsPtr {
 		structType = elemType.Elem()
 	}
-	return structType, func(elem, _ reflect.Value) {
+	add := func(elem, _ reflect.Value) {
 		if !elemIsPtr {
 			elem = elem.Elem()
 		}
 		sliceVal.Set(reflect.Append(sliceVal, elem))
-	}, nil
+	}
+	reset := func() { sliceVal.SetLen(origLen) }
+	return structType, add, reset, nil
 }
 
 // DescendantIds behaves the same as Descendants but only returns the node IDs for the search query.
