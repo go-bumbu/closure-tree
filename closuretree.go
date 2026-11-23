@@ -70,19 +70,21 @@ var (
 // MySQL.
 //
 // On MySQL, tree writes of different tenants can still deadlock, and no write is promised to be
-// free of deadlocks. No closure-table index leads with the tenant, so a write that deletes closure
-// rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant, BuildFromParents with Rebuild, or
-// an Update that moves a node, locks the closure rows it scans, also other tenants' rows, and
-// waits for a row that another transaction holds. READ COMMITTED removed the deadlocks between
-// these writes and other tenants' adds, but two of them on different tenants at once can deadlock:
-// in the library's tests a rebuild against a DeleteRecurseMany, and a move against a DeleteRecurse,
-// did; three DeleteTenant or two rebuilds at once did not. While a caller's transaction at MySQL's
-// default isolation level (REPEATABLE READ) is open (see WithTx), its tree writes keep the locks
-// of the rows they scanned until it ends, so more writes of other tenants wait on it and can
-// deadlock with it, also writes on a Tree not bound to a transaction, which MySQL may roll back
-// instead. A deadlock (error 1213) means MySQL has already rolled back the whole transaction, and
-// the work can be retried: repeat the call on a Tree not bound to a transaction, or roll back and
-// retry the caller's transaction on one bound with WithTx.
+// free of deadlocks. A write that deletes closure rows, such as DeleteRecurse, DeleteRecurseMany,
+// DeleteTenant, BuildFromParents with Rebuild, or an Update that moves a node, locks the closure
+// rows it scans and waits for a row that another transaction holds. The closure table's index on
+// the tenant keeps most of these scans within the tenant's rows, but not all: the tenant-wide
+// delete of a tenant that holds a large share of the closure table, and deletes planned on stale
+// statistics, as on just-loaded tables, still scan other tenants' rows. READ COMMITTED removed the
+// deadlocks between these writes and other tenants' adds, but two of them on different tenants at
+// once can deadlock: in the library's tests a rebuild against a DeleteRecurseMany, and a move
+// against a DeleteRecurse, did; three DeleteTenant or two rebuilds at once did not. While a
+// caller's transaction at MySQL's default isolation level (REPEATABLE READ) is open (see WithTx),
+// its tree writes keep the locks of the rows they scanned until it ends, so more writes of other
+// tenants wait on it and can deadlock with it, also writes on a Tree not bound to a transaction,
+// which MySQL may roll back instead. A deadlock (error 1213) means MySQL has already rolled back
+// the whole transaction, and the work can be retried: repeat the call on a Tree not bound to a
+// transaction, or roll back and retry the caller's transaction on one bound with WithTx.
 //
 // The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MySQL (released
 // when the transaction ends); on SQLite, which already serializes writers per database, it is the
@@ -110,6 +112,7 @@ type Tree struct {
 	relationsTbl string
 	metaTbl      string
 	lockTbl      string
+	tenantIdx    string // the closure table's index on tenant, as gorm names it (see closureTree)
 	dialect      dialect
 	model        any // node model retained so Migrate can AutoMigrate it
 
@@ -179,6 +182,7 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		relationsTbl: relTbl,
 		metaTbl:      metaTbl,
 		lockTbl:      lockTbl,
+		tenantIdx:    db.NamingStrategy.IndexName(relTbl, "Tenant"), // gorm's call for closureTree.Tenant's index tag
 		dialect:      dialectOf(db),
 		model:        item,
 		schema:       stmt.Schema,
@@ -213,7 +217,11 @@ func checkNodeColumns(s *schema.Schema) error {
 // AutoMigrate. It is separate from
 // New so that construction needs no DDL privilege and so migration can be run explicitly (e.g. once
 // at startup, guarded against concurrent runners). AutoMigrate is additive: it will not drop or
-// alter an existing index, so see the note on closureTree when upgrading a pre-0.10 schema.
+// alter an existing index, so see the note on closureTree when upgrading a pre-0.10 schema. It
+// creates the indexes a table lacks, so on a tree created before the closure table had its index
+// on the tenant column, the next Migrate adds it. The index is named idx_<closure table>_tenant,
+// shortened by gorm's naming strategy when that is too long; Migrate builds it unless an index of
+// exactly that name exists.
 //
 // On MySQL, as its last step, Migrate gives the tenant column of the four tables the collation
 // utf8mb4_0900_bin while none of them has a row, so that tenants are compared exactly (see Tree);
@@ -262,9 +270,16 @@ type closureTree struct {
 	// column order: (ancestor_id, tenant, depth), (descendant_id, tenant, depth), and the unique
 	// (ancestor_id, descendant_id, tenant, depth). The depth check is likewise left unnamed so GORM
 	// scopes it per table (chk_<reltable>_depth) — MySQL check-constraint names are schema-global.
+	//
+	// The fourth index, on (tenant) alone, is named idx_<reltable>_tenant (Tree.tenantIdx; gorm
+	// shortens a long name). It keeps the tenant-wide deletes (DeleteTenant, BuildFromParents) within
+	// the tenant's rows, so on MySQL they lock fewer rows of other tenants. On MySQL it is as good as
+	// (tenant, ancestor_id, descendant_id, depth) only because the table has no primary key: InnoDB
+	// then clusters it on the unique index, whose columns every secondary index carries. A primary
+	// key would change that. Migrate adds it to a tree created before it existed.
 	AncestorID   uint   `gorm:"not null;index:,composite:anc_ten_dep,priority:1;uniqueIndex:,composite:uniq,priority:1"`
 	DescendantID uint   `gorm:"not null;index:,composite:desc_ten_dep,priority:1;uniqueIndex:,composite:uniq,priority:2"`
-	Tenant       string `gorm:"not null;index:,composite:anc_ten_dep,priority:2;index:,composite:desc_ten_dep,priority:2;uniqueIndex:,composite:uniq,priority:3"`
+	Tenant       string `gorm:"not null;index;index:,composite:anc_ten_dep,priority:2;index:,composite:desc_ten_dep,priority:2;uniqueIndex:,composite:uniq,priority:3"`
 	Depth        int    `gorm:"not null;default:0;check:depth >= 0;index:,composite:anc_ten_dep,priority:3;index:,composite:desc_ten_dep,priority:3;uniqueIndex:,composite:uniq,priority:4"`
 }
 

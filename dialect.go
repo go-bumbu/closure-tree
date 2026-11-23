@@ -168,13 +168,14 @@ func (d dialect) ensureLockRow(tx *gorm.DB, lockTbl, tenant string) error {
 // PostgreSQL at REPEATABLE READ the snapshot is fixed at the transaction's first statement, which
 // is the lock statement, before it waits for the lock, so the guards after the lock would not see
 // the writes committed while it waited. On MySQL at REPEATABLE READ a delete that scans the closure
-// table (no index of it leads with the tenant) keeps locks on the closure rows of other tenants and
-// on the gaps between them, so it deadlocks with other tenants' writes; at READ COMMITTED it takes
-// no gap locks and releases the rows it does not delete, which removed its deadlocks with other
-// tenants' adds. It still locks the rows it scans, also other tenants' rows, so two writes of
-// different tenants that both delete closure rows can still deadlock (see the concurrency note on
-// Tree). The guards need no snapshot that lasts across statements: every writer of the tenant
-// holds its lock. SQLite uses the connection's default (nil): it serializes writers.
+// table past the tenant's rows (see the concurrency note on Tree) keeps locks on the closure rows of
+// other tenants and on the gaps between them, so it deadlocks with other tenants' writes; at READ
+// COMMITTED it takes no gap locks and releases the rows it does not delete, which removed its
+// deadlocks with other tenants' adds. It still locks the rows it scans, also other tenants' rows,
+// so two writes of different tenants that both delete closure rows can still deadlock (see the
+// concurrency note on Tree). The guards need no snapshot that lasts across statements: every
+// writer of the tenant holds its lock. SQLite uses the connection's default (nil): it serializes
+// writers.
 func (d dialect) txOptions() []*sql.TxOptions {
 	if d == dialectSQLite {
 		return nil

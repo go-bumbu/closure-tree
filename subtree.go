@@ -127,10 +127,11 @@ func (ct *Tree) subquery(sql string, args []any) *gorm.DB {
 // when ForAncestors names it, and without ForAncestors only with IncludeVirtualRoot. By default the
 // depth range starts at depth 0 (the node itself) and has no upper limit.
 //
-// Without ForAncestors the statement reads the closure rows of every tenant to find those of this
-// one, because no index of the closure table leads with the tenant; ForAncestors avoids that. With
-// a filter the statement also reads the node table, so MySQL rejects it inside an UPDATE or DELETE
-// on the node table (error 1093); wrap it as SubtreeIDs describes.
+// Without ForAncestors the statement reads the tenant's closure rows through the closure table's
+// index on the tenant; for a tenant that holds most of the closure table the databases read the
+// whole table instead. ForAncestors limits the read to the closure rows of those ancestors. With a
+// filter the statement also reads the node table, so MySQL rejects it inside an UPDATE or DELETE on
+// the node table (error 1093); wrap it as SubtreeIDs describes.
 func (ct *Tree) ClosurePairs(tenant string, opts ...ReadOption) (*gorm.DB, error) {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

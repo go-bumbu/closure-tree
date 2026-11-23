@@ -622,7 +622,7 @@ func TestPostgresOwnTransactionsUnderRepeatableReadDefault(t *testing.T) {
 }
 
 // On a Tree not bound to a transaction, writes that delete closure rows must not deadlock with
-// other tenants' adds. No closure-table index leads with the tenant, so on MySQL at REPEATABLE
+// other tenants' adds. Before the closure table had an index on the tenant, on MySQL at REPEATABLE
 // READ their deletes locked closure rows of other tenants, and concurrent adds failed with error
 // 1213, until the library's own transactions ran at READ COMMITTED there too. One goroutine repeats
 // the write on tenant a while two others repeat Add on tenants b and c; no call may fail.
@@ -844,8 +844,8 @@ func moveSubtree(t *testing.T, ctx context.Context, ct *closuretree.Tree, tenant
 
 // On a Tree not bound to a transaction, two or three tenants each repeat a write that deletes
 // closure rows, at the same time; no call may fail. At READ COMMITTED InnoDB still locks each
-// closure row such a delete scans, and waits for a row that another transaction holds (no
-// closure-table index leads with the tenant), so on MySQL some of these pairs deadlock: they run on
+// closure row such a delete scans, and waits for a row that another transaction holds (some scans
+// still pass other tenants' rows), so on MySQL some of these pairs deadlock: they run on
 // PostgreSQL only (mysqlDeadlocks). The others guard what was measured. Each writer gets its own
 // tenant and its own range of node ids; tenant z holds rows that the deletes scan past.
 func TestOwnDeletingWritesAcrossTenants(t *testing.T) {

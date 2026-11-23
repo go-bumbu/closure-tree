@@ -50,11 +50,11 @@ var ErrSavepointRollback = errors.New("the transaction can no longer be used; ro
 // should test for the deadlock first. On MySQL, tree writes of different tenants can deadlock at
 // any isolation level: writes that delete closure rows, such as DeleteRecurse, DeleteRecurseMany,
 // DeleteTenant, BuildFromParents and an Update that moves a node, lock the closure rows they scan,
-// also other tenants' rows, because no closure-table index leads with the tenant (see the
-// concurrency note on Tree). At MySQL's default isolation level (REPEATABLE READ) the transaction
-// keeps those locks until it ends, so writes of other tenants wait on it more, also writes on a
-// Tree not bound to a transaction, which MySQL may roll back instead: keep such transactions short,
-// or run them at READ COMMITTED, as the transactions the library opens itself do.
+// and some scans still pass other tenants' rows (see the concurrency note on Tree). At MySQL's
+// default isolation level (REPEATABLE READ) the transaction keeps those locks until it ends, so
+// writes of other tenants wait on it more, also writes on a Tree not bound to a transaction, which
+// MySQL may roll back instead: keep such transactions short, or run them at READ COMMITTED, as the
+// transactions the library opens itself do.
 //
 // Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
 // the transaction waits on the transaction's own lock, so it blocks: forever, or until a lock or
