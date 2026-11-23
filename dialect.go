@@ -197,3 +197,9 @@ func (d dialect) txOptions() []*sql.TxOptions {
 	}
 	return []*sql.TxOptions{{Isolation: sql.LevelReadCommitted}}
 }
+
+// retryPolicy returns the policy by which writeTx repeats a transaction it opened itself. It is the
+// zero policy, one attempt, on every database.
+func (d dialect) retryPolicy() retryPolicy {
+	return retryPolicy{}
+}

@@ -116,7 +116,8 @@ type Tree struct {
 	lockTbl      string
 	tenantIdx    string // the closure table's index on tenant, as gorm names it (see closureTree)
 	dialect      dialect
-	model        any // node model retained so Migrate can AutoMigrate it
+	retry        retryPolicy // how writeTx repeats a transaction it opened itself (dialect.retryPolicy)
+	model        any         // node model retained so Migrate can AutoMigrate it
 
 	schema        *schema.Schema // the parsed model schema
 	defaultFilter []resolvedCond // set by WithFilter
@@ -175,6 +176,7 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		return nil, err
 	}
 
+	d := dialectOf(db)
 	ct := &Tree{
 		// A new session, so that every call starts from a copy of db's statement: on a chained
 		// handle, such as db.Set("gorm:table_options", ...), Migrate's Table calls would otherwise
@@ -185,7 +187,8 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 		metaTbl:      metaTbl,
 		lockTbl:      lockTbl,
 		tenantIdx:    db.NamingStrategy.IndexName(relTbl, "Tenant"), // gorm's call for closureTree.Tenant's index tag
-		dialect:      dialectOf(db),
+		dialect:      d,
+		retry:        d.retryPolicy(),
 		model:        item,
 		schema:       stmt.Schema,
 	}

@@ -22,20 +22,24 @@ var savepointRollbackTimeout = 30 * time.Second
 // mutating operation (Add, GetOrAdd, Update, DeleteRecurse, DeleteRecurseMany, DeleteTenant,
 // Renormalize, BuildFromParents) and LockTenant go through here. The dialect-specific lock
 // acquisition lives in dialect.lockTenant; see the concurrency note on Tree.
-// The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL and MySQL).
+// The transaction it opens itself uses dialect.txOptions (READ COMMITTED on PostgreSQL and MySQL)
+// and is repeated by the Tree's retry policy (ct.retry), so fn must start from scratch on every
+// call: it may run more than once, each time in a new transaction.
 //
 // When the Tree is bound to a caller's transaction (WithTx), writeTx opens no transaction of its
-// own: it runs the lock and fn inside a savepoint, see savepointTx.
+// own: it runs the lock and fn inside a savepoint, see savepointTx, and never repeats them.
 func (ct *Tree) writeTx(ctx context.Context, tenant string, fn func(tx *gorm.DB) error) error {
 	if ct.inTransaction() {
 		return ct.savepointTx(ct.db.WithContext(ctx), tenant, fn)
 	}
-	return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := ct.dialect.lockTenant(tx, ct.lockTbl, tenant); err != nil {
-			return err
-		}
-		return fn(tx)
-	}, ct.dialect.txOptions()...)
+	return ct.retry.run(ctx, func() error {
+		return ct.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := ct.dialect.lockTenant(tx, ct.lockTbl, tenant); err != nil {
+				return err
+			}
+			return fn(tx)
+		}, ct.dialect.txOptions()...)
+	})
 }
 
 // savepointTx runs the tenant lock and fn inside a savepoint of the caller's transaction tx. It
