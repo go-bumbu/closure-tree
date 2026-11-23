@@ -44,18 +44,19 @@ err = tree.Migrate() // creates or updates the tables; call it once at applicati
 `New` only parses and validates the model, it does not touch the schema. `Migrate` creates the
 tables and should be called once at application start up.
 
-`Migrate` also adds the indexes a table lacks. On a tree last migrated by v0.10.0 or earlier, the next
-`Migrate` adds an index on the tenant column of the closure table, named
+`Migrate` also adds the indexes a table lacks. On a tree last migrated by v0.10.0 or earlier, the
+next `Migrate` adds an index on the tenant column of the closure table, named
 `idx_closure_tree_rel_<node table>_tenant` (gorm's naming strategy shortens a name that is too
 long); it builds it unless an index of exactly that name exists. On a large closure table the build
 takes time. MySQL builds it in place and lets writes continue, except at its start and end, where
 it needs a short exclusive metadata lock: it waits for that lock until the open transactions that
 used the closure table end, and while it waits, every new statement on the closure table, reads
-too, queues behind it. So run `Migrate` when no long transaction uses the tree. PostgreSQL blocks writes to the closure table until the index is built. To avoid that, build it
-beforehand, outside a transaction, with exactly that name:
+too, queues behind it. So run `Migrate` when no long transaction uses the tree. PostgreSQL blocks
+writes to the closure table until the index is built. To avoid that, build it beforehand, outside a
+transaction, with exactly that name (here for the `Tag` model above, whose table is `tags`):
 
 ```sql
-CREATE INDEX CONCURRENTLY idx_closure_tree_rel_categories_tenant ON closure_tree_rel_categories (tenant);
+CREATE INDEX CONCURRENTLY idx_closure_tree_rel_tags_tenant ON closure_tree_rel_tags (tenant);
 ```
 
 A concurrent build that fails leaves an invalid index of that name, which `Migrate` takes as
@@ -613,9 +614,9 @@ and redo the ones a deadlock rolled back.
 
 ### Adopting an existing table
 
-`BuildFromParents` turns node rows that already exist, each knowing its parent, into a tree. It
-writes the closure rows and `sort_order`; it never inserts, deletes or otherwise changes the node
-rows.
+`BuildFromParents` turns node rows that already exist, each knowing its parent, into a tree; the
+examples in this section adopt an existing table `categories`. It writes the closure rows and
+`sort_order`; it never inserts, deletes or otherwise changes the node rows.
 
 The node table needs `node_id` as an auto-increment primary key, `tenant` and `sort_order`, which
 is what embedding `Node` gives it. No other field of the model may map to the `parent_id` column
