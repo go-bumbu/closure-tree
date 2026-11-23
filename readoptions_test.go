@@ -1492,6 +1492,10 @@ const (
 	// 1+4+16+64+256+1024 = 1365 nodes.
 	largeRealParent  = 5
 	largeRealSubtree = 1365
+	// largeTreePairs is the number of closure pairs of the tree: each node is paired with itself
+	// and its ancestors, so a node of level l has l pairs and the levels above give
+	// 1·1 + 2·4 + 3·16 + 4·64 + 5·256 + 6·1024 + 7·4096 + 8·2539 = 56721.
+	largeTreePairs = 56721
 	// largeReadBound is the time one read may take. Without table statistics on SQLite, the
 	// statements before the fix took seconds for these reads (the pruning DescendantIds about 3 s
 	// with the CGO driver and 7 s with the pure-Go one, the filtered TreeDescendantsIds about 20 s

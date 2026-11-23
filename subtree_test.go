@@ -775,7 +775,8 @@ func TestClosurePairsInsideATransaction(t *testing.T) {
 	}
 }
 
-// Node 5 has 1365 nodes in its subtree, node 21 has 341 (itself included in both).
+// Node 5 has 1365 nodes in its subtree, node 21 has 341 (itself included in both), and the
+// tenant has 56721 closure pairs (largeTreePairs).
 func TestClosurePairsOnLargeTree(t *testing.T) {
 	if testing.Short() {
 		t.Skip("large tree")
@@ -803,7 +804,7 @@ func TestClosurePairsOnLargeTree(t *testing.T) {
 					return err
 				})
 			}
-			counts("unfiltered", 1365, 341)
+			counts("unfiltered", largeRealSubtree, 341)
 			// node 85 does not match; its 84 descendants do, and nodes in between are not checked
 			counts("filtered", 1364, 340, closuretree.Filter(closuretree.Eq("kind", "doc")))
 			within(t, "every pair of the tenant", func() error {
@@ -811,11 +812,10 @@ func TestClosurePairsOnLargeTree(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				// Each node is paired with itself and its ancestors: levels 0 to 6 hold 1, 4, …, 4096
-				// nodes and level 7 the other 2539, so Σ (level+1)·nodes = 56721.
+				// Each node is paired with itself and its ancestors (largeTreePairs).
 				var n int64
 				err = gdb.Table("(?) AS cp", pairs).Count(&n).Error
-				if err == nil && n != 56721 {
+				if err == nil && n != largeTreePairs {
 					t.Errorf("every pair of the tenant: %d", n)
 				}
 				return err
