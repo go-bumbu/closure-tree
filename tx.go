@@ -58,9 +58,9 @@ var ErrSavepointRollback = errors.New("the transaction can no longer be used; ro
 //
 // Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
 // the transaction waits on the transaction's own lock, so it blocks: forever, or until a lock or
-// busy timeout fails it. A transaction that writes to several trees or tenants must take their locks in
-// one fixed order everywhere, for example with LockTenant up front. Call Migrate on ct, not on the
-// copy: it runs DDL, and MySQL commits the transaction implicitly on DDL.
+// busy timeout fails it. A transaction that writes to several trees or tenants must take their
+// locks in one fixed order everywhere, for example with LockTenant up front. Call Migrate on ct,
+// not on the copy: it runs DDL, and MySQL commits the transaction implicitly on DDL.
 //
 // If tx is not a transaction, each write on the copy opens its own transaction, as on ct.
 // WithTx panics if tx is nil.

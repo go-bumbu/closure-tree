@@ -578,10 +578,10 @@ err = tree.BuildFromParents(ctx, "user1", links)
   modifies the tenant column of the node table or the closure table when its type, size, default
   or comment differs from the model (your table's own type, a changed `DefaultStringSize`), and
   does so without a collation, which gives it the default collation of its table. It leaves the
-  tenant columns of the meta and lock tables alone, as they are part of the primary key, so `Migrate` then returns
-  `ErrTenantCollation` unless that default is the collation of the other tenant columns. To compare
-  tenants exactly, run the four statements of "Tenants" after `Migrate` and before
-  `BuildFromParents`.
+  tenant columns of the meta and lock tables alone, as they are part of the primary key, so
+  `Migrate` then returns `ErrTenantCollation` unless that default is the collation of the other
+  tenant columns. To compare tenants exactly, run the four statements of "Tenants" after `Migrate`
+  and before `BuildFromParents`.
 * PostgreSQL: rows copied with explicit ids leave the id sequence behind, and the next `Add` fails
   with a duplicate key. Advance the sequence after copying:
   `SELECT setval(pg_get_serial_sequence('categories', 'node_id'), (SELECT MAX(node_id) FROM categories))`.

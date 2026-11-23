@@ -179,11 +179,10 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // bound through oneValue, as Eq binds it. The value gorm reads from the field (for a field with a
 // serializer, a driver.Valuer that serializes it) is checked as Eq checks its value
 // (checkBindValue), so a list or a gorm.Valuer is rejected before any query, and so is a value
-// that gorm reports as zero in a field with a default (HasDefaultValue), which Create replaces
-// with the default. Node-owned fields
-// (NodeId/Tenant/SortOrder/ParentId) and unknown fields are rejected with ErrUnknownMatchField. An
-// empty matchFields returns ErrEmptyMatch. Column identifiers are dialect-quoted, so a field
-// mapping to a reserved-word column still produces valid SQL.
+// that gorm reports as zero in a field with a default (HasDefaultValue), which Create replaces with
+// the default. Node-owned fields (NodeId/Tenant/SortOrder/ParentId) and unknown fields are rejected
+// with ErrUnknownMatchField. An empty matchFields returns ErrEmptyMatch. Column identifiers are
+// dialect-quoted, so a field mapping to a reserved-word column still produces valid SQL.
 func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields []string) (string, []any, error) {
 	if len(matchFields) == 0 {
 		return "", nil, ErrEmptyMatch
