@@ -137,6 +137,52 @@ func TestGetLeavesWithoutLeaf(t *testing.T) {
 	}
 }
 
+// A Tree made from a chained handle, such as db.Set("gorm:table_options", ...), keeps working after
+// Migrate: Migrate must not leave the table of its last step on the handle, where a second Migrate
+// or a later GetLeaves would use it.
+func TestTreeFromChainedHandle(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb, _, id := filterTree(t, db)
+			seedLeafItems(t, gdb, id)
+			ct, err := closuretree.New(gdb.Set("gorm:table_options", ""), filterNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 1; i <= 2; i++ {
+				if err := ct.Migrate(); err != nil {
+					t.Fatalf("Migrate %d: %v", i, err)
+				}
+				if got, want := leafNames(t, ct, id["a"], 0), []string{"on-a", "on-a1-x1", "on-x21"}; !slices.Equal(got, want) {
+					t.Errorf("GetLeaves after Migrate %d: want %v, got %v", i, want, got)
+				}
+			}
+			lockTbl := "closure_tree_lock_" + ct.NodeTableName()
+			if cols, err := gdb.Migrator().ColumnTypes(lockTbl); err != nil || len(cols) != 1 {
+				t.Errorf("the lock table must keep its one column: %d columns, %v", len(cols), err)
+			}
+			var node filterNode
+			if err := ct.GetNode(context.Background(), id["a1"], tenantF, &node); err != nil || node.Name != "a1" {
+				t.Errorf("GetNode: %q, %v", node.Name, err)
+			}
+			// WithTx on a chained handle of the caller's transaction starts from a new statement too
+			err = gdb.Transaction(func(tx *gorm.DB) error {
+				tt := ct.WithTx(tx.Set("gorm:table_options", ""))
+				if err := tt.Add(context.Background(), &filterNode{Name: "in tx"}, up(id["a"]), nil, tenantF); err != nil {
+					return err
+				}
+				if got, want := leafNames(t, tt, id["a"], 0), []string{"on-a", "on-a1-x1", "on-x21"}; !slices.Equal(got, want) {
+					t.Errorf("GetLeaves through WithTx: want %v, got %v", want, got)
+				}
+				return errRollback
+			})
+			if !errors.Is(err, errRollback) {
+				t.Errorf("transaction: %v", err)
+			}
+		})
+	}
+}
+
 func TestGetLeavesTargetsAndPreload(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {

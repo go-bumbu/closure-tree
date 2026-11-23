@@ -113,6 +113,9 @@ type Tree struct {
 // schema and the derived table names but does NOT create any tables: call Migrate to create or
 // update the schema. Separating the two means New needs no DDL privilege and callers decide when
 // (and how often) migration runs. On MySQL, New verifies the server is 8.0.17 or later.
+//
+// db may be a chained handle, such as db.Set("gorm:table_options", ...): the Tree keeps its
+// settings and starts every call from a copy of its statement, so its calls do not change db.
 func New(db *gorm.DB, item any) (*Tree, error) {
 	ct, err := newTree(db, item)
 	if err != nil {
@@ -159,7 +162,10 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 	}
 
 	ct := &Tree{
-		db:           db,
+		// A new session, so that every call starts from a copy of db's statement: on a chained
+		// handle, such as db.Set("gorm:table_options", ...), Migrate's Table calls would otherwise
+		// change the statement this Tree and the caller share. The settings of db are kept.
+		db:           db.Session(&gorm.Session{}),
 		nodesTbl:     name,
 		relationsTbl: relTbl,
 		metaTbl:      metaTbl,
