@@ -16,6 +16,7 @@ import (
 	closuretree "github.com/go-bumbu/closure-tree"
 	"github.com/go-bumbu/testdbs"
 	"github.com/google/go-cmp/cmp"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -859,7 +860,8 @@ type idItem interface{ Id() uint }
 // A byte-slice match field matches what Add stores, so GetOrAdd stays idempotent and FindChild
 // finds the child: NULL for a nil one, also behind a pointer, and for an empty one of a named type
 // that is not behind a pointer, which gorm writes as NULL; empty bytes for an empty []byte and for
-// an empty one behind a pointer; the bytes for any other.
+// an empty one behind a pointer; the bytes for any other. On MySQL the cases run also with the
+// driver's interpolateParams, which stores a pointer to a nil json.RawMessage as empty bytes.
 func TestMatchByteSlice(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -876,44 +878,75 @@ func TestMatchByteSlice(t *testing.T) {
 			var b []byte
 			return &bytesPtrDocNode{Name: "a", Doc: &b}
 		}},
+		{"pointer to nil RawMessage", rawPtrDocNode{}, func() idItem {
+			var doc json.RawMessage
+			return &rawPtrDocNode{Name: "a", Doc: &doc}
+		}},
 		{"pointer to empty RawMessage", rawPtrDocNode{}, func() idItem {
 			doc := json.RawMessage{}
 			return &rawPtrDocNode{Name: "a", Doc: &doc}
 		}},
 	}
 	for _, db := range testdbs.DBs() {
-		for _, c := range cases {
-			t.Run(db.DbType()+"/"+c.name, func(t *testing.T) {
-				gdb := connAndClose(t, db)
-				dropTreeTables(gdb, c.model)
-				ct, err := newTestTree(gdb, c.model)
-				if err != nil {
-					t.Fatal(err)
-				}
-				ctx := context.Background()
-				match := []string{"Name", "Doc"}
+		conns := []string{db.DbType()}
+		if db.DbType() == testdbs.DBTypeMysql {
+			conns = append(conns, db.DbType()+"_interpolateParams")
+		}
+		for _, conn := range conns {
+			for _, c := range cases {
+				t.Run(conn+"/"+c.name, func(t *testing.T) {
+					gdb := connAndClose(t, db)
+					if conn != db.DbType() {
+						gdb = interpolatedMySQL(t, gdb)
+					}
+					dropTreeTables(gdb, c.model)
+					ct, err := newTestTree(gdb, c.model)
+					if err != nil {
+						t.Fatal(err)
+					}
+					ctx := context.Background()
+					match := []string{"Name", "Doc"}
 
-				first := c.item()
-				if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
-					t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
-				}
-				second := c.item()
-				created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
-				if err != nil || created || second.Id() != first.Id() {
-					t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.Id(), first.Id(), err)
-				}
-				if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
-					t.Errorf("want one node, got %d", n)
-				}
+					first := c.item()
+					if created, err := ct.GetOrAdd(ctx, first, 0, tenant1, match); err != nil || !created {
+						t.Fatalf("first GetOrAdd: created=%v err=%v", created, err)
+					}
+					second := c.item()
+					created, err := ct.GetOrAdd(ctx, second, 0, tenant1, match)
+					if err != nil || created || second.Id() != first.Id() {
+						t.Errorf("second GetOrAdd: created=%v id=%d (first %d) err=%v", created, second.Id(), first.Id(), err)
+					}
+					if n := countTenant(t, gdb, ct, tenant1).Nodes; n != 1 {
+						t.Errorf("want one node, got %d", n)
+					}
 
-				out := c.item()
-				found, err := ct.FindChild(ctx, 0, tenant1, c.item(), match, out)
-				if err != nil || !found || out.Id() != first.Id() {
-					t.Errorf("FindChild: found=%v id=%d (first %d) err=%v", found, out.Id(), first.Id(), err)
-				}
-			})
+					out := c.item()
+					found, err := ct.FindChild(ctx, 0, tenant1, c.item(), match, out)
+					if err != nil || !found || out.Id() != first.Id() {
+						t.Errorf("FindChild: found=%v id=%d (first %d) err=%v", found, out.Id(), first.Id(), err)
+					}
+				})
+			}
 		}
 	}
+}
+
+// interpolatedMySQL opens another connection to the MySQL database of gdb with the driver's
+// interpolateParams, which renders the bound values into the statement text instead of sending
+// them apart, and closes it when the test ends.
+func interpolatedMySQL(t *testing.T, gdb *gorm.DB) *gorm.DB {
+	t.Helper()
+	dsn := gdb.Dialector.(*mysql.Dialector).DSN + "&interpolateParams=true"
+	idb, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := idb.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	return idb
 }
 
 // A nil and an empty json.RawMessage are both stored as NULL, so they match the same node.

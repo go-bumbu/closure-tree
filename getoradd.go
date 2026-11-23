@@ -30,10 +30,11 @@ import (
 // receiver): then its Value is matched. A byte-slice field that is not a driver.Valuer and that Add
 // stores as NULL matches as IS NULL too: a nil one, also behind a pointer, and an empty one of a
 // named type such as json.RawMessage that is not behind a pointer, which gorm writes as NULL; an
-// empty []byte matches empty bytes. A driver.Valuer is matched by what its Value returns, and
-// matches NULL only when that is nil, not when it is a nil byte slice. Eq binds the value it is
-// given, so use IsNull there. An empty matchFields returns ErrEmptyMatch; an unknown or Node-owned
-// field returns ErrUnknownMatchField.
+// empty []byte matches empty bytes. On MySQL, a pointer to a nil json.RawMessage matches what the
+// driver stores for it: empty bytes with the driver's interpolateParams=true, NULL without. A
+// driver.Valuer is matched by what its Value returns, and matches NULL only when that is nil, not
+// when it is a nil byte slice. Eq binds the value it is given, so use IsNull there. An empty
+// matchFields returns ErrEmptyMatch; an unknown or Node-owned field returns ErrUnknownMatchField.
 //
 // Every other value is bound as one value. Every value is checked as Eq checks its value: a field
 // whose value is a slice or an array (other than a byte slice or a driver.Valuer), or whose type is
@@ -172,7 +173,9 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // Each field is matched by its ACTUAL value — including zero values (false/0/"") — so a key that
 // is legitimately zero is honored rather than silently dropped. A value that eqValue reports as
 // NULL matches as IS NULL, and so does a byte slice that Add stores as NULL (addedAsNull): the
-// match compares with what Add stores, where Eq binds the value it is given. Every other value is
+// match compares with what Add stores, where Eq binds the value it is given. On MySQL such a byte
+// slice behind a pointer is bound as that pointer with the null-safe <=>, because gorm leaves it to
+// the driver, whose interpolateParams renders a nil json.RawMessage as ''. Every other value is
 // bound through oneValue, as Eq binds it. The value gorm reads from the field (for a field with a
 // serializer, a driver.Valuer that serializes it) is checked as Eq checks its value
 // (checkBindValue), so a list or a gorm.Valuer is rejected before any query, and so is a value
@@ -226,6 +229,14 @@ func (ct *Tree) buildMatchConditions(ctx context.Context, match any, matchFields
 		val, null, err := eqValue(raw)
 		if err != nil {
 			return "", nil, fmt.Errorf("match field %q: %w", name, err)
+		}
+		if !null && addedAsNull(raw, val) && ct.dialect == dialectMySQL && reflect.ValueOf(raw).Kind() == reflect.Pointer {
+			// gorm passes the pointer to the MySQL driver, which sends a nil json.RawMessage
+			// as NULL but renders it as '' with interpolateParams: bind the same pointer with
+			// the null-safe <=>, so the match compares with what the driver stored
+			conds = append(conds, col+" <=> ?")
+			args = append(args, raw)
+			continue
 		}
 		if null || addedAsNull(raw, val) {
 			conds = append(conds, col+" IS NULL")
