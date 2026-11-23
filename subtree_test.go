@@ -811,8 +811,14 @@ func TestClosurePairsOnLargeTree(t *testing.T) {
 				if err != nil {
 					return err
 				}
+				// Each node is paired with itself and its ancestors: levels 0 to 6 hold 1, 4, …, 4096
+				// nodes and level 7 the other 2539, so Σ (level+1)·nodes = 56721.
 				var n int64
-				return gdb.Table("(?) AS cp", pairs).Count(&n).Error
+				err = gdb.Table("(?) AS cp", pairs).Count(&n).Error
+				if err == nil && n != 56721 {
+					t.Errorf("every pair of the tenant: %d", n)
+				}
+				return err
 			})
 		})
 	}
