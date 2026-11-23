@@ -214,12 +214,31 @@ func (d dialect) retryPolicy() retryPolicy {
 	return retryPolicy{attempts: mysqlDeadlockAttempts, retryable: isMySQLDeadlock, pause: retryPause}
 }
 
-// mysqlDeadlockText matches MySQL's deadlock error, number 1213, in the text of the driver's error
-// ("Error 1213 (40001): Deadlock found ..."), which stays in the text of any error that wraps it.
-var mysqlDeadlockText = regexp.MustCompile(`Error 1213\b`)
+// mysqlDeadlockText matches the start of the text of the driver's error for MySQL's deadlock,
+// number 1213: "Error 1213 (40001): Deadlock found ...", or "Error 1213: ..." without a SQL state.
+var mysqlDeadlockText = regexp.MustCompile(`^Error 1213\b`)
 
-// isMySQLDeadlock reports whether err is, or wraps, MySQL's deadlock error. It reads the error's
-// text, so the library needs no import of the MySQL driver.
+// isMySQLDeadlock reports whether err or an error in its chain (errors.Unwrap, and each error of an
+// Unwrap() []error, as from errors.Join) is MySQL's deadlock error: an error whose text begins with
+// "Error 1213". It reads the text, so the library needs no import of the MySQL driver. Only the
+// start of each text counts, so an error that quotes the deadlock's text later on, like a duplicate
+// key error on a value holding "Error 1213" or a hook's "hook failed: Error 1213 ...", is not one.
 func isMySQLDeadlock(err error) bool {
-	return err != nil && mysqlDeadlockText.MatchString(err.Error())
+	if err == nil {
+		return false
+	}
+	if mysqlDeadlockText.MatchString(err.Error()) {
+		return true
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		return isMySQLDeadlock(u.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			if isMySQLDeadlock(e) {
+				return true
+			}
+		}
+	}
+	return false
 }

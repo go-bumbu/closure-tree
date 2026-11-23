@@ -74,10 +74,13 @@ func TestTxOptions(t *testing.T) {
 }
 
 // TestIsMySQLDeadlock pins which errors the MySQL retry repeats: a deadlock (error 1213), also
-// wrapped, and no other error, a lock wait timeout (error 1205) in particular.
+// wrapped or joined, and no other error: not a lock wait timeout (error 1205), and not an error
+// whose text only quotes "Error 1213" after its start.
 func TestIsMySQLDeadlock(t *testing.T) {
 	deadlock := &mysql.MySQLError{Number: 1213, SQLState: [5]byte{'4', '0', '0', '0', '1'},
 		Message: "Deadlock found when trying to get lock; try restarting transaction"}
+	duplicate := &mysql.MySQLError{Number: 1062, SQLState: [5]byte{'2', '3', '0', '0', '0'},
+		Message: "Duplicate entry 'Error 1213 (40001): x' for key 'nodes.name'"}
 	tests := []struct {
 		name string
 		err  error
@@ -87,6 +90,13 @@ func TestIsMySQLDeadlock(t *testing.T) {
 		{"withoutSQLState", &mysql.MySQLError{Number: 1213, Message: "Deadlock found"}, true},
 		{"wrapped", fmt.Errorf("deleteRecurseMany: failed to delete nodes: %w", deadlock), true},
 		{"joined", errors.Join(errors.New("first"), deadlock), true},
+		{"wrappedTwice", fmt.Errorf("add: %w", fmt.Errorf("insert: %w", deadlock)), true},
+		{"wrappedInJoined", errors.Join(errors.New("first"), fmt.Errorf("delete: %w", deadlock)), true},
+		{"multiWrapped", fmt.Errorf("first: %w; second: %w", errors.New("other"), deadlock), true},
+		{"duplicateQuotingDeadlock", duplicate, false},
+		{"wrappedDuplicateQuotingDeadlock", fmt.Errorf("add: %w", duplicate), false},
+		{"hookQuotingDeadlock", errors.New("hook failed: Error 1213 (40001): Deadlock found"), false},
+		{"joinedTextQuotingDeadlock", errors.Join(errors.New("first\nError 1213 (40001): Deadlock found")), false},
 		{"lockWaitTimeout", &mysql.MySQLError{Number: 1205, SQLState: [5]byte{'H', 'Y', '0', '0', '0'},
 			Message: "Lock wait timeout exceeded; try restarting transaction"}, false},
 		{"longerNumber", errors.New("Error 12130: some other error"), false},
