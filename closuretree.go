@@ -73,18 +73,20 @@ var (
 // free of deadlocks. A write that deletes closure rows, such as DeleteRecurse, DeleteRecurseMany,
 // DeleteTenant, BuildFromParents with Rebuild, or an Update that moves a node, locks the closure
 // rows it scans and waits for a row that another transaction holds. The closure table's index on
-// the tenant keeps most of these scans within the tenant's rows, but not all: the tenant-wide
-// delete of a tenant that holds a large share of the closure table, and deletes planned on stale
-// statistics, as on just-loaded tables, still scan other tenants' rows. READ COMMITTED removed the
-// deadlocks between these writes and other tenants' adds, but two of them on different tenants at
-// once can deadlock: in the library's tests a rebuild against a DeleteRecurseMany, and a move
-// against a DeleteRecurse, did; three DeleteTenant or two rebuilds at once did not. While a
-// caller's transaction at MySQL's default isolation level (REPEATABLE READ) is open (see WithTx),
-// its tree writes keep the locks of the rows they scanned until it ends, so more writes of other
-// tenants wait on it and can deadlock with it, also writes on a Tree not bound to a transaction,
-// which MySQL may roll back instead. A deadlock (error 1213) means MySQL has already rolled back
-// the whole transaction, and the work can be retried: repeat the call on a Tree not bound to a
-// transaction, or roll back and retry the caller's transaction on one bound with WithTx.
+// the tenant keeps most of these scans within the tenant's rows, but not all. From MySQL 8.0.20 the
+// tenant-wide deletes of DeleteTenant and BuildFromParents always use it (an index hint); other
+// deletes planned on stale statistics, as on just-loaded tables, and before 8.0.20 the tenant-wide
+// delete of a tenant that holds a large share of the closure table, still scan other tenants' rows.
+// READ COMMITTED removed the deadlocks between these writes and other tenants' adds, but two of
+// them on different tenants at once can deadlock: in the library's tests a rebuild against a
+// DeleteRecurseMany, and a move against a DeleteRecurse, did; three DeleteTenant or two rebuilds at
+// once did not. While a caller's transaction at MySQL's default isolation level (REPEATABLE READ)
+// is open (see WithTx), its tree writes keep the locks of the rows they scanned until it ends, so
+// more writes of other tenants wait on it and can deadlock with it, also writes on a Tree not bound
+// to a transaction, which MySQL may roll back instead. A deadlock (error 1213) means MySQL has
+// already rolled back the whole transaction, and the work can be retried: repeat the call on a Tree
+// not bound to a transaction, or roll back and retry the caller's transaction on one bound with
+// WithTx.
 //
 // The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MySQL (released
 // when the transaction ends); on SQLite, which already serializes writers per database, it is the

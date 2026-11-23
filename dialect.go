@@ -92,6 +92,21 @@ func (d dialect) metaUpsertSQL(metaTbl string) string {
 		metaTbl, metaTbl)
 }
 
+// tenantDeleteSQL returns the statement that deletes all rows of a tenant from tbl. With an index
+// name idx on MySQL, it carries the optimizer hint INDEX(tbl idx): MySQL then reads the tenant's
+// rows through idx even when the tenant holds most of the table or its statistics are stale, where
+// it would otherwise scan the whole table and lock other tenants' rows too. The hint exists from
+// MySQL 8.0.20; earlier servers ignore it with a warning, as does a later server when tbl lacks idx
+// (a tree not migrated since the index was added), so the delete still runs. FORCE INDEX is not
+// used: single-table DELETE does not accept it, and it fails on a missing index. Placeholder:
+// (tenant).
+func (d dialect) tenantDeleteSQL(tbl, idx string) string {
+	if d == dialectMySQL && idx != "" {
+		return fmt.Sprintf(`DELETE /*+ INDEX(%s %s) */ FROM %s WHERE tenant = ?`, tbl, idx, tbl)
+	}
+	return fmt.Sprintf(`DELETE FROM %s WHERE tenant = ?`, tbl)
+}
+
 // lockAttempts bounds how often lockTenantHook repeats "ensure the row, then lock it" when the
 // lock row disappears between the two statements.
 const lockAttempts = 3

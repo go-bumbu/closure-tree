@@ -513,13 +513,14 @@ with binary logging on and `binlog_format=STATEMENT` refuses InnoDB writes at RE
 On MySQL a write that deletes closure rows, such as `DeleteRecurse`, `DeleteRecurseMany`,
 `DeleteTenant`, `BuildFromParents` with `Rebuild()`, or an `Update` that moves a node, locks the
 closure rows it scans and waits for a row that another transaction holds. The closure table's index
-on the tenant keeps most of these scans within the tenant's rows, but not all: the tenant-wide
-delete of a tenant that holds a large share of the closure table, and deletes planned on stale
-statistics, as on just-loaded tables, still scan rows of other tenants. Running the library's own
-transactions at READ COMMITTED removed the deadlocks between these writes and other tenants' adds,
-but two of them on different tenants at once can still deadlock. In the library's tests, on trees
-not bound to a transaction, each of two or three tenants repeated one such write at the same time
-(ten runs of 30 calls per write):
+on the tenant keeps most of these scans within the tenant's rows, but not all. From MySQL 8.0.20 the
+tenant-wide deletes of `DeleteTenant` and `BuildFromParents` always use it (an index hint); other
+deletes planned on stale statistics, as on just-loaded tables, and before 8.0.20 the tenant-wide
+delete of a tenant that holds a large share of the closure table, still scan rows of other tenants.
+Running the library's own transactions at READ COMMITTED removed the deadlocks between these writes
+and other tenants' adds, but two of them on different tenants at once can still deadlock. In the
+library's tests, on trees not bound to a transaction, each of two or three tenants repeated one such
+write at the same time (ten runs of 30 calls per write):
 
 | Writes at the same time, each on its own tenant | MySQL | PostgreSQL |
 |---|---|---|

@@ -221,7 +221,7 @@ func (ct *Tree) BuildFromParents(ctx context.Context, tenant string, links []Par
 			return ErrClosureExists
 		}
 		for _, tbl := range []string{ct.relationsTbl, ct.metaTbl} {
-			if err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE tenant = ?", tbl), tenant).Error; err != nil {
+			if err := tx.Exec(ct.tenantDeleteSQL(tbl), tenant).Error; err != nil {
 				return fmt.Errorf("buildFromParents: failed to delete from %s: %w", tbl, err)
 			}
 		}

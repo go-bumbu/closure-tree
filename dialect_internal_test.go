@@ -70,6 +70,36 @@ func TestTxOptions(t *testing.T) {
 	}
 }
 
+// TestTenantDeleteSQL pins the statement that deletes a tenant's rows: on MySQL the closure table's
+// carries the hint for the tenant index; the Tree's other tables and the other databases get the
+// plain statement.
+func TestTenantDeleteSQL(t *testing.T) {
+	const (
+		plainRel = "DELETE FROM rel WHERE tenant = ?"
+		hinted   = "DELETE /*+ INDEX(rel idx_rel_tenant) */ FROM rel WHERE tenant = ?"
+	)
+	tests := []struct {
+		name string
+		d    dialect
+		tbl  string
+		want string
+	}{
+		{"mysqlClosure", dialectMySQL, "rel", hinted},
+		{"mysqlNodes", dialectMySQL, "nodes", "DELETE FROM nodes WHERE tenant = ?"},
+		{"mysqlMeta", dialectMySQL, "meta", "DELETE FROM meta WHERE tenant = ?"},
+		{"postgresClosure", dialectPostgres, "rel", plainRel},
+		{"sqliteClosure", dialectSQLite, "rel", plainRel},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ct := &Tree{dialect: tt.d, nodesTbl: "nodes", relationsTbl: "rel", metaTbl: "meta", tenantIdx: "idx_rel_tenant"}
+			if got := ct.tenantDeleteSQL(tt.tbl); got != tt.want {
+				t.Errorf("want %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
 // TestUpsertMetaHalvingsKeepsLower pins what the single upsert of upsertMetaHalvings stores: a new
 // row for a new (tenant, parent), otherwise the lower of the stored and the new min_halvings.
 func TestUpsertMetaHalvingsKeepsLower(t *testing.T) {

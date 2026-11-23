@@ -101,6 +101,17 @@ WHERE tenant = ?
    OR ancestor_id  IN (SELECT descendant_id FROM descendants)
   );`
 
+// tenantDeleteSQL returns the statement that deletes all rows of a tenant from tbl, one of the
+// Tree's tables. Only the closure table's names the tenant index, for the MySQL hint (see
+// dialect.tenantDeleteSQL); the node and meta tables are left to the optimizer.
+func (ct *Tree) tenantDeleteSQL(tbl string) string {
+	idx := ""
+	if tbl == ct.relationsTbl {
+		idx = ct.tenantIdx
+	}
+	return ct.dialect.tenantDeleteSQL(tbl, idx)
+}
+
 // DeleteTenant deletes every node, closure row and metadata row of tenant in one transaction. It is
 // the supported way to drop a tenant's whole tree; DeleteRecurseMany rejects the virtual root. The
 // tenant's lock row is kept: on PostgreSQL a writer waiting on that row would otherwise proceed
@@ -136,7 +147,7 @@ func (ct *Tree) DeleteTenant(ctx context.Context, tenant string) error {
 	}
 	return ct.writeTx(ctx, tenant, func(tx *gorm.DB) error {
 		for _, tbl := range []string{ct.nodesTbl, ct.relationsTbl, ct.metaTbl} {
-			if err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE tenant = ?", tbl), tenant).Error; err != nil {
+			if err := tx.Exec(ct.tenantDeleteSQL(tbl), tenant).Error; err != nil {
 				return fmt.Errorf("deleteTenant: failed to delete from %s: %w", tbl, err)
 			}
 		}
