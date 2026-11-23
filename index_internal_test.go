@@ -327,7 +327,11 @@ func TestTenantDeleteHintNotAppliedOnMySQL(t *testing.T) {
 	}
 }
 
-// MySQL builds the tenant index in place without blocking writes: the statement fails if it cannot.
+// On MySQL the statement Migrate sends builds the tenant index in place without blocking writes.
+// Migrate sends it without ALGORITHM and LOCK, and MySQL's defaults choose INPLACE and LOCK=NONE
+// when the operation allows them. The test appends ALGORITHM=INPLACE LOCK=NONE to that statement,
+// so MySQL fails it if it cannot build the index that way; it also fails if Migrate sends no
+// such statement.
 func TestTenantIndexBuildsOnlineOnMySQL(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
@@ -341,9 +345,27 @@ func TestTenantIndexBuildsOnlineOnMySQL(t *testing.T) {
 			if err := ct.db.Migrator().DropIndex(ct.relationsTbl, ct.tenantIdx); err != nil {
 				t.Fatalf("drop the tenant index: %v", err)
 			}
-			stmt := "CREATE INDEX " + ct.tenantIdx + " ON " + ct.relationsTbl + " (tenant) ALGORITHM=INPLACE LOCK=NONE"
-			if err := ct.db.Exec(stmt).Error; err != nil {
-				t.Fatalf("build the index online: %v", err)
+			const name = "test:online_tenant_index"
+			prefix := "CREATE INDEX " + ct.db.Statement.Quote(ct.tenantIdx) + " "
+			online := 0
+			if err := ct.db.Callback().Raw().Before("gorm:raw").Register(name, func(db *gorm.DB) {
+				if strings.HasPrefix(db.Statement.SQL.String(), prefix) {
+					online++
+					db.Statement.SQL.WriteString(" ALGORITHM=INPLACE LOCK=NONE")
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := ct.db.Callback().Raw().Remove(name); err != nil {
+					t.Error(err)
+				}
+			})
+			if err := ct.Migrate(); err != nil {
+				t.Fatalf("migrate with the index built online: %v", err)
+			}
+			if online != 1 {
+				t.Errorf("want Migrate to send one statement starting with %q, got %d", prefix, online)
 			}
 			if got := tenantIndexColumns(t, ct); !reflect.DeepEqual(got, []string{"tenant"}) {
 				t.Errorf("want the index %s on (tenant), got columns %v", ct.tenantIdx, got)
