@@ -34,13 +34,13 @@ var ErrSavepointRollback = errors.New("the transaction can no longer be used; ro
 // rollback to the savepoint failed, for example because the write's context ended during a
 // statement and the driver dropped the connection, which loses the transaction's earlier work too,
 // and the caller must roll the transaction back. The rollback runs even when the write's context
-// has ended, for at most 30 seconds; one that takes longer fails with ErrSavepointRollback. ErrSavepointRollback covers only the statements
-// inside the savepoint: reads on the copy, and the statements a write runs before its savepoint
-// (SAVEPOINT itself, the first reads of DeleteTenant and RenormalizeAll), fail like a statement of
-// the caller's own, without it. So the caller should also roll the transaction back after an error
-// from a call whose context has ended (ctx.Err() != nil): the driver may have dropped the
-// connection. A successful write keeps the tenant lock until the outer transaction ends
-// (PostgreSQL and MySQL).
+// has ended, for at most 30 seconds; one that takes longer fails with ErrSavepointRollback.
+// ErrSavepointRollback covers only the statements inside the savepoint: reads on the copy, and the
+// statements a write runs before its savepoint (SAVEPOINT itself, the first reads of DeleteTenant
+// and RenormalizeAll), fail like a statement of the caller's own, without it. So the caller should
+// also roll the transaction back after an error from a call whose context has ended
+// (ctx.Err() != nil): the driver may have dropped the connection. A successful write keeps the
+// tenant lock until the outer transaction ends (PostgreSQL and MySQL).
 //
 // A further exception is a deadlock on MySQL (error 1213): the server has already rolled back the
 // whole outer transaction, so the caller must roll it back and retry it; continuing would run the
