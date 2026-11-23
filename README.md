@@ -29,6 +29,8 @@ Usage:
 
 Define your tree items, we will crete Tags in this example; make sure to embedd the Node struct, this is required.
 ```GO
+import ct "github.com/go-bumbu/closure-tree"
+
 type Tag struct {
   ct.Node
   Name    string
@@ -203,7 +205,7 @@ found, err := tree.FindChild(ctx, parentID, "user1", Tag{Name: "b"}, []string{"N
 `GetOrAdd` runs the find and the add in a single transaction under the tenant lock, so a node is
 never left half created and two callers creating the same brand-new child are serialized: the
 first creates it, the second finds it and gets `created = false`, so no duplicate is produced.
-A new node is placed first among its siblings; pass `closuretree.PlaceLast()` to append it last.
+A new node is placed first among its siblings; pass `ct.PlaceLast()` to append it last.
 
 ### Narrowing reads
 
@@ -418,10 +420,10 @@ placed first among its siblings, or last with `PlaceLast()`. The meaning differs
 | `nil` | Place first among siblings (the default) | No reordering; a node moved to a new parent is appended last there |
 | `&0` | Place first among siblings | Place first among siblings |
 | `&someID` | Place immediately after that sibling | Place immediately after that sibling |
-| `closuretree.PlaceLast()` | Place after the current last sibling (also for `GetOrAdd`) | Not available |
+| `ct.PlaceLast()` | Place after the current last sibling (also for `GetOrAdd`) | Not available |
 
 ```GO
-err := tree.Add(ctx, &Tag{Name: "x"}, &parentID, nil, "user1", closuretree.PlaceLast())
+err := tree.Add(ctx, &Tag{Name: "x"}, &parentID, nil, "user1", ct.PlaceLast())
 ```
 
 Combining `PlaceLast()` with a non-zero `afterNodeID` returns `ErrConflictingPlacement`.
@@ -630,9 +632,9 @@ err := db.Table("categories").Select("node_id AS id, old_parent_id").
 if err != nil {
     return err
 }
-links := make([]closuretree.ParentLink, len(rows))
+links := make([]ct.ParentLink, len(rows))
 for i, r := range rows {
-    links[i] = closuretree.ParentLink{NodeID: r.ID, ParentID: r.OldParentID} // ParentID 0: a root
+    links[i] = ct.ParentLink{NodeID: r.ID, ParentID: r.OldParentID} // ParentID 0: a root
 }
 err = tree.BuildFromParents(ctx, "user1", links)
 ```
