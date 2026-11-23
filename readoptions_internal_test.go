@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -436,6 +437,95 @@ func TestPlanFieldCopyRejectsSliceToArray(t *testing.T) {
 	for what, c := range cases {
 		if _, err := planFieldCopy(c.from, c.to); err == nil || !strings.Contains(err.Error(), "cannot assign type") {
 			t.Errorf("%s: want a cannot assign type error, got %v", what, err)
+		}
+	}
+}
+
+type codeText string
+
+// The copy plan never converts an integer to a string: Go makes the integer a code point, so 65
+// would be copied as "A".
+func TestPlanFieldCopyRejectsIntegerToString(t *testing.T) {
+	src := func(v any) *schema.Field {
+		return &schema.Field{Name: "Code", StructField: reflect.StructField{Name: "Code", Type: reflect.TypeOf(v)}}
+	}
+	dst := func(v any) reflect.StructField {
+		return reflect.StructField{Name: "Code", Type: reflect.TypeOf(v), Index: []int{0}}
+	}
+	rejected := map[string]struct {
+		from *schema.Field
+		to   reflect.StructField
+	}{
+		"int to string":        {src(0), dst("")},
+		"int64 to codeText":    {src(int64(0)), dst(codeText(""))},
+		"uint8 to string":      {src(uint8(0)), dst("")},
+		"*int32 to string":     {src((*int32)(nil)), dst("")},
+		"*uintptr to codeText": {src((*uintptr)(nil)), dst(codeText(""))},
+	}
+	for what, c := range rejected {
+		if _, err := planFieldCopy(c.from, c.to); err == nil || !strings.Contains(err.Error(), "cannot assign type") {
+			t.Errorf("%s: want a cannot assign type error, got %v", what, err)
+		}
+	}
+	// the conversions that keep the value stay allowed
+	for what, c := range map[string]struct {
+		from *schema.Field
+		to   reflect.StructField
+	}{
+		"string to codeText": {src(""), dst(codeText(""))},
+		"[]byte to string":   {src([]byte(nil)), dst("")},
+		"int64 to int8":      {src(int64(0)), dst(int8(0))},
+		"float64 to int":     {src(float64(0)), dst(0)},
+	} {
+		if c, err := planFieldCopy(c.from, c.to); err != nil || !c.conv {
+			t.Errorf("%s: want a conversion, got %+v, %v", what, c, err)
+		}
+	}
+}
+
+// A narrowing conversion is allowed, but a value outside the range of the element field's type
+// overflows: converting it would wrap, or, from a float to an integer, give a value Go does not
+// define.
+func TestOverflows(t *testing.T) {
+	cases := []struct {
+		v    any
+		to   any
+		want bool
+	}{
+		{int64(127), int8(0), false},
+		{int64(128), int8(0), true},
+		{int64(-128), int8(0), false},
+		{int64(-129), int8(0), true},
+		{int64(-1), uint64(0), true},
+		{int64(255), uint8(0), false},
+		{int64(256), uint8(0), true},
+		{uint64(math.MaxInt64), int64(0), false},
+		{uint64(math.MaxInt64 + 1), int64(0), true},
+		{uint64(65535), uint16(0), false},
+		{uint64(65536), uint16(0), true},
+		{uint(300), int8(0), true},
+		{2.9, int8(0), false}, // truncated to 2
+		{127.9, int8(0), false},
+		{128.0, int8(0), true},
+		{-128.9, int8(0), false},
+		{-129.0, int8(0), true},
+		{-0.5, uint(0), false},
+		{-1.0, uint(0), true},
+		{math.Ldexp(1, 63), int64(0), true},
+		{math.Ldexp(1, 64), uint64(0), true},
+		{math.NaN(), 0, true},
+		{math.Inf(1), 0, true},
+		{1e300, float32(0), true},
+		{math.MaxFloat32, float32(0), false},
+		{math.Inf(-1), float32(0), false}, // infinity stays infinity
+		{float32(1), 0.0, false},
+		{int64(math.MaxInt64), float32(0), false}, // loses precision, not range
+		{uint64(math.MaxUint64), float32(0), false},
+		{"text", codeText(""), false},
+	}
+	for _, c := range cases {
+		if got := overflows(reflect.ValueOf(c.v), reflect.TypeOf(c.to)); got != c.want {
+			t.Errorf("%T %v to %T: overflows %v, want %v", c.v, c.v, c.to, got, c.want)
 		}
 	}
 }

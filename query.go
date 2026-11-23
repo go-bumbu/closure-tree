@@ -92,8 +92,11 @@ func (ct *Tree) IsChildOf(ctx context.Context, nodeID, parentID uint, tenant str
 // element field at the same path of Go names (Name, or Addr.Name for a field of an embedded
 // struct); when there is none, to the field with its Go name, if no other model field has that
 // name. A field of another type is assigned, converted or dereferenced; if that is not possible
-// the read returns "cannot assign type ... to field ..." before querying. An element that is
-// neither a struct nor a pointer to a struct returns an error before querying.
+// the read returns "cannot assign type ... to field ..." before querying. An integer is never
+// converted to a string (Go would make it a code point). A number may be converted to a smaller
+// type, but a value outside its range, or a float that is NaN or infinite converted to an integer,
+// fails the read with "cannot copy field ... overflows ...". An element that is neither a struct
+// nor a pointer to a struct returns an error before querying.
 //
 // Descendants honours the read options Filter, Unfiltered, PerNode and Columns. By default a node
 // is returned only if it and every node between parent and it match the filter; with PerNode it

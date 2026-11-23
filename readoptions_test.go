@@ -889,6 +889,90 @@ func TestReadIntoDifferentFieldTypes(t *testing.T) {
 	}
 }
 
+type countedNode struct {
+	closuretree.Node
+	Name  string
+	Count int64
+	Ratio float64
+}
+
+type narrowCountNode struct {
+	closuretree.Node
+	Name     string
+	Count    int8
+	Ratio    int
+	Children []*narrowCountNode
+}
+
+type countTextNode struct {
+	closuretree.Node
+	Name     string
+	Count    string
+	Children []*countTextNode
+}
+
+// An integer is never copied into a string field: the read fails before the query. A narrowing
+// conversion copies a value that fits; a value that does not fails the read.
+func TestReadNarrowingAndIntegerToString(t *testing.T) {
+	for _, db := range testdbs.DBs() {
+		t.Run(db.DbType(), func(t *testing.T) {
+			gdb := connAndClose(t, db)
+			dropTreeTables(gdb, countedNode{})
+			ct, err := newTestTree(gdb, countedNode{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			small := &countedNode{Name: "small", Count: 5, Ratio: 2.9}
+			if err := ct.Add(ctx, small, nil, nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+			big := &countedNode{Name: "big", Count: 300, Ratio: 1}
+			if err := ct.Add(ctx, big, up(small.NodeId), nil, tenant1); err != nil {
+				t.Fatal(err)
+			}
+
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel() // a query would fail with context.Canceled, so the type check must come first
+			var flatText []countTextNode
+			var treeText []*countTextNode
+			for read, err := range map[string]error{
+				"Descendants":     ct.Descendants(cancelled, 0, 0, tenant1, &flatText),
+				"TreeDescendants": ct.TreeDescendants(cancelled, 0, 0, tenant1, &treeText),
+				"Ancestors":       ct.Ancestors(cancelled, big.NodeId, tenant1, &flatText),
+			} {
+				if err == nil || !strings.Contains(err.Error(), "cannot assign type int64 to field Count") {
+					t.Errorf("%s into a string: want a cannot assign error on Count, got %v", read, err)
+				}
+			}
+
+			var fits []narrowCountNode
+			if err := ct.Descendants(ctx, 0, 1, tenant1, &fits); err != nil || len(fits) != 1 ||
+				fits[0].Count != 5 || fits[0].Ratio != 2 {
+				t.Errorf("a value that fits: want count 5 and ratio 2, got %+v, %v", fits, err)
+			}
+			var ancestors []narrowCountNode
+			if err := ct.Ancestors(ctx, big.NodeId, tenant1, &ancestors); err != nil || len(ancestors) != 1 || ancestors[0].Count != 5 {
+				t.Errorf("Ancestors of big: want small with count 5, got %+v, %v", ancestors, err)
+			}
+
+			var flat []narrowCountNode
+			var tree []*narrowCountNode
+			for read, err := range map[string]error{
+				"Descendants":     ct.Descendants(ctx, 0, 0, tenant1, &flat),
+				"TreeDescendants": ct.TreeDescendants(ctx, 0, 0, tenant1, &tree),
+			} {
+				if err == nil || !strings.Contains(err.Error(), "field Count") || !strings.Contains(err.Error(), "300 overflows int8") {
+					t.Errorf("%s with 300 into an int8: want an overflow error, got %v", read, err)
+				}
+			}
+			if len(tree) != 0 {
+				t.Errorf("TreeDescendants must return no nodes on an overflow, got %d", len(tree))
+			}
+		})
+	}
+}
+
 func TestFilterOnSingleNodeReads(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {

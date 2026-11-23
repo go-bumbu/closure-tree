@@ -3,6 +3,7 @@ package closuretree
 import (
 	"context"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 
@@ -42,9 +43,10 @@ func validateItems(items any) error {
 // *T that toElem, built by modelToElem, makes of it. Rows are scanned with gorm's scanner into the
 // Tree's model, which gorm parsed in New. gorm skips the result columns the model has no field
 // for, such as cte_depth. The caller builds toElem before any query, so an element type that
-// cannot take the model's fields fails first. errLabel starts the error of a failed query
+// cannot take the model's fields fails first; an error of toElem, a value out of range, stops the
+// read at that row and is returned as it is. errLabel starts the error of a failed query
 // ("<errLabel>: <cause>").
-func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, toElem func(row reflect.Value) reflect.Value, errLabel string, add func(elem, row reflect.Value)) (err error) {
+func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, toElem func(row reflect.Value) (reflect.Value, error), errLabel string, add func(elem, row reflect.Value)) (err error) {
 	db := ct.db.WithContext(ctx)
 	rows, err := db.Raw(sqlstr, args...).Rows()
 	if err != nil {
@@ -62,7 +64,11 @@ func (ct *Tree) scanEach(ctx context.Context, sqlstr string, args []any, toElem 
 		if err := db.ScanRows(rows, row.Interface()); err != nil {
 			return fmt.Errorf("failed to scan row: %w", err)
 		}
-		add(toElem(row), row)
+		elem, err := toElem(row)
+		if err != nil {
+			return err
+		}
+		add(elem, row)
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("row iteration error: %w", err)
@@ -92,29 +98,31 @@ type fieldCopy struct {
 //
 // A value whose type differs is assigned when it is assignable and converted when it is
 // convertible; a pointer field is dereferenced first, and a nil pointer leaves the element field
-// zero. A nil pointer to an embedded struct on the way to an element field is allocated. A slice is never converted to an array or to a pointer to an array, although Go allows it:
-// the conversion panics when the slice is shorter. Any other type difference returns an error, and
-// so does a T that is not a struct.
-func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) (func(row reflect.Value) reflect.Value, error) {
+// zero. A nil pointer to an embedded struct on the way to an element field is allocated. Two
+// conversions Go allows are never made (see convertible): an integer to a string, and a slice to an
+// array or to a pointer to an array. Any other type difference returns an error, and so does a T
+// that is not a struct. A narrowing conversion of a number is made, but a value outside the range
+// of the element field's type (see overflows) makes the returned function return an error.
+func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) (func(row reflect.Value) (reflect.Value, error), error) {
 	model := ct.schema.ModelType
 	if elemType == model {
-		return func(row reflect.Value) reflect.Value { return row }, nil
+		return func(row reflect.Value) (reflect.Value, error) { return row, nil }, nil
 	}
 	if elemType.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("cannot read nodes into %s: the element type must be a struct or a pointer to a struct", elemType)
 	}
 	if i, ok := embeddedField(elemType, model); ok && elemType.Field(i).IsExported() {
-		return func(row reflect.Value) reflect.Value {
+		return func(row reflect.Value) (reflect.Value, error) {
 			elem := reflect.New(elemType)
 			elem.Elem().Field(i).Set(row.Elem())
-			return elem
+			return elem, nil
 		}, nil
 	}
 	copies, err := ct.planCopies(elemType)
 	if err != nil {
 		return nil, err
 	}
-	return func(row reflect.Value) reflect.Value {
+	return func(row reflect.Value) (reflect.Value, error) {
 		elem := reflect.New(elemType)
 		for _, c := range copies {
 			dst, ok := settableField(elem.Elem(), c.dst)
@@ -129,11 +137,15 @@ func (ct *Tree) modelToElem(ctx context.Context, elemType reflect.Type) (func(ro
 				v = v.Elem()
 			}
 			if c.conv {
+				if overflows(v, dst.Type()) {
+					return reflect.Value{}, fmt.Errorf("cannot copy field %s of node %d: value %v overflows %s",
+						c.src.Name, nodeOf(row).NodeId, v, dst.Type())
+				}
 				v = v.Convert(dst.Type())
 			}
 			dst.Set(v)
 		}
-		return elem
+		return elem, nil
 	}, nil
 }
 
@@ -254,14 +266,68 @@ func planFieldCopy(src *schema.Field, dst reflect.StructField) (fieldCopy, error
 	return c, nil
 }
 
-// convertible is ConvertibleTo without the conversions of a slice to an array or to a pointer to
-// an array, which panic at run time when the slice is too short.
+// convertible is ConvertibleTo without two conversions Go allows: an integer to a string, which
+// gives the UTF-8 encoding of the code point (65 becomes "A"), and a slice to an array or to a
+// pointer to an array, which panics at run time when the slice is too short.
 func convertible(from, to reflect.Type) bool {
+	if isInt(from.Kind()) || isUint(from.Kind()) {
+		if to.Kind() == reflect.String {
+			return false
+		}
+	}
 	if from.Kind() == reflect.Slice &&
 		(to.Kind() == reflect.Array || (to.Kind() == reflect.Pointer && to.Elem().Kind() == reflect.Array)) {
 		return false
 	}
 	return from.ConvertibleTo(to)
+}
+
+// overflows reports whether converting the number v to the numeric type to would leave the range
+// of to: an integer would wrap, and a float would give an integer Go does not define. A float is
+// truncated toward zero first, as the conversion does, and NaN and the infinities overflow every
+// integer type; a float converted to a float overflows when it is finite and too large. A
+// conversion to a float from an integer may lose precision but never overflows, and values that
+// are not numbers never do.
+func overflows(v reflect.Value, to reflect.Type) bool {
+	k := to.Kind()
+	switch {
+	case isInt(v.Kind()):
+		x := v.Int()
+		if isInt(k) {
+			return to.OverflowInt(x)
+		}
+		if isUint(k) {
+			return x < 0 || to.OverflowUint(uint64(x))
+		}
+	case isUint(v.Kind()):
+		x := v.Uint()
+		if isInt(k) {
+			return x > math.MaxInt64 || to.OverflowInt(int64(x))
+		}
+		if isUint(k) {
+			return to.OverflowUint(x)
+		}
+	case v.Kind() == reflect.Float32 || v.Kind() == reflect.Float64:
+		x := math.Trunc(v.Float())
+		switch {
+		case isInt(k):
+			limit := math.Ldexp(1, to.Bits()-1)
+			return !(x >= -limit && x < limit) // NaN fails every comparison
+		case isUint(k):
+			return !(x >= 0 && x < math.Ldexp(1, to.Bits()))
+		case k == reflect.Float32 || k == reflect.Float64:
+			return to.OverflowFloat(v.Float())
+		}
+	}
+	return false
+}
+
+func isInt(k reflect.Kind) bool {
+	return k >= reflect.Int && k <= reflect.Int64
+}
+
+func isUint(k reflect.Kind) bool {
+	return k >= reflect.Uint && k <= reflect.Uintptr
 }
 
 // nodeOf returns the Node of v, a pointer to a struct that is or embeds Node.
