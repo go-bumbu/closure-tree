@@ -21,6 +21,10 @@ const idChunkSize = 500
 // tenant are ignored, so no ErrNodeNotFound is returned. It returns ErrVirtualRoot, deleting
 // nothing, if ids contains 0, and ErrEmptyTenant if tenant is empty. With no ids it returns 0
 // without opening a transaction.
+//
+// On MySQL it is the write most likely to deadlock with other tenants' writes (see the concurrency
+// note on Tree). When the library repeats its transaction after a deadlock, the count is that of
+// the attempt that succeeded.
 func (ct *Tree) DeleteRecurseMany(ctx context.Context, ids []uint, tenant string) (deleted int64, err error) {
 	tenant, err = validateTenant(tenant)
 	if err != nil {
@@ -125,6 +129,12 @@ func (ct *Tree) tenantDeleteSQL(tbl string) string {
 // The tenant is compared with the collation of the tenant columns (see Tree). On a MySQL tree that
 // kept a non-exact collation, tenants that differ only in case or accents are one tenant, and all
 // of them are deleted.
+//
+// On MySQL the delete of the tenant's closure rows carries an index hint for the closure table's
+// tenant index, so that it reads the tenant's rows through that index, also for a tenant that
+// holds most of the table, instead of scanning other tenants' rows. The hint takes effect from
+// MySQL 8.0.20; older servers, and a tree whose next Migrate has not yet added the index, ignore it
+// with a warning.
 func (ct *Tree) DeleteTenant(ctx context.Context, tenant string) error {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

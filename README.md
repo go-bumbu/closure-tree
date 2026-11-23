@@ -44,6 +44,22 @@ err = tree.Migrate() // creates or updates the tables; call it once at applicati
 `New` only parses and validates the model, it does not touch the schema. `Migrate` creates the
 tables and should be called once at application start up.
 
+`Migrate` also adds the indexes a table lacks. On a tree last migrated by v0.10.0 or earlier, the next
+`Migrate` adds an index on the tenant column of the closure table, named
+`idx_closure_tree_rel_<node table>_tenant` (gorm's naming strategy shortens a name that is too
+long); it builds it unless an index of exactly that name exists. On a large closure table the build
+takes time. MySQL builds it in place and lets writes continue; it takes a short exclusive
+metadata lock only at its start and end, which waits for the open transactions that used the table.
+PostgreSQL blocks writes to the closure table until the index is built. To avoid that, build it
+beforehand, outside a transaction, with exactly that name:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_closure_tree_rel_categories_tenant ON closure_tree_rel_categories (tenant);
+```
+
+A concurrent build that fails leaves an invalid index of that name, which `Migrate` takes as
+present: drop it and build it again.
+
 A model must not declare its own field mapped to a column of the embedded `Node`: `node_id`,
 `parent_id`, `tenant` or `sort_order` (for example a `Tenant string` field of its own, which would
 take the tenant column from `Node.Tenant`, so `Add` would store its value instead of the tenant of
@@ -467,18 +483,20 @@ err := db.Transaction(func(tx *gorm.DB) error {
   affects your transaction like a failed statement of your own, and never returns
   `ErrSavepointRollback`.
 * MySQL: a deadlock error (error 1213) means the server has already rolled back your whole
-  transaction. Roll back and retry the transaction; continuing would run the following statements
-  outside any transaction. The tree's error contains the driver's error, so you can test for it with
-  `errors.As` (for `github.com/go-sql-driver/mysql`, a `*mysql.MySQLError` with `Number` 1213).
-  Inside a tree write the deadlock error also matches `ErrSavepointRollback`, because the savepoint
-  went with the transaction: if you retry, test for the deadlock first.
-* MySQL: tree writes of different tenants can deadlock at any isolation level (see "Concurrent
-  writes on MySQL" below). At the default isolation level (REPEATABLE READ) your transaction keeps
-  the locks of the closure rows its tree writes scanned until it ends, so writes of other tenants
-  wait on it more, also writes on a tree not bound to a transaction, which the server may roll back
-  instead of yours. Keep such transactions short, or run them at READ COMMITTED. Error 1213 means
-  the whole transaction was rolled back: on a tree bound with `WithTx` roll back and retry your
-  transaction; on a tree not bound to a transaction retry the call.
+  transaction, so none of it is written. The tree does not repeat a write inside your transaction,
+  as it does in its own: roll back and redo the whole transaction. Never keep using the handle: it
+  is no longer in a transaction, so each following statement is committed at once, by itself, and
+  your final rollback undoes none of them. The tree's error contains the driver's error, so you can
+  test for it with `errors.As` (for `github.com/go-sql-driver/mysql`, a `*mysql.MySQLError` with
+  `Number` 1213). Inside a tree write the deadlock error also matches `ErrSavepointRollback`,
+  because the savepoint went with the transaction: test for the deadlock first.
+* MySQL: tree writes of different tenants can deadlock at any isolation level, and any tree write
+  of your transaction, an `Add` too, can be the one that loses (see "Concurrent writes on MySQL"
+  below). At the default isolation level (REPEATABLE READ) your transaction keeps the locks of the
+  closure rows its tree writes scanned until it ends, so writes of other tenants wait on it more.
+  Keep such transactions short, or run them at READ COMMITTED: in the measurements below that cut
+  the deadlocks a lot but did not stop them. A server with `binlog_format=STATEMENT` refuses that
+  level (see below).
 * After a successful tree write the tenant lock is held until your transaction ends, so do not hold
   the transaction across slow work. After a failed tree write the lock may already be released;
   `LockTenant` holds it for the whole transaction.
@@ -486,6 +504,27 @@ err := db.Transaction(func(tx *gorm.DB) error {
   everywhere, to avoid deadlocks. `LockTenant` lets it take them all up front.
 * Call `Migrate` on the base tree, not on a copy bound to a transaction: it runs DDL, and MySQL
   commits the transaction implicitly on DDL.
+
+On MySQL, redo a transaction that a deadlock rolled back in a loop. `db.Transaction` rolls the
+transaction back when the function returns an error, and each attempt starts again from a new item:
+
+```GO
+func addWithAudit(ctx context.Context, db *gorm.DB, tree *closuretree.Tree) error {
+    for attempt := 1; ; attempt++ {
+        err := db.Transaction(func(tx *gorm.DB) error {
+            tag := Tag{Name: "colors"}
+            if err := tree.WithTx(tx).Add(ctx, &tag, nil, nil, "user1"); err != nil {
+                return err
+            }
+            return tx.Create(&AuditEntry{Action: "add tag", NodeID: tag.Id()}).Error
+        })
+        var myErr *mysql.MySQLError // github.com/go-sql-driver/mysql
+        if err == nil || !errors.As(err, &myErr) || myErr.Number != 1213 || attempt == 5 {
+            return err
+        }
+    }
+}
+```
 
 The guards inside tree writes (cycle check, sibling order, duplicate check) are plain reads, so what
 they see depends on the database and the isolation level of your transaction:
@@ -512,27 +551,60 @@ with binary logging on and `binlog_format=STATEMENT` refuses InnoDB writes at RE
 
 On MySQL a write that deletes closure rows, such as `DeleteRecurse`, `DeleteRecurseMany`,
 `DeleteTenant`, `BuildFromParents` with `Rebuild()`, or an `Update` that moves a node, locks the
-closure rows it scans and waits for a row that another transaction holds. The closure table's index
-on the tenant keeps most of these scans within the tenant's rows, but not all. From MySQL 8.0.20 the
-tenant-wide deletes of `DeleteTenant` and `BuildFromParents` always use it (an index hint); other
-deletes planned on stale statistics, as on just-loaded tables, and before 8.0.20 the tenant-wide
-delete of a tenant that holds a large share of the closure table, still scan rows of other tenants.
-Running the library's own transactions at READ COMMITTED removed the deadlocks between these writes
-and other tenants' adds, but two of them on different tenants at once can still deadlock. In the
-library's tests, on trees not bound to a transaction, each of two or three tenants repeated one such
-write at the same time (ten runs of 30 calls per write):
+closure rows it scans and waits for a row that another transaction holds, so writes of different
+tenants can deadlock (error 1213). The closure table's index on the tenant keeps most of these scans
+within the tenant's rows, but not all. From MySQL 8.0.20 the tenant-wide deletes of `DeleteTenant`
+and `BuildFromParents` always use it (an index hint; older servers ignore the hint); other deletes
+planned on stale statistics, as on just-loaded tables, and before 8.0.20 the tenant-wide delete of a
+tenant that holds a large share of the closure table, still scan rows of other tenants. A deadlock
+never leaves the tree half-written: MySQL rolls back the whole transaction that loses it.
 
-| Writes at the same time, each on its own tenant | MySQL | PostgreSQL |
+**On a tree not bound to a transaction** the library opens the transaction itself, and when it
+loses a deadlock runs it again: up to 5 attempts in all, with a random pause before each repeat of
+at most 25, 50, 100 and 200 ms. When all 5 lose, the call returns an error that wraps the last
+deadlock error, so `errors.As` finds the driver's error (for `github.com/go-sql-driver/mysql`, a
+`*mysql.MySQLError` with `Number` 1213); when the context ends during a pause, the error wraps both
+that deadlock error and `ctx.Err()`. A lock wait timeout (error 1205) is not repeated. PostgreSQL
+and SQLite make one attempt.
+
+Because a write can run more than once, your model's gorm hooks (`BeforeCreate`, `AfterCreate`, ...)
+run once per attempt, also in attempts that MySQL then rolled back: keep them free of effects
+outside the database, or let those effects tolerate repeats. `Add` and `GetOrAdd` start each attempt
+from a fresh shallow copy of your item, so a value a hook sets on the copy does not reach the next
+attempt or your item. The copy shares your item's pointer, slice and map fields: a hook that writes
+through one of them changes your data in every attempt, the failed ones too. Do not rely on such
+writes.
+
+**Inside your transaction** (`WithTx`) nothing is repeated: the server has rolled back your whole
+transaction, and you roll it back and redo it (see "Using closure-tree inside your own
+transaction").
+
+Measured on MySQL 8.0: two or three writers at the same time, each on its own tenant of one small
+tree, in 22 combinations of `Add`, `DeleteTenant`, `DeleteRecurse`, an `Update` moving a subtree,
+`BuildFromParents(Rebuild())` and a `DeleteRecurseMany` of 600 ids followed by their import; ten runs
+of 30 calls per writer, 13,500 calls per row. "Just loaded" tables had no up-to-date statistics, as
+after a bulk load; "analysed" ones had them, after `ANALYZE TABLE`.
+
+| Transactions | Tables | Calls that failed with a deadlock |
 |---|---|---|
-| `DeleteTenant` (after adding nodes), on three tenants | no call failed | no call failed |
-| `BuildFromParents(Rebuild())` and `BuildFromParents(Rebuild())` | no call failed | no call failed |
-| `DeleteRecurseMany` of 600 ids and `BuildFromParents(Rebuild())` | the rebuild lost calls to deadlocks | no call failed |
-| `Update` moving a subtree and `DeleteRecurse` | the pair lost calls to deadlocks | no call failed |
+| the library's own | just loaded | 0 (51 calls needed a second attempt) |
+| the library's own | analysed | 0 (no call needed a second attempt) |
+| yours (`WithTx`), REPEATABLE READ | just loaded | 608 |
+| yours (`WithTx`), REPEATABLE READ | analysed | 239 |
+| yours (`WithTx`), READ COMMITTED | just loaded | 78 |
+| yours (`WithTx`), READ COMMITTED | analysed | 0 |
+
+With 40 more tenants in the tables, the library's own transactions had no failed call either (6,000
+calls per row; 53 needed a second attempt just loaded, none analysed), and no call anywhere needed a
+third attempt. In your transactions the deadlocks came only in combinations with the
+`DeleteRecurseMany` writer, and the call that lost was sometimes an `Add`. Before the tenant index,
+the hint and the repeats, the library's own transactions lost 490 calls just loaded and 395
+analysed, and yours at REPEATABLE READ 3,541 just loaded.
 
 InnoDB locks the rows a delete scans at every isolation level, so the library makes no promise that
-writes of different tenants do not deadlock on MySQL. A deadlock (error 1213) can be retried: the
-server has rolled back the whole transaction, so repeat a call on a tree not bound to a transaction,
-and roll back and retry your transaction on one bound with `WithTx`.
+writes of different tenants never deadlock on MySQL, nor that 5 attempts are always enough. Update
+the statistics after a bulk load (see "Adopting an existing table"), keep your transactions short,
+and redo the ones a deadlock rolled back.
 
 ### Adopting an existing table
 
@@ -635,7 +707,7 @@ model that embeds `Leaf` keeps the collation of your table; it is nullable, so f
 * `ClosureTableName() string` — Return the table name of the closure tree relationship
 
 **Write operations**
-On MySQL, writes of different tenants can deadlock, on a tree bound to a transaction or not. After error 1213 repeat a call on a tree not bound to a transaction; for a write through `WithTx` the server has rolled back your whole transaction: roll it back and retry it (see "Concurrent writes on MySQL").
+On MySQL, writes of different tenants can deadlock. On a tree not bound to a transaction the library repeats a write that lost a deadlock, up to 5 attempts, so your model's gorm hooks run once per attempt; after the fifth the call returns the deadlock error (error 1213). For a write through `WithTx` the server has rolled back your whole transaction: roll it back and redo it (see "Concurrent writes on MySQL").
 * `Add(ctx, item, parentID, afterNodeID, tenant, opts ...AddOption)` — Add a new node; it is placed first among its siblings unless `afterNodeID` names a sibling or the `PlaceLast()` option is given
 * `GetOrAdd(ctx, item, parentID, tenant, matchFields, opts ...AddOption) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths; takes the same placement options as `Add`
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect; a node that does not exist returns `ErrNodeNotFound` and nothing is written

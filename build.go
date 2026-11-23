@@ -189,7 +189,10 @@ const sortBatchRows = 500
 // leaves; the next insertion recreates them. A nil option is ignored.
 //
 // It runs under the tenant lock in one transaction, or inside the caller's through WithTx. It
-// returns ErrEmptyTenant if tenant is empty.
+// returns ErrEmptyTenant if tenant is empty. On MySQL its delete of the tenant's closure rows
+// carries the same index hint as DeleteTenant (no effect before MySQL 8.0.20), and a build on a
+// Tree not bound to a transaction that loses a deadlock is repeated, as every such write is (see
+// the concurrency note on Tree).
 func (ct *Tree) BuildFromParents(ctx context.Context, tenant string, links []ParentLink, opts ...BuildOption) error {
 	tenant, err := validateTenant(tenant)
 	if err != nil {

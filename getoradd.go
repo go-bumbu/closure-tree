@@ -98,7 +98,13 @@ func (ct *Tree) FindChild(ctx context.Context, parentID uint, tenant string, mat
 //
 // The two paths treat your payload differently: on create, item's non-Node fields are kept as you
 // set them; on the found path item is fully overwritten with the stored row (like GetNode), so
-// any fields you set beyond the match are replaced by the existing node's values.
+// any fields you set beyond the match are replaced by the existing node's values, and a field
+// without a column (gorm:"-") holds its zero value.
+//
+// As in Add, the find and the create work on a shallow copy of item, a fresh one for each attempt
+// when MySQL makes the library repeat the write after a deadlock (see the concurrency note on
+// Tree): the model's gorm hooks run once per attempt, and a hook that writes through a pointer,
+// slice or map field changes what item points to, in failed attempts too.
 //
 // Atomicity: the find and the add run in a single transaction that first takes the tree's
 // per-tenant write lock, so two callers racing to create the same brand-new child are serialized —

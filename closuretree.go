@@ -69,24 +69,35 @@ var (
 // take the lock. The transactions the library opens itself run at READ COMMITTED on PostgreSQL and
 // MySQL.
 //
-// On MySQL, tree writes of different tenants can still deadlock, and no write is promised to be
-// free of deadlocks. A write that deletes closure rows, such as DeleteRecurse, DeleteRecurseMany,
-// DeleteTenant, BuildFromParents with Rebuild, or an Update that moves a node, locks the closure
-// rows it scans and waits for a row that another transaction holds. The closure table's index on
-// the tenant keeps most of these scans within the tenant's rows, but not all. From MySQL 8.0.20 the
-// tenant-wide deletes of DeleteTenant and BuildFromParents always use it (an index hint); other
-// deletes planned on stale statistics, as on just-loaded tables, and before 8.0.20 the tenant-wide
-// delete of a tenant that holds a large share of the closure table, still scan other tenants' rows.
-// READ COMMITTED removed the deadlocks between these writes and other tenants' adds, but two of
-// them on different tenants at once can deadlock: in the library's tests a rebuild against a
-// DeleteRecurseMany, and a move against a DeleteRecurse, did; three DeleteTenant or two rebuilds at
-// once did not. While a caller's transaction at MySQL's default isolation level (REPEATABLE READ)
-// is open (see WithTx), its tree writes keep the locks of the rows they scanned until it ends, so
-// more writes of other tenants wait on it and can deadlock with it, also writes on a Tree not bound
-// to a transaction, which MySQL may roll back instead. A deadlock (error 1213) means MySQL has
-// already rolled back the whole transaction, and the work can be retried: repeat the call on a Tree
-// not bound to a transaction, or roll back and retry the caller's transaction on one bound with
-// WithTx.
+// On MySQL, tree writes of different tenants can still deadlock (error 1213). A write that deletes
+// closure rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant, BuildFromParents with
+// Rebuild, or an Update that moves a node, locks the closure rows it scans and waits for a row that
+// another transaction holds. The closure table's index on the tenant keeps most of these scans
+// within the tenant's rows, but not all: from MySQL 8.0.20 the tenant-wide deletes of DeleteTenant
+// and BuildFromParents always use it (an index hint), while deletes planned on stale statistics, as
+// on just-loaded tables, and before 8.0.20 the tenant-wide delete of a tenant that holds a large
+// share of the closure table, still scan other tenants' rows. A deadlock never leaves the tree
+// half-written: MySQL rolls back the whole transaction that loses it.
+//
+// A write on a Tree not bound to a transaction runs in a transaction the library opens itself, and
+// on MySQL the library repeats that transaction when it loses a deadlock: up to 5 attempts in all,
+// with a short random pause before each repeat (at most 375 ms over all of them). When every
+// attempt loses, the write returns an error that wraps the last deadlock error, so errors.As still
+// finds the driver's error (for github.com/go-sql-driver/mysql a *mysql.MySQLError with Number
+// 1213); when ctx ends during a pause, the error wraps both that deadlock error and ctx.Err(). A
+// lock wait timeout (error 1205) is not repeated, and PostgreSQL and SQLite make one attempt. In
+// the library's measurements no such write failed, and none needed more than two attempts (README,
+// "Concurrent writes on MySQL"). Because a write can run more than once, the gorm hooks of the
+// model run once per attempt: see Add and GetOrAdd.
+//
+// A write inside a caller's transaction (WithTx) is never repeated: MySQL has rolled back the
+// caller's whole transaction, which the caller must roll back and redo (see WithTx). There
+// deadlocks remain: while a caller's transaction is open at MySQL's default isolation level
+// (REPEATABLE READ), its tree writes keep the locks of the rows they scanned until it ends, so
+// writes of other tenants wait on it and can deadlock with it (in the library's measurements only
+// in runs with a DeleteRecurseMany of many ids), and any tree write of the transaction, an Add too,
+// can be the one that loses. A write on a Tree not bound to a transaction that MySQL rolls back
+// instead is repeated.
 //
 // The lock is a SELECT ... FOR UPDATE on the tenant's anchor row on PostgreSQL and MySQL (released
 // when the transaction ends); on SQLite, which already serializes writers per database, it is the
@@ -226,7 +237,16 @@ func checkNodeColumns(s *schema.Schema) error {
 // creates the indexes a table lacks, so on a tree created before the closure table had its index
 // on the tenant column, the next Migrate adds it. The index is named idx_<closure table>_tenant,
 // shortened by gorm's naming strategy when that is too long; Migrate builds it unless an index of
-// exactly that name exists.
+// exactly that name exists. Building it on a large closure table takes time. MySQL builds it in
+// place and lets writes continue; it takes a short exclusive metadata lock only at its start and
+// end, which waits for the open transactions that used the table. PostgreSQL blocks writes to the
+// closure table until the index is built. To avoid that, build it beforehand, outside a
+// transaction, with
+//
+//	CREATE INDEX CONCURRENTLY idx_<closure table>_tenant ON <closure table> (tenant);
+//
+// and exactly that name. A concurrent build that fails leaves an invalid index of that name, which
+// Migrate takes as present: drop it and build it again.
 //
 // On MySQL, as its last step, Migrate gives the tenant column of the four tables the collation
 // utf8mb4_0900_bin while none of them has a row, so that tenants are compared exactly (see Tree);
@@ -329,6 +349,15 @@ func derefUint(p *uint) uint {
 // A parent that is not a node of tenant returns ErrParentNotFound. So does a node row without a
 // closure row at depth 1 (not linked into the tree), as before BuildFromParents, with a message
 // that names BuildFromParents; GetOrAdd and a move with Update reject such a parent the same way.
+//
+// Add creates the row from a shallow copy of item, and of an item passed as a pointer it sets only
+// the embedded Node (to the new node). On MySQL an Add on a Tree not bound to a transaction that
+// loses a deadlock is repeated (see the concurrency note on Tree), each attempt with a fresh copy
+// of item, so the model's gorm hooks (BeforeCreate, AfterCreate, ...) run once per attempt, also
+// in attempts whose work MySQL then rolled back. Keep hooks free of effects outside the database,
+// or let them tolerate repeats. The copy shares item's pointer, slice and map fields: a hook that
+// writes through one of them changes what item points to, in every attempt, the failed ones too,
+// so do not rely on such writes.
 func (ct *Tree) Add(ctx context.Context, item any, parentID *uint, afterNodeID *uint, tenant string, opts ...AddOption) error {
 	if err := checkItem(item); err != nil {
 		return err

@@ -187,10 +187,10 @@ func (d dialect) ensureLockRow(tx *gorm.DB, lockTbl, tenant string) error {
 // other tenants and on the gaps between them, so it deadlocks with other tenants' writes; at READ
 // COMMITTED it takes no gap locks and releases the rows it does not delete, which removed its
 // deadlocks with other tenants' adds. It still locks the rows it scans, also other tenants' rows,
-// so two writes of different tenants that both delete closure rows can still deadlock (see the
-// concurrency note on Tree). The guards need no snapshot that lasts across statements: every
-// writer of the tenant holds its lock. SQLite uses the connection's default (nil): it serializes
-// writers.
+// so two writes of different tenants that both delete closure rows can still deadlock, and writeTx
+// then repeats the transaction (retryPolicy; see the concurrency note on Tree). The guards need no
+// snapshot that lasts across statements: every writer of the tenant holds its lock. SQLite uses the
+// connection's default (nil): it serializes writers.
 func (d dialect) txOptions() []*sql.TxOptions {
 	if d == dialectSQLite {
 		return nil

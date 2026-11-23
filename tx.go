@@ -43,18 +43,25 @@ var ErrSavepointRollback = errors.New("the transaction can no longer be used; ro
 // tenant lock until the outer transaction ends (PostgreSQL and MySQL).
 //
 // A further exception is a deadlock on MySQL (error 1213): the server has already rolled back the
-// whole outer transaction, so the caller must roll it back and retry it; continuing would run the
-// following statements outside any transaction. The returned error contains the driver's error,
-// so it can be tested with errors.As. Inside a tree write the deadlock error also matches
-// ErrSavepointRollback, because the savepoint went with the transaction: a caller that retries
-// should test for the deadlock first. On MySQL, tree writes of different tenants can deadlock at
-// any isolation level: writes that delete closure rows, such as DeleteRecurse, DeleteRecurseMany,
-// DeleteTenant, BuildFromParents and an Update that moves a node, lock the closure rows they scan,
-// and some scans still pass other tenants' rows (see the concurrency note on Tree). At MySQL's
-// default isolation level (REPEATABLE READ) the transaction keeps those locks until it ends, so
-// writes of other tenants wait on it more, also writes on a Tree not bound to a transaction, which
-// MySQL may roll back instead: keep such transactions short, or run them at READ COMMITTED, as the
-// transactions the library opens itself do.
+// whole outer transaction, so nothing of it is written, and the caller must roll it back and redo
+// it from the start. The library does not repeat a write inside a caller's transaction, as it does
+// for its own transactions (see the concurrency note on Tree). Never keep using the handle: it is
+// no longer in a transaction, so each following statement on it is committed at once, by itself,
+// and the final Rollback undoes none of them. The returned error contains the driver's error, so
+// it can be tested with errors.As. Inside a tree write the deadlock error also matches
+// ErrSavepointRollback, because the savepoint went with the transaction: a caller that redoes
+// deadlocked transactions should test for the deadlock first.
+//
+// On MySQL, tree writes of different tenants can deadlock at any isolation level: writes that
+// delete closure rows, such as DeleteRecurse, DeleteRecurseMany, DeleteTenant, BuildFromParents
+// and an Update that moves a node, lock the closure rows they scan, and some scans still pass other
+// tenants' rows (see the concurrency note on Tree); any tree write of the transaction can be the
+// one that loses. At MySQL's default isolation level (REPEATABLE READ) the transaction keeps those
+// locks until it ends, so writes of other tenants wait on it more. Keep such transactions short, or
+// run them at READ COMMITTED, as the transactions the library opens itself do: in the library's
+// measurements that cut the deadlocks a lot, but did not stop them on tables whose statistics were
+// stale. A server with binary logging on and binlog_format=STATEMENT refuses InnoDB writes at READ
+// COMMITTED (error 1665).
 //
 // Inside the transaction, use the copy for that tenant: calling ct for the same tenant from inside
 // the transaction waits on the transaction's own lock, so it blocks: forever, or until a lock or
