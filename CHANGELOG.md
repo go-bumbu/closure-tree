@@ -5,8 +5,8 @@
 ### Breaking changes
 
 - **MySQL 8.0.17 or later.** `New` returns an error for a MySQL server older than 8.0.17; v0.10.0
-  accepted any 8.0. Upgrade the server. TiDB, which always reports itself as 8.0.11, is rejected
-  and is not supported.
+  accepted any 8.0. Upgrade the server. TiDB, which by default reports itself as 8.0.11, is
+  rejected; it is not supported.
 - **MySQL: tenants are compared exactly.** On MySQL, `Migrate` gives the tenant column of the
   tree's four tables the collation `utf8mb4_0900_bin` while none of them has a row, so "Acme",
   "acme" and "acmé" are three tenants, as on PostgreSQL and SQLite. The library does not convert a
@@ -91,9 +91,9 @@
 ### New
 
 - Run a Tree inside your own transaction: `WithTx`, `LockTenant`, `ErrNotInTransaction`,
-  `ErrSavepointRollback`, and `ErrLockNotAcquired` for a write on PostgreSQL or MySQL whose tenant
-  lock row was deleted between ensuring and locking it on each of its 3 attempts (README "Using
-  closure-tree inside your own transaction").
+  `ErrSavepointRollback`, and `ErrLockNotAcquired` for a write or `LockTenant` on PostgreSQL or
+  MySQL whose tenant lock row was deleted between ensuring and locking it on each of its 3
+  attempts (README "Using closure-tree inside your own transaction").
 - The ancestors of a node, root first: `Ancestors` and `AncestorIDs`.
 - Filter the nodes of a read by their columns: `Filter` with the `Cond`s `Eq`, `IsNull`, `NotNull`
   and `In`, `PerNode`, `Unfiltered`, a default filter with `WithFilter`, and `ErrUnknownColumn`;
