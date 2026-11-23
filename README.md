@@ -185,10 +185,11 @@ such as `json.RawMessage` that is not behind a pointer, which gorm writes as NUL
 stores for it: empty bytes with the driver's `interpolateParams=true`, NULL without. A node added
 with one setting is therefore not found with the other, and `GetOrAdd` adds a duplicate sibling. Do
 not switch the setting on a tree with data; or, when switching it off, update the empty values of
-that column to NULL once, if no match field is a pointer to an empty, non-nil `json.RawMessage`,
-which both settings store as empty bytes; or leave the pointer nil, which both settings store as
-NULL. A `driver.Valuer` is matched by what its `Value` returns, and matches NULL only when that is
-nil, not when it is a nil byte slice. `Eq` binds the value it is given, so use `IsNull` there. Every
+that column to NULL once, if no node in that column holds empty bytes written from a pointer to an
+empty, non-nil `json.RawMessage` (both settings store those as empty bytes, and they would wrongly
+become NULL); or leave the pointer nil, which both settings store as NULL. A `driver.Valuer` is
+matched by what its `Value` returns, and matches NULL only when that is nil, not when it is a nil
+byte slice. `Eq` binds the value it is given, so use `IsNull` there. Every
 other value is bound as one value, as with `Eq`, and every value is checked as `Eq` checks it: a
 field whose value is a slice or an array (other than a byte slice or a `driver.Valuer`), or whose
 type is a `gorm.Valuer` (such as a JSON column type, also as a nil pointer), returns an error before
