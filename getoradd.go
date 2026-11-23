@@ -184,7 +184,7 @@ func setNodeParentID(dst any, t reflect.Type, parentID uint) {
 // NULL matches as IS NULL, and so does a byte slice that Add stores as NULL (addedAsNull): the
 // match compares with what Add stores, where Eq binds the value it is given. On MySQL such a byte
 // slice behind a pointer is bound as that pointer with the null-safe <=>, because gorm leaves it to
-// the driver, whose interpolateParams renders a nil json.RawMessage as ''. Every other value is
+// the driver, whose interpolateParams renders a nil json.RawMessage as an empty string. Every other value is
 // bound through oneValue, as Eq binds it. The value gorm reads from the field (for a field with a
 // serializer, a driver.Valuer that serializes it) is checked as Eq checks its value
 // (checkBindValue), so a list or a gorm.Valuer is rejected before any query, and so is a value
