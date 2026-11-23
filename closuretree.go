@@ -42,7 +42,15 @@ var (
 	ErrNoOp              = errors.New("update called with no item, no new parent, and no new sort order")
 	ErrInvalidAfterNode  = errors.New("afterNodeID is not a sibling of the target parent")
 	ErrAfterNodeIsSelf   = errors.New("afterNodeID cannot be the node itself")
-	ErrParentIDColumn    = errors.New("the model maps a field other than Node.ParentId to column parent_id")
+	// ErrNodeColumn is returned by New for a model with a field of its own, one that is not a field
+	// of the embedded Node, mapped to a column of Node: node_id, parent_id, tenant or sort_order. Such
+	// a field takes the column from Node's field, so Add would store its value instead of the
+	// tenant, id or sort order the tree sets. When the column is parent_id, the error also matches
+	// ErrParentIDColumn.
+	ErrNodeColumn = errors.New("the model maps a field of its own to a column of the embedded Node")
+	// ErrParentIDColumn is returned by New, together with ErrNodeColumn, for a model with a field
+	// of its own mapped to column parent_id.
+	ErrParentIDColumn = errors.New("the model maps a field other than Node.ParentId to column parent_id")
 
 	ErrItemsNil                    = errors.New("items cannot be nil")
 	ErrItemsNotPointerToSlice      = errors.New("items must be a pointer to a slice")
@@ -114,6 +122,9 @@ type Tree struct {
 // update the schema. Separating the two means New needs no DDL privilege and callers decide when
 // (and how often) migration runs. On MySQL, New verifies the server is 8.0.17 or later.
 //
+// The model must be Node or embed it, and no field of its own may map to a column of Node
+// (node_id, parent_id, tenant or sort_order): New returns ErrNodeColumn for such a field.
+//
 // db may be a chained handle, such as db.Set("gorm:table_options", ...): the Tree keeps its
 // settings and starts every call from a copy of its statement, so its calls do not change db.
 func New(db *gorm.DB, item any) (*Tree, error) {
@@ -138,10 +149,8 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error parsing schema: %w", err)
 	}
-	for _, f := range stmt.Schema.Fields {
-		if f.DBName == colParentID && !nodeOwned(stmt.Schema.ModelType, f) {
-			return nil, fmt.Errorf("%w: field %s", ErrParentIDColumn, f.Name)
-		}
+	if err := checkNodeColumns(stmt.Schema); err != nil {
+		return nil, err
 	}
 	name := stmt.Schema.Table
 	relTbl := strings.ToLower(fmt.Sprintf("%s_%s", closureTblName, name))
@@ -176,6 +185,27 @@ func newTree(db *gorm.DB, item any) (*Tree, error) {
 	}
 
 	return ct, nil
+}
+
+// checkNodeColumns returns ErrNodeColumn when a field of the model that is not one of Node's own
+// maps to a column of a Node field, and ErrParentIDColumn as well when that column is parent_id.
+func checkNodeColumns(s *schema.Schema) error {
+	nodeCols := map[string]bool{}
+	for _, f := range s.Fields {
+		if f.DBName != "" && nodeOwned(s.ModelType, f) {
+			nodeCols[f.DBName] = true
+		}
+	}
+	for _, f := range s.Fields {
+		if !nodeCols[f.DBName] || nodeOwned(s.ModelType, f) {
+			continue
+		}
+		if f.DBName == colParentID {
+			return fmt.Errorf("%w: field %s, column %s: %w", ErrNodeColumn, f.Name, f.DBName, ErrParentIDColumn)
+		}
+		return fmt.Errorf("%w: field %s, column %s", ErrNodeColumn, f.Name, f.DBName)
+	}
+	return nil
 }
 
 // Migrate creates or updates the four tables this Tree manages — the node table, the closure

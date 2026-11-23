@@ -44,8 +44,12 @@ err = tree.Migrate() // creates or updates the tables; call it once at applicati
 `New` only parses and validates the model, it does not touch the schema. `Migrate` creates the
 tables and should be called once at application start up.
 
-A model must not declare its own field mapped to the column `parent_id` (the embedded `Node` already
-owns it as `ParentId`); `New` returns `ErrParentIDColumn` in that case.
+A model must not declare its own field mapped to a column of the embedded `Node`: `node_id`,
+`parent_id`, `tenant` or `sort_order` (for example a `Tenant string` field of its own, which would
+take the tenant column from `Node.Tenant`, so `Add` would store its value instead of the tenant of
+the call). `New` returns `ErrNodeColumn` in that case, and for `parent_id` the error also matches
+`ErrParentIDColumn`. A field of its own on another column, such as
+``Tenant string `gorm:"column:owner_tenant"` ``, is fine.
 
 Tables created by v0.8.0 or earlier may carry a stale `parent_id` column. Reads ignore it, and it is
 safe to drop.
@@ -532,8 +536,8 @@ writes the closure rows and `sort_order`; it never inserts, deletes or otherwise
 rows.
 
 The node table needs `node_id` as an auto-increment primary key, `tenant` and `sort_order`, which
-is what embedding `Node` gives it. No other field of the model may map to the `parent_id` column:
-the parent lives in the closure table from now on.
+is what embedding `Node` gives it. No other field of the model may map to the `parent_id` column
+(or to any other column of `Node`): the parent lives in the closure table from now on.
 
 ```GO
 // your own query: one row per node of the tenant, siblings in the order you want them

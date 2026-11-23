@@ -21,17 +21,63 @@ type ownParentTag struct {
 	Up   uint `gorm:"column:parent_id"`
 }
 
-func TestNewRejectsOwnParentIDColumn(t *testing.T) {
+// ownTenantField shadows Node.Tenant: Add would store its value, not the tenant of the call.
+type ownTenantField struct {
+	closuretree.Node
+	Name   string
+	Tenant string
+}
+
+type ownTenantTag struct {
+	closuretree.Node
+	Owner string `gorm:"column:tenant"`
+}
+
+type ownNodeIDField struct {
+	closuretree.Node
+	NodeID uint // gorm maps this to column node_id
+}
+
+type ownSortOrderTag struct {
+	closuretree.Node
+	Position int `gorm:"column:sort_order"`
+}
+
+type nestedOwnTenant struct {
+	MultiLevelPayload
+	Tenant string
+}
+
+// ownTenantOtherColumn has its own Tenant field on a column Node does not use, which is allowed.
+type ownTenantOtherColumn struct {
+	closuretree.Node
+	Tenant string `gorm:"column:owner_tenant"`
+}
+
+// ignoredTenant has its own Tenant field that gorm ignores, which is allowed.
+type ignoredTenant struct {
+	closuretree.Node
+	Tenant string `gorm:"-"`
+}
+
+func TestNewRejectsOwnNodeColumns(t *testing.T) {
 	for _, db := range testdbs.DBs() {
 		t.Run(db.DbType(), func(t *testing.T) {
 			gdb := connAndClose(t, db)
 			for _, model := range []any{ownParentField{}, ownParentTag{}} {
-				if _, err := closuretree.New(gdb, model); !errors.Is(err, closuretree.ErrParentIDColumn) {
-					t.Errorf("%T: want ErrParentIDColumn, got %v", model, err)
+				_, err := closuretree.New(gdb, model)
+				if !errors.Is(err, closuretree.ErrParentIDColumn) || !errors.Is(err, closuretree.ErrNodeColumn) {
+					t.Errorf("%T: want ErrParentIDColumn and ErrNodeColumn, got %v", model, err)
+				}
+			}
+			for _, model := range []any{ownTenantField{}, ownTenantTag{}, ownNodeIDField{}, ownSortOrderTag{}, nestedOwnTenant{}} {
+				_, err := closuretree.New(gdb, model)
+				if !errors.Is(err, closuretree.ErrNodeColumn) || errors.Is(err, closuretree.ErrParentIDColumn) {
+					t.Errorf("%T: want ErrNodeColumn only, got %v", model, err)
 				}
 			}
 			// models that embed Node directly and through another struct stay valid
-			for _, model := range []any{TestPayload{}, MultiLevelPayload{}} {
+			for _, model := range []any{TestPayload{}, MultiLevelPayload{}, ownTenantOtherColumn{}, ignoredTenant{}} {
 				if _, err := closuretree.New(gdb, model); err != nil {
 					t.Errorf("%T must stay valid: %v", model, err)
 				}
