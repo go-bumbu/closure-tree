@@ -496,7 +496,16 @@ func TestLockTenantFirstSerializesConflictingMoves(t *testing.T) {
 					return err
 				}
 				releaseB()
-				time.Sleep(200 * time.Millisecond) // let B reach the lock
+				if db.DbType() == testdbs.DBTypePostgres {
+					if err := waitForPostgresLockWaiter(ctx, gdb, 10*time.Second); err != nil {
+						return fmt.Errorf("B did not wait on the lock: %w", err)
+					}
+				} else {
+					// SQLite shows no lock waits: B's write fails as busy and B retries (see above).
+					// MySQL shows them (INNODB_TRX, performance_schema.data_lock_waits) only to a user
+					// with privileges the test user lacks. A gives B time to reach the lock.
+					time.Sleep(200 * time.Millisecond)
+				}
 				return tt.Update(ctx, x.NodeId, nil, up(y.NodeId), nil, tenant1)
 			})
 			releaseB()
@@ -512,6 +521,26 @@ func TestLockTenantFirstSerializesConflictingMoves(t *testing.T) {
 				t.Fatal("want x under y and no cycle")
 			}
 		})
+	}
+}
+
+// waitForPostgresLockWaiter returns once a session on gdb's PostgreSQL database waits on a lock, as
+// pg_stat_activity reports it, or an error when none does within timeout.
+func waitForPostgresLockWaiter(ctx context.Context, gdb *gorm.DB, timeout time.Duration) error {
+	const query = "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+	deadline := time.Now().Add(timeout)
+	for {
+		var n int64
+		if err := gdb.WithContext(ctx).Raw(query).Scan(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no session waited on a lock within %v", timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
