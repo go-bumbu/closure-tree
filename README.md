@@ -48,9 +48,10 @@ tables and should be called once at application start up.
 `Migrate` adds an index on the tenant column of the closure table, named
 `idx_closure_tree_rel_<node table>_tenant` (gorm's naming strategy shortens a name that is too
 long); it builds it unless an index of exactly that name exists. On a large closure table the build
-takes time. MySQL builds it in place and lets writes continue; it takes a short exclusive
-metadata lock only at its start and end, which waits for the open transactions that used the table.
-PostgreSQL blocks writes to the closure table until the index is built. To avoid that, build it
+takes time. MySQL builds it in place and lets writes continue, except at its start and end, where
+it needs a short exclusive metadata lock: it waits for that lock until the open transactions that
+used the closure table end, and while it waits, every new statement on the closure table, reads
+too, queues behind it. So run `Migrate` when no long transaction uses the tree. PostgreSQL blocks writes to the closure table until the index is built. To avoid that, build it
 beforehand, outside a transaction, with exactly that name:
 
 ```sql
@@ -472,7 +473,7 @@ err := db.Transaction(func(tx *gorm.DB) error {
   blocks: forever, or until a lock or busy timeout fails it.
 * A failed tree write rolls back only the tree's own work (to a savepoint the tree takes) and leaves
   your transaction usable; you decide whether to commit or roll back. Roll your transaction back
-  instead after a MySQL deadlock (below); when `errors.Is(err, closuretree.ErrSavepointRollback)` is
+  instead after a MySQL deadlock (below); when `errors.Is(err, ct.ErrSavepointRollback)` is
   true: the tree could not roll back to its savepoint, for example because the context ended during
   a statement and the driver dropped the connection, which loses your transaction's earlier work
   too, or because the rollback, which runs even after your context has ended, took more than 30
@@ -509,7 +510,7 @@ On MySQL, redo a transaction that a deadlock rolled back in a loop. `db.Transact
 transaction back when the function returns an error, and each attempt starts again from a new item:
 
 ```GO
-func addWithAudit(ctx context.Context, db *gorm.DB, tree *closuretree.Tree) error {
+func addWithAudit(ctx context.Context, db *gorm.DB, tree *ct.Tree) error {
     for attempt := 1; ; attempt++ {
         err := db.Transaction(func(tx *gorm.DB) error {
             tag := Tag{Name: "colors"}
@@ -570,8 +571,12 @@ and SQLite make one attempt.
 Because a write can run more than once, your model's gorm hooks (`BeforeCreate`, `AfterCreate`, ...)
 run once per attempt, also in attempts that MySQL then rolled back: keep them free of effects
 outside the database, or let those effects tolerate repeats. `Add` and `GetOrAdd` start each attempt
-from a fresh shallow copy of your item, so a value a hook sets on the copy does not reach the next
-attempt or your item. The copy shares your item's pointer, slice and map fields: a hook that writes
+from a fresh shallow copy of your item, so a value a hook sets on the copy in a failed attempt
+reaches neither the next attempt nor your item. From the attempt that succeeds, an item passed as a
+pointer gets the copy's embedded `Node`, values a hook set in it included (`Add`, and `GetOrAdd`
+when it creates the node; your other fields stay as you set them), or the whole copy (`GetOrAdd`
+when it finds the node; it reads the row with a plain scan, which runs no hook, not even
+`AfterFind`). The copy shares your item's pointer, slice and map fields: a hook that writes
 through one of them changes your data in every attempt, the failed ones too. Do not rely on such
 writes.
 
@@ -707,7 +712,7 @@ model that embeds `Leaf` keeps the collation of your table; it is nullable, so f
 * `ClosureTableName() string` — Return the table name of the closure tree relationship
 
 **Write operations**
-On MySQL, writes of different tenants can deadlock. On a tree not bound to a transaction the library repeats a write that lost a deadlock, up to 5 attempts, so your model's gorm hooks run once per attempt; after the fifth the call returns the deadlock error (error 1213). For a write through `WithTx` the server has rolled back your whole transaction: roll it back and redo it (see "Concurrent writes on MySQL").
+On MySQL, writes of different tenants can deadlock. When the library opens the transaction itself, on a tree not bound with `WithTx` or bound to a handle that is not in a transaction, it repeats a write that lost a deadlock, up to 5 attempts, so your model's gorm hooks run once per attempt; after the fifth the call returns the deadlock error (error 1213). For a write through `WithTx` inside your transaction the server has rolled back your whole transaction: roll it back and redo it (see "Concurrent writes on MySQL").
 * `Add(ctx, item, parentID, afterNodeID, tenant, opts ...AddOption)` — Add a new node; it is placed first among its siblings unless `afterNodeID` names a sibling or the `PlaceLast()` option is given
 * `GetOrAdd(ctx, item, parentID, tenant, matchFields, opts ...AddOption) (created bool, err error)` — Idempotent get-or-create of a direct child: return the existing match or add it; sets the pointer `item`'s `NodeId` on both paths; takes the same placement options as `Add`
 * `Update(ctx, id, item, newParentID, afterNodeID, tenant)` — Update payload, move to a new parent, reorder, or any combination; pass `nil` pointers to skip that aspect; a node that does not exist returns `ErrNodeNotFound` and nothing is written
