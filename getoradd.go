@@ -31,10 +31,15 @@ import (
 // stores as NULL matches as IS NULL too: a nil one, also behind a pointer, and an empty one of a
 // named type such as json.RawMessage that is not behind a pointer, which gorm writes as NULL; an
 // empty []byte matches empty bytes. On MySQL, a pointer to a nil json.RawMessage matches what the
-// driver stores for it: empty bytes with the driver's interpolateParams=true, NULL without. A
-// driver.Valuer is matched by what its Value returns, and matches NULL only when that is nil, not
-// when it is a nil byte slice. Eq binds the value it is given, so use IsNull there. An empty
-// matchFields returns ErrEmptyMatch; an unknown or Node-owned field returns ErrUnknownMatchField.
+// driver stores for it: empty bytes with the driver's interpolateParams=true, NULL without. A node
+// added with one setting is therefore not found with the other, and GetOrAdd adds a duplicate
+// sibling. Do not switch the setting on a tree with data; or, when switching it off, update the
+// empty values of that column to NULL once, if no match field is a pointer to an empty, non-nil
+// json.RawMessage, which both settings store as empty bytes; or leave the pointer nil, which both
+// settings store as NULL. A driver.Valuer is matched by what its Value returns, and matches NULL
+// only when that is nil, not when it is a nil byte slice. Eq binds the value it is given, so use
+// IsNull there. An empty matchFields returns ErrEmptyMatch; an unknown or Node-owned field returns
+// ErrUnknownMatchField.
 //
 // Every other value is bound as one value. Every value is checked as Eq checks its value: a field
 // whose value is a slice or an array (other than a byte slice or a driver.Valuer), or whose type is

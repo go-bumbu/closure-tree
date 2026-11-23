@@ -181,14 +181,18 @@ pointer field and a `driver.Valuer` field whose `Value` is nil (such as an inval
 `sql.NullString`) match NULL. A byte-slice field that is not a `driver.Valuer` and that `Add`
 stores as NULL matches NULL too: a nil one, also behind a pointer, and an empty one of a named type
 such as `json.RawMessage` that is not behind a pointer, which gorm writes as NULL; an empty
-`[]byte` matches empty bytes. On MySQL, a pointer to a nil `json.RawMessage` matches what the
-driver stores for it: empty bytes with the driver's `interpolateParams=true`, NULL without. A
-`driver.Valuer` is matched by what its `Value` returns, and matches NULL only when that is nil, not
-when it is a nil byte slice. `Eq` binds the value it is given, so use `IsNull` there. Every other
-value is bound as one value, as with `Eq`, and every value is checked as `Eq` checks it: a field
-whose value is a slice or an array (other than a byte slice or a `driver.Valuer`), or whose type is
-a `gorm.Valuer` (such as a JSON column type, also as a nil pointer), returns an error before any
-query. Such a field cannot be a match field, but an item with a `gorm.Valuer` field can still be
+`[]byte` matches empty bytes. On MySQL, a pointer to a nil `json.RawMessage` matches what the driver
+stores for it: empty bytes with the driver's `interpolateParams=true`, NULL without. A node added
+with one setting is therefore not found with the other, and `GetOrAdd` adds a duplicate sibling. Do
+not switch the setting on a tree with data; or, when switching it off, update the empty values of
+that column to NULL once, if no match field is a pointer to an empty, non-nil `json.RawMessage`,
+which both settings store as empty bytes; or leave the pointer nil, which both settings store as
+NULL. A `driver.Valuer` is matched by what its `Value` returns, and matches NULL only when that is
+nil, not when it is a nil byte slice. `Eq` binds the value it is given, so use `IsNull` there. Every
+other value is bound as one value, as with `Eq`, and every value is checked as `Eq` checks it: a
+field whose value is a slice or an array (other than a byte slice or a `driver.Valuer`), or whose
+type is a `gorm.Valuer` (such as a JSON column type, also as a nil pointer), returns an error before
+any query. Such a field cannot be a match field, but an item with a `gorm.Valuer` field can still be
 added. A field with a column default (a `default:` tag, or `autoIncrement`) whose value is the zero
 value, also a nil pointer, returns an error before any query too, because gorm stores the default
 instead of the zero value; any other value, also a pointer to the zero value, is matched as it is.
