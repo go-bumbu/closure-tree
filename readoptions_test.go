@@ -1493,7 +1493,7 @@ const (
 	largeRealParent  = 5
 	largeRealSubtree = 1365
 	// largeTreePairs is the number of closure pairs of the tree: each node is paired with itself
-	// and its ancestors, so a node of level l has l pairs and the levels above give
+	// and its ancestors, so a node of level l has l pairs and levels 1 to 8 give
 	// 1·1 + 2·4 + 3·16 + 4·64 + 5·256 + 6·1024 + 7·4096 + 8·2539 = 56721.
 	largeTreePairs = 56721
 	// largeReadBound is the time one read may take. Without table statistics on SQLite, the
